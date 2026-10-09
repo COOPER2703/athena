@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import time
 from typing import Any, Callable, Mapping
 
+from server.adapters.gemini.translation import translate_response
+from server.adapters.trace import NullTraceSink, emit
 from server.core.commands import (
     CloseLiveConnection,
     Command,
@@ -14,28 +15,20 @@ from server.core.commands import (
 )
 from server.core.events import (
     Event,
-    LlmAudio,
     LlmClosed,
     LlmFailed,
     LlmFailureCause,
     LlmOpened,
-    LlmTranscription,
-    Role,
 )
-from server.core.ports import TraceEntry, TraceSink
+from server.core.ports import TraceSink
 
 _TRACE_SOURCE = "gemini"
 _UPSTREAM_MIME_TYPE = "audio/pcm;rate=16000"
 
-Connector = Callable[[str, Any], Any]
+LiveConnect = Callable[[str, Any], Any]
 
 
-class _NullTraceSink:
-    def emit(self, entry: TraceEntry) -> None:
-        pass
-
-
-def _default_connector(api_key: str) -> Connector:
+def _default_live_connect(api_key: str) -> LiveConnect:
     def connect(model: str, config: Any) -> Any:
         from google import genai
 
@@ -49,9 +42,10 @@ class GeminiLiveAdapter:
     """Adaptateur Gemini Live : Connexion Live ↔ Événements du domaine.
 
     Implémente le port ``LlmSocket``. Il ouvre/ferme une Connexion Live via le
-    ``connector`` injecté, envoie l'audio montant et remonte l'audio descendant,
-    les transcriptions et les défaillances sous forme d'Événements déposés dans
-    une file (``recv``). Aucune politique de Session : le noyau seul décide.
+    ``live_connect`` injecté, envoie l'audio montant et remonte l'audio
+    descendant, les transcriptions et les défaillances sous forme d'Événements
+    déposés dans une file (``recv``). Aucune politique de Session : le noyau
+    seul décide.
 
     L'observabilité passe exclusivement par le ``TraceSink`` injecté (ADR-0004).
     """
@@ -62,16 +56,16 @@ class GeminiLiveAdapter:
         api_key: str,
         model: str,
         voice: str,
-        connector: Connector | None = None,
+        live_connect: LiveConnect | None = None,
         trace_sink: TraceSink | None = None,
     ) -> None:
         self._model = model
         self._voice = voice
-        self._connector: Connector = connector or _default_connector(api_key)
-        self._trace_sink: TraceSink = trace_sink or _NullTraceSink()
+        self._live_connect: LiveConnect = live_connect or _default_live_connect(api_key)
+        self._trace_sink: TraceSink = trace_sink or NullTraceSink()
         self._events: asyncio.Queue[Event] = asyncio.Queue()
         self._context: Any | None = None
-        self._session: Any | None = None
+        self._live: Any | None = None
         self._connection_id = ""
         self._receiver: asyncio.Task[None] | None = None
         self._terminated = False
@@ -81,14 +75,12 @@ class GeminiLiveAdapter:
 
     async def execute(self, command: Command) -> None:
         if isinstance(command, Trace):
-            self._trace_sink.emit(
-                TraceEntry(
-                    timestamp=time.time(),
-                    source=command.source,
-                    kind=command.kind,
-                    payload=dict(command.payload),
-                    level=command.level,
-                )
+            emit(
+                self._trace_sink,
+                command.source,
+                command.kind,
+                payload=command.payload,
+                level=command.level,
             )
             return
         if isinstance(command, OpenLiveConnection):
@@ -102,17 +94,19 @@ class GeminiLiveAdapter:
             return
 
     async def open(self, connection_id: str) -> None:
+        if self._receiver is not None or self._context is not None:
+            await self._shutdown()
         self._connection_id = connection_id
         self._terminated = False
         try:
             config = self._build_config()
-            self._context = self._connector(self._model, config)
-            self._session = await self._context.__aenter__()
+            self._context = self._live_connect(self._model, config)
+            self._live = await self._context.__aenter__()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self._context = None
-            self._session = None
+            self._live = None
             self._emit(
                 "connection_failed",
                 payload={"connection_id": connection_id, "error": str(exc)},
@@ -120,7 +114,7 @@ class GeminiLiveAdapter:
             )
             await self._fail(LlmFailureCause.ERROR)
             return
-        self._receiver = asyncio.create_task(self._receive_loop(self._session))
+        self._receiver = asyncio.create_task(self._receive_loop(self._live))
         self._emit(
             "connected",
             payload={
@@ -131,9 +125,9 @@ class GeminiLiveAdapter:
         )
         await self._events.put(LlmOpened())
 
-    async def _receive_loop(self, session: Any) -> None:
+    async def _receive_loop(self, live: Any) -> None:
         try:
-            async for response in session.receive():
+            async for response in live.receive():
                 await self._handle_response(response)
                 if self._terminated:
                     break
@@ -146,11 +140,6 @@ class GeminiLiveAdapter:
             await self._close_once()
 
     async def _handle_response(self, response: Any) -> None:
-        data = getattr(response, "data", None)
-        if data:
-            await self._events.put(LlmAudio(data=data))
-            return
-
         go_away = getattr(response, "go_away", None)
         if go_away is not None:
             self._emit(
@@ -158,37 +147,18 @@ class GeminiLiveAdapter:
                 payload={"time_left": str(getattr(go_away, "time_left", ""))},
                 level="warning",
             )
-            await self._fail(LlmFailureCause.GO_AWAY)
-            return
-
-        tool_call = getattr(response, "tool_call", None)
-        if tool_call is not None:
+        elif getattr(response, "tool_call", None) is not None:
             self._emit(
                 "tool_call_ignored",
                 payload={"connection_id": self._connection_id},
                 level="warning",
             )
-            return
 
-        server_content = getattr(response, "server_content", None)
-        if server_content is None:
-            return
-
-        input_transcription = getattr(server_content, "input_transcription", None)
-        if input_transcription is not None and getattr(
-            input_transcription, "text", None
-        ):
-            await self._events.put(
-                LlmTranscription(text=input_transcription.text, role=Role.USER)
-            )
-
-        output_transcription = getattr(server_content, "output_transcription", None)
-        if output_transcription is not None and getattr(
-            output_transcription, "text", None
-        ):
-            await self._events.put(
-                LlmTranscription(text=output_transcription.text, role=Role.ASSISTANT)
-            )
+        for event in translate_response(response):
+            if isinstance(event, LlmFailed):
+                await self._fail(event.cause)
+            else:
+                await self._events.put(event)
 
     async def _fail(self, cause: LlmFailureCause) -> None:
         if self._terminated:
@@ -210,7 +180,7 @@ class GeminiLiveAdapter:
 
         context = self._context
         self._context = None
-        self._session = None
+        self._live = None
         if context is None:
             return
         try:
@@ -228,8 +198,8 @@ class GeminiLiveAdapter:
         await self._events.put(LlmClosed())
 
     async def send_audio(self, connection_id: str, data: bytes) -> None:
-        session = self._session
-        if session is None:
+        live = self._live
+        if live is None or self._terminated:
             self._emit(
                 "send_audio_ignored",
                 payload={"connection_id": connection_id},
@@ -239,7 +209,7 @@ class GeminiLiveAdapter:
         try:
             from google.genai import types
 
-            await session.send_realtime_input(
+            await live.send_realtime_input(
                 audio=types.Blob(data=data, mime_type=_UPSTREAM_MIME_TYPE)
             )
         except asyncio.CancelledError:
@@ -271,12 +241,4 @@ class GeminiLiveAdapter:
         payload: Mapping[str, object] | None = None,
         level: str = "info",
     ) -> None:
-        self._trace_sink.emit(
-            TraceEntry(
-                timestamp=time.time(),
-                source=_TRACE_SOURCE,
-                kind=kind,
-                payload=dict(payload or {}),
-                level=level,
-            )
-        )
+        emit(self._trace_sink, _TRACE_SOURCE, kind, payload=payload, level=level)
