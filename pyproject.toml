@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Athena shared protocol — frozen Protobuf schema + generation chain"
 requires-python = ">=3.12"
 dependencies = [
+    "google-genai>=2.12.1",
     "protobuf==7.35.1",
     "websockets>=15.0",
     "pyaudio>=0.2.14",
