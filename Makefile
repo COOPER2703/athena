@@ -6,4 +6,4 @@ generate:
 	$(PYTHON) protocol/proto/generate.py
 
 test:
-	$(PYTHON) -m pytest protocol/tests server/tests
+	$(PYTHON) -m pytest protocol/tests server/tests client/tests
