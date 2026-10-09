@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 import uuid
 from dataclasses import dataclass
 from typing import Mapping
@@ -20,6 +19,7 @@ from protocol import (
     decode,
     encode,
 )
+from server.adapters.trace import NullTraceSink, emit
 from server.adapters.transport.translation import outbound_message, translate_inbound
 from server.core.commands import (
     AnnounceSessionEnded,
@@ -29,14 +29,9 @@ from server.core.commands import (
     Trace,
 )
 from server.core.events import ClientRegistered, Event
-from server.core.ports import TraceEntry, TraceSink
+from server.core.ports import TraceSink
 
 _TRACE_SOURCE = "transport"
-
-
-class _NullTraceSink:
-    def emit(self, entry: TraceEntry) -> None:
-        pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +65,7 @@ class WebSocketTransport:
         self._host = host
         self._port = port
         self._server_tools = list(server_tools or [])
-        self._trace_sink: TraceSink = trace_sink or _NullTraceSink()
+        self._trace_sink: TraceSink = trace_sink or NullTraceSink()
         self._clients: dict[str, ClientConnection] = {}
         self._events: asyncio.Queue[Event] = asyncio.Queue()
         self._server: Server | None = None
@@ -101,14 +96,12 @@ class WebSocketTransport:
 
     async def execute(self, command: Command) -> None:
         if isinstance(command, Trace):
-            self._trace_sink.emit(
-                TraceEntry(
-                    timestamp=time.time(),
-                    source=command.source,
-                    kind=command.kind,
-                    payload=dict(command.payload),
-                    level=command.level,
-                )
+            emit(
+                self._trace_sink,
+                command.source,
+                command.kind,
+                payload=command.payload,
+                level=command.level,
             )
             return
 
@@ -293,12 +286,4 @@ class WebSocketTransport:
         payload: Mapping[str, object] | None = None,
         level: str = "info",
     ) -> None:
-        self._trace_sink.emit(
-            TraceEntry(
-                timestamp=time.time(),
-                source=_TRACE_SOURCE,
-                kind=kind,
-                payload=dict(payload or {}),
-                level=level,
-            )
-        )
+        emit(self._trace_sink, _TRACE_SOURCE, kind, payload=payload, level=level)

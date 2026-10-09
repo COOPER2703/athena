@@ -5,11 +5,13 @@ from pathlib import Path
 
 import ast_guard
 
-TRANSPORT_DIR = Path(__file__).resolve().parent.parent / "adapters" / "transport"
+GEMINI_DIR = Path(__file__).resolve().parent.parent / "adapters" / "gemini"
+
+ENVIRONMENT_NAMES = {"environ", "getenv"}
 
 
-def test_transport_package_contains_modules() -> None:
-    assert sorted(TRANSPORT_DIR.glob("*.py"))
+def test_gemini_package_contains_modules() -> None:
+    assert sorted(GEMINI_DIR.glob("*.py"))
 
 
 def test_guard_catches_forbidden_submodule_import_forms() -> None:
@@ -34,15 +36,23 @@ def test_guard_allows_legitimate_core_seams() -> None:
     assert not (ast_guard.imports(tree) & ast_guard.FORBIDDEN_MODULES)
 
 
-def test_transport_imports_no_session_rules_or_logging() -> None:
-    for path in sorted(TRANSPORT_DIR.glob("*.py")):
+def test_gemini_imports_no_session_rules_or_logging() -> None:
+    for path in sorted(GEMINI_DIR.glob("*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
         found = ast_guard.imports(tree) & ast_guard.FORBIDDEN_MODULES
         assert not found, f"{path.name} imports forbidden modules: {sorted(found)}"
 
 
-def test_transport_has_no_active_client_or_session_state() -> None:
-    for path in sorted(TRANSPORT_DIR.glob("*.py")):
+def test_gemini_has_no_active_client_or_session_state() -> None:
+    for path in sorted(GEMINI_DIR.glob("*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
         found = ast_guard.names(tree) & ast_guard.FORBIDDEN_NAMES
         assert not found, f"{path.name} references forbidden names: {sorted(found)}"
+
+
+def test_gemini_reads_no_environment_variables() -> None:
+    for path in sorted(GEMINI_DIR.glob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        assert "os" not in ast_guard.imports(tree), f"{path.name} imports os"
+        found = ast_guard.names(tree) & ENVIRONMENT_NAMES
+        assert not found, f"{path.name} references env names: {sorted(found)}"
