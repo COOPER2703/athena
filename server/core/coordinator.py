@@ -5,11 +5,13 @@ from protocol import SessionEndReason
 from server.core.commands import (
     AnnounceSessionEnded,
     AnnounceSessionStarted,
+    CancelIdleTimer,
     CloseLiveConnection,
     Command,
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
+    StartIdleTimer,
     Trace,
 )
 from server.core.events import (
@@ -29,6 +31,7 @@ from server.core.events import (
 from server.core.state import SessionState
 
 _TRACE_SOURCE = "core"
+_IDLE_TIMEOUT = 30.0
 
 
 class Coordinator:
@@ -88,16 +91,11 @@ class Coordinator:
         ]
 
     def _on_session_requested(self, event: SessionRequested) -> list[Command]:
+        commands: list[Command] = []
         if self._state is not SessionState.IDLE:
-            # Replacement policy belongs to #9; record but do not act.
-            return [
-                self._trace(
-                    "SessionRequested",
-                    from_state=self._state,
-                    to_state=self._state,
-                    client_id=event.client_id,
-                )
-            ]
+            commands.extend(
+                self._teardown(SessionEndReason.REPLACED, "Replaced")
+            )
 
         self._session_counter += 1
         self._session_id = f"s{self._session_counter}"
@@ -105,18 +103,23 @@ class Coordinator:
         self._auto = event.auto
         from_state = self._state
         self._state = SessionState.LIVE_CONNECTING
-        return [
-            OpenLiveConnection(session_id=self._session_id),
+        commands.append(OpenLiveConnection(session_id=self._session_id))
+        commands.append(
+            StartIdleTimer(session_id=self._session_id, timeout=_IDLE_TIMEOUT)
+        )
+        commands.append(
             self._trace(
                 "SessionRequested",
                 from_state=from_state,
                 to_state=self._state,
                 client_id=event.client_id,
-            ),
-        ]
+            )
+        )
+        return commands
 
     def _on_client_audio(self, event: ClientAudio) -> list[Command]:
         if self._state in (SessionState.LIVE_ACTIVE, SessionState.SESSION_VISIBLE):
+            # Raw mic bytes are not voice activity: never re-arm the idle timer.
             return [
                 SendAudioToLlm(session_id=self._session_id, data=event.data),
                 self._trace(
@@ -136,8 +139,18 @@ class Coordinator:
         ]
 
     def _on_client_interrupt(self, event: ClientInterrupt) -> list[Command]:
-        # Barge-in policy belongs to #9; record but do not act.
         client_id = event.client_id or self._client_id
+        if self._state is SessionState.SESSION_VISIBLE:
+            # Barge-in: the client flushes its own playback; the Session stays
+            # visible. No command is emitted for the desktop to stop audio.
+            return [
+                self._trace(
+                    "barge_in",
+                    from_state=self._state,
+                    to_state=self._state,
+                    client_id=client_id,
+                )
+            ]
         return [
             self._trace(
                 "ClientInterrupt",
@@ -163,9 +176,13 @@ class Coordinator:
     def _on_llm_audio(self, event: LlmAudio) -> list[Command]:
         if self._state is SessionState.LIVE_ACTIVE:
             self._audio_buffer.append(event.data)
-            return self._become_visible("LlmAudio")
+            return [
+                self._rearm_timer(),
+                *self._become_visible("LlmAudio"),
+            ]
         if self._state is SessionState.SESSION_VISIBLE:
             return [
+                self._rearm_timer(),
                 SendAudioToClient(client_id=self._client_id, data=event.data),
                 self._trace(
                     "LlmAudio",
@@ -184,6 +201,16 @@ class Coordinator:
         ]
 
     def _on_llm_transcription(self, event: LlmTranscription) -> list[Command]:
+        if event.role is Role.USER and self._state is not SessionState.IDLE:
+            return [
+                self._rearm_timer(),
+                self._trace(
+                    "LlmTranscription",
+                    from_state=self._state,
+                    to_state=self._state,
+                    client_id=self._client_id,
+                ),
+            ]
         if event.role is Role.ASSISTANT and self._state is SessionState.LIVE_ACTIVE:
             return self._become_visible("LlmTranscription")
         return [
@@ -201,7 +228,7 @@ class Coordinator:
             SessionState.LIVE_ACTIVE,
             SessionState.SESSION_VISIBLE,
         ):
-            return self._close(SessionEndReason.NORMAL)
+            return self._teardown(SessionEndReason.NORMAL, "LlmClosed")
         return [
             self._trace(
                 "LlmClosed",
@@ -212,7 +239,10 @@ class Coordinator:
         ]
 
     def _on_llm_failed(self, event: LlmFailed) -> list[Command]:
-        # Failure policy belongs to #9; the cause is surfaced for diagnosis.
+        if self._state is not SessionState.IDLE:
+            return self._teardown(
+                SessionEndReason.ERROR, "LlmFailed", cause=event.cause.value
+            )
         return [
             self._trace(
                 "LlmFailed",
@@ -224,7 +254,12 @@ class Coordinator:
         ]
 
     def _on_timer_fired(self, event: TimerFired) -> list[Command]:
-        # Idle-timeout policy belongs to #9; record but do not act.
+        if (
+            self._session_id
+            and event.session_id == self._session_id
+            and self._state is not SessionState.IDLE
+        ):
+            return self._teardown(SessionEndReason.TIMEOUT, "Timeout")
         return [
             self._trace(
                 "TimerFired",
@@ -233,6 +268,9 @@ class Coordinator:
                 client_id=self._client_id,
             )
         ]
+
+    def _rearm_timer(self) -> StartIdleTimer:
+        return StartIdleTimer(session_id=self._session_id, timeout=_IDLE_TIMEOUT)
 
     def _become_visible(self, kind: str) -> list[Command]:
         from_state = self._state
@@ -255,31 +293,38 @@ class Coordinator:
         )
         return commands
 
-    def _close(self, reason: SessionEndReason) -> list[Command]:
+    def _teardown(
+        self,
+        reason: SessionEndReason,
+        kind: str,
+        *,
+        cause: str | None = None,
+    ) -> list[Command]:
+        """Single deterministic termination path.
+
+        Ordering is fixed: cancel the idle timer, close the Live connection,
+        announce the Session end, then trace. Afterwards the Coordinator is
+        back to Idle with no residual identity, so no zombie Session can linger.
+        """
         from_state = self._state
+        old_session_id = self._session_id
+        old_client_id = self._client_id
         self._state = SessionState.CLOSING
         commands: list[Command] = [
-            CloseLiveConnection(session_id=self._session_id),
-            AnnounceSessionEnded(client_id=self._client_id, reason=reason),
+            CancelIdleTimer(session_id=old_session_id),
+            CloseLiveConnection(session_id=old_session_id),
+            AnnounceSessionEnded(client_id=old_client_id, reason=reason),
             self._trace(
-                "LlmClosed",
+                kind,
                 from_state=from_state,
-                to_state=self._state,
-                client_id=self._client_id,
+                to_state=SessionState.IDLE,
+                client_id=old_client_id,
                 reason=reason.name,
+                cause=cause,
+                session_id=old_session_id,
             ),
         ]
-        closing_state = self._state
         self._state = SessionState.IDLE
-        commands.append(
-            self._trace(
-                "SessionClosed",
-                from_state=closing_state,
-                to_state=self._state,
-                client_id=self._client_id,
-                reason=reason.name,
-            )
-        )
         self._reset()
         return commands
 
@@ -298,9 +343,10 @@ class Coordinator:
         client_id: str = "",
         reason: str | None = None,
         cause: str | None = None,
+        session_id: str | None = None,
     ) -> Trace:
         payload: dict[str, object] = {
-            "session_id": self._session_id,
+            "session_id": self._session_id if session_id is None else session_id,
             "client_id": client_id,
             "from_state": from_state.value,
             "to_state": to_state.value,

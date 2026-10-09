@@ -19,7 +19,6 @@ from server.core import (
     LlmAudio,
     LlmClosed,
     LlmFailed,
-    LlmFailureCause,
     LlmOpened,
     LlmSocket,
     LlmTranscription,
@@ -64,9 +63,12 @@ def test_tap_then_athena_speaks_makes_session_visible():
 
     assert effects(commands) == [
         OpenLiveConnection(session_id="s1"),
+        StartIdleTimer(session_id="s1"),
         SendAudioToLlm(session_id="s1", data=b"mic"),
+        StartIdleTimer(session_id="s1"),
         AnnounceSessionStarted(client_id="c1", auto=False),
         SendAudioToClient(client_id="c1", data=b"hello"),
+        CancelIdleTimer(session_id="s1"),
         CloseLiveConnection(session_id="s1"),
         AnnounceSessionEnded(client_id="c1", reason=SessionEndReason.NORMAL),
     ]
@@ -87,7 +89,9 @@ def test_assistant_transcription_can_make_session_visible():
 
     assert effects(commands) == [
         OpenLiveConnection(session_id="s1"),
+        StartIdleTimer(session_id="s1"),
         AnnounceSessionStarted(client_id="c1", auto=False),
+        StartIdleTimer(session_id="s1"),
         SendAudioToClient(client_id="c1", data=b"later"),
     ]
 
@@ -121,6 +125,8 @@ def test_silent_live_connection_never_announces_a_session():
     assert AnnounceSessionStarted not in [type(c) for c in commands]
     assert effects(commands) == [
         OpenLiveConnection(session_id="s1"),
+        StartIdleTimer(session_id="s1"),
+        CancelIdleTimer(session_id="s1"),
         CloseLiveConnection(session_id="s1"),
         AnnounceSessionEnded(client_id="c1", reason=SessionEndReason.NORMAL),
     ]
@@ -207,37 +213,4 @@ def test_frozen_dataclasses_reject_mutation():
 def test_ports_exist():
     for port in (ClientLink, LlmSocket, Clock, TraceSink):
         assert isinstance(port, type)
-
-
-@pytest.mark.parametrize(
-    "event",
-    [
-        ClientInterrupt(client_id="c1"),
-        TimerFired(session_id="s1"),
-        LlmFailed(cause=LlmFailureCause.ERROR),
-    ],
-)
-def test_policy_events_are_recorded_without_acting(event):
-    coordinator = Coordinator()
-    drive(coordinator, [SessionRequested(client_id="c1"), LlmOpened()])
-
-    commands = coordinator.handle(event)
-
-    assert effects(commands) == []
-    assert any(isinstance(command, Trace) for command in commands)
-    assert coordinator.state is SessionState.LIVE_ACTIVE
-
-
-def test_llm_failed_trace_distinguishes_go_away_from_error():
-    coordinator = Coordinator()
-    coordinator.handle(SessionRequested(client_id="c1"))
-    coordinator.handle(LlmOpened())
-
-    for cause, expected in (
-        (LlmFailureCause.ERROR, "error"),
-        (LlmFailureCause.GO_AWAY, "go_away"),
-    ):
-        trace = coordinator.handle(LlmFailed(cause=cause))[0]
-        assert isinstance(trace, Trace)
-        assert trace.payload["cause"] == expected
 
