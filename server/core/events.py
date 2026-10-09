@@ -65,8 +65,13 @@ class LlmFailed:
 
 
 @dataclass(frozen=True, slots=True)
+class ShutdownRequested:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class TimerFired:
-    session_id: str = ""
+    connection_id: str
 
 
 Event = Union[
@@ -79,5 +84,6 @@ Event = Union[
     LlmTranscription,
     LlmClosed,
     LlmFailed,
+    ShutdownRequested,
     TimerFired,
 ]

@@ -5,6 +5,7 @@ import pytest
 from protocol import SessionEndReason
 
 from server.core import (
+    IDLE_TIMEOUT,
     AnnounceSessionEnded,
     AnnounceSessionStarted,
     CancelIdleTimer,
@@ -13,6 +14,7 @@ from server.core import (
     CloseLiveConnection,
     Coordinator,
     LlmAudio,
+    LlmClosed,
     LlmFailed,
     LlmFailureCause,
     LlmOpened,
@@ -23,6 +25,7 @@ from server.core import (
     SendAudioToLlm,
     SessionRequested,
     SessionState,
+    ShutdownRequested,
     StartIdleTimer,
     TimerFired,
     Trace,
@@ -56,8 +59,8 @@ def test_timer_is_armed_when_session_requested_even_before_any_speech():
     commands = coordinator.handle(SessionRequested(client_id="c1"))
 
     assert effects(commands) == [
-        OpenLiveConnection(session_id="s1"),
-        StartIdleTimer(session_id="s1"),
+        OpenLiveConnection(connection_id="s1"),
+        StartIdleTimer(connection_id="s1", timeout=IDLE_TIMEOUT),
     ]
 
 
@@ -65,11 +68,25 @@ def test_idle_timeout_tears_down_current_session():
     coordinator = Coordinator()
     drive(coordinator, live_session())
 
-    commands = coordinator.handle(TimerFired(session_id="s1"))
+    commands = coordinator.handle(TimerFired(connection_id="s1"))
 
     assert effects(commands) == [
-        CancelIdleTimer(session_id="s1"),
-        CloseLiveConnection(session_id="s1"),
+        CancelIdleTimer(connection_id="s1"),
+        CloseLiveConnection(connection_id="s1"),
+        AnnounceSessionEnded(client_id="c1", reason=SessionEndReason.TIMEOUT),
+    ]
+    assert coordinator.state is SessionState.IDLE
+
+
+def test_idle_timeout_tears_down_connection_that_never_became_visible():
+    coordinator = Coordinator()
+    drive(coordinator, [SessionRequested(client_id="c1"), LlmOpened()])
+
+    commands = coordinator.handle(TimerFired(connection_id="s1"))
+
+    assert effects(commands) == [
+        CancelIdleTimer(connection_id="s1"),
+        CloseLiveConnection(connection_id="s1"),
         AnnounceSessionEnded(client_id="c1", reason=SessionEndReason.TIMEOUT),
     ]
     assert coordinator.state is SessionState.IDLE
@@ -81,7 +98,9 @@ def test_user_transcription_rearms_idle_timer():
 
     commands = coordinator.handle(LlmTranscription(role=Role.USER, text="salut"))
 
-    assert StartIdleTimer(session_id="s1") in effects(commands)
+    assert (
+        StartIdleTimer(connection_id="s1", timeout=IDLE_TIMEOUT) in effects(commands)
+    )
 
 
 def test_llm_audio_rearms_idle_timer():
@@ -90,7 +109,9 @@ def test_llm_audio_rearms_idle_timer():
 
     commands = coordinator.handle(LlmAudio(data=b"more"))
 
-    assert StartIdleTimer(session_id="s1") in effects(commands)
+    assert (
+        StartIdleTimer(connection_id="s1", timeout=IDLE_TIMEOUT) in effects(commands)
+    )
 
 
 def test_client_audio_does_not_rearm_idle_timer():
@@ -99,7 +120,9 @@ def test_client_audio_does_not_rearm_idle_timer():
 
     commands = coordinator.handle(ClientAudio(data=b"mic"))
 
-    assert effects(commands) == [SendAudioToLlm(session_id="s1", data=b"mic")]
+    assert effects(commands) == [
+        SendAudioToLlm(connection_id="s1", data=b"mic")
+    ]
 
 
 def test_assistant_transcription_does_not_rearm_idle_timer():
@@ -134,17 +157,39 @@ def test_second_session_request_replaces_the_first_before_opening_a_new_one():
 
     eff = effects(commands)
     assert eff == [
-        CancelIdleTimer(session_id="s1"),
-        CloseLiveConnection(session_id="s1"),
+        CancelIdleTimer(connection_id="s1"),
+        CloseLiveConnection(connection_id="s1"),
         AnnounceSessionEnded(client_id="c1", reason=SessionEndReason.REPLACED),
-        OpenLiveConnection(session_id="s2"),
-        StartIdleTimer(session_id="s2"),
+        OpenLiveConnection(connection_id="s2"),
+        StartIdleTimer(connection_id="s2", timeout=IDLE_TIMEOUT),
     ]
     assert eff.index(
         AnnounceSessionEnded(client_id="c1", reason=SessionEndReason.REPLACED)
-    ) < eff.index(OpenLiveConnection(session_id="s2"))
-    assert coordinator.session_id == "s2"
+    ) < eff.index(OpenLiveConnection(connection_id="s2"))
+    assert coordinator.connection_id == "s2"
     assert coordinator.state is SessionState.LIVE_CONNECTING
+
+
+def test_replacement_trace_records_state_before_teardown():
+    coordinator = Coordinator()
+    drive(coordinator, live_session(client_id="c1"))
+
+    commands = coordinator.handle(SessionRequested(client_id="c2"))
+
+    requested = next(t for t in traces(commands) if t.kind == "SessionRequested")
+    assert requested.payload["from_state"] == "SessionVisible"
+    assert requested.payload["to_state"] == "LiveConnecting"
+
+
+def test_replacing_a_never_visible_connection_still_announces_session_ended():
+    coordinator = Coordinator()
+    drive(coordinator, [SessionRequested(client_id="c1"), LlmOpened()])
+
+    commands = coordinator.handle(SessionRequested(client_id="c2"))
+
+    assert AnnounceSessionEnded(
+        client_id="c1", reason=SessionEndReason.REPLACED
+    ) in effects(commands)
 
 
 def test_replacement_never_leaves_two_live_connections():
@@ -167,12 +212,12 @@ def test_llm_failed_closes_connection_then_ends_session_with_error(cause):
     commands = coordinator.handle(LlmFailed(cause=cause))
 
     assert effects(commands) == [
-        CancelIdleTimer(session_id="s1"),
-        CloseLiveConnection(session_id="s1"),
+        CancelIdleTimer(connection_id="s1"),
+        CloseLiveConnection(connection_id="s1"),
         AnnounceSessionEnded(client_id="c1", reason=SessionEndReason.ERROR),
     ]
     assert coordinator.state is SessionState.IDLE
-    assert coordinator.session_id == ""
+    assert coordinator.connection_id == ""
 
 
 def test_llm_failed_trace_distinguishes_go_away_from_raw_error():
@@ -215,16 +260,54 @@ def test_llm_failed_leaves_no_residual_commands_or_zombie_session():
     assert coordinator.state is SessionState.IDLE
 
 
+def test_shutdown_requested_tears_down_active_session():
+    coordinator = Coordinator()
+    drive(coordinator, live_session())
+
+    commands = coordinator.handle(ShutdownRequested())
+
+    assert effects(commands) == [
+        CancelIdleTimer(connection_id="s1"),
+        CloseLiveConnection(connection_id="s1"),
+        AnnounceSessionEnded(client_id="c1", reason=SessionEndReason.SHUTDOWN),
+    ]
+    assert coordinator.state is SessionState.IDLE
+
+
+def test_shutdown_requested_while_idle_only_traces():
+    coordinator = Coordinator()
+
+    commands = coordinator.handle(ShutdownRequested())
+
+    assert effects(commands) == []
+    assert any(isinstance(command, Trace) for command in commands)
+    assert coordinator.state is SessionState.IDLE
+
+
+def test_teardown_traces_transition_into_closing_then_closing_to_idle():
+    coordinator = Coordinator()
+    drive(coordinator, live_session())
+
+    commands = coordinator.handle(LlmClosed())
+
+    ts = traces(commands)
+    into_closing = next(t for t in ts if t.payload["to_state"] == "Closing")
+    assert into_closing.payload["from_state"] == "SessionVisible"
+    closed = next(t for t in ts if t.kind == "SessionClosed")
+    assert closed.payload["from_state"] == "Closing"
+    assert closed.payload["to_state"] == "Idle"
+
+
 def test_stale_timer_after_replacement_does_not_end_the_new_session():
     coordinator = Coordinator()
     drive(coordinator, [SessionRequested(client_id="c1"), LlmOpened()])
     coordinator.handle(SessionRequested(client_id="c2"))
 
-    commands = coordinator.handle(TimerFired(session_id="s1"))
+    commands = coordinator.handle(TimerFired(connection_id="s1"))
 
     assert effects(commands) == []
     assert coordinator.state is SessionState.LIVE_CONNECTING
-    assert coordinator.session_id == "s2"
+    assert coordinator.connection_id == "s2"
 
 
 def test_current_timer_after_replacement_ends_the_new_session():
@@ -232,9 +315,27 @@ def test_current_timer_after_replacement_ends_the_new_session():
     drive(coordinator, [SessionRequested(client_id="c1"), LlmOpened()])
     coordinator.handle(SessionRequested(client_id="c2"))
 
-    commands = coordinator.handle(TimerFired(session_id="s2"))
+    commands = coordinator.handle(TimerFired(connection_id="s2"))
 
     assert AnnounceSessionEnded(
         client_id="c2", reason=SessionEndReason.TIMEOUT
     ) in effects(commands)
     assert coordinator.state is SessionState.IDLE
+
+
+def test_timer_fired_requires_connection_id():
+    with pytest.raises(TypeError):
+        TimerFired()  # type: ignore[call-arg]
+
+
+def test_start_idle_timer_requires_timeout():
+    with pytest.raises(TypeError):
+        StartIdleTimer(connection_id="s1")  # type: ignore[call-arg]
+
+
+def test_idle_timer_uses_the_shared_constant():
+    coordinator = Coordinator()
+    commands = coordinator.handle(SessionRequested(client_id="c1"))
+
+    timer = next(c for c in commands if isinstance(c, StartIdleTimer))
+    assert timer.timeout == IDLE_TIMEOUT

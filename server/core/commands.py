@@ -8,17 +8,17 @@ from protocol import SessionEndReason
 
 @dataclass(frozen=True, slots=True)
 class OpenLiveConnection:
-    session_id: str
+    connection_id: str
 
 
 @dataclass(frozen=True, slots=True)
 class CloseLiveConnection:
-    session_id: str
+    connection_id: str
 
 
 @dataclass(frozen=True, slots=True)
 class SendAudioToLlm:
-    session_id: str
+    connection_id: str
     data: bytes
 
 
@@ -42,13 +42,13 @@ class AnnounceSessionEnded:
 
 @dataclass(frozen=True, slots=True)
 class StartIdleTimer:
-    session_id: str
-    timeout: float = 30.0
+    connection_id: str
+    timeout: float
 
 
 @dataclass(frozen=True, slots=True)
 class CancelIdleTimer:
-    session_id: str
+    connection_id: str
 
 
 @dataclass(frozen=True, slots=True)

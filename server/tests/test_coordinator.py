@@ -7,8 +7,10 @@ import pytest
 from protocol import SessionEndReason
 
 from server.core import (
+    IDLE_TIMEOUT,
     AnnounceSessionEnded,
     AnnounceSessionStarted,
+    CancelIdleTimer,
     ClientAudio,
     ClientInterrupt,
     ClientLink,
@@ -28,8 +30,8 @@ from server.core import (
     SendAudioToLlm,
     SessionRequested,
     SessionState,
+    ShutdownRequested,
     StartIdleTimer,
-    CancelIdleTimer,
     TimerFired,
     Trace,
     TraceSink,
@@ -62,14 +64,14 @@ def test_tap_then_athena_speaks_makes_session_visible():
     )
 
     assert effects(commands) == [
-        OpenLiveConnection(session_id="s1"),
-        StartIdleTimer(session_id="s1"),
-        SendAudioToLlm(session_id="s1", data=b"mic"),
-        StartIdleTimer(session_id="s1"),
+        OpenLiveConnection(connection_id="s1"),
+        StartIdleTimer(connection_id="s1", timeout=IDLE_TIMEOUT),
+        SendAudioToLlm(connection_id="s1", data=b"mic"),
+        StartIdleTimer(connection_id="s1", timeout=IDLE_TIMEOUT),
         AnnounceSessionStarted(client_id="c1", auto=False),
         SendAudioToClient(client_id="c1", data=b"hello"),
-        CancelIdleTimer(session_id="s1"),
-        CloseLiveConnection(session_id="s1"),
+        CancelIdleTimer(connection_id="s1"),
+        CloseLiveConnection(connection_id="s1"),
         AnnounceSessionEnded(client_id="c1", reason=SessionEndReason.NORMAL),
     ]
     assert coordinator.state is SessionState.IDLE
@@ -88,10 +90,10 @@ def test_assistant_transcription_can_make_session_visible():
     )
 
     assert effects(commands) == [
-        OpenLiveConnection(session_id="s1"),
-        StartIdleTimer(session_id="s1"),
+        OpenLiveConnection(connection_id="s1"),
+        StartIdleTimer(connection_id="s1", timeout=IDLE_TIMEOUT),
         AnnounceSessionStarted(client_id="c1", auto=False),
-        StartIdleTimer(session_id="s1"),
+        StartIdleTimer(connection_id="s1", timeout=IDLE_TIMEOUT),
         SendAudioToClient(client_id="c1", data=b"later"),
     ]
 
@@ -123,12 +125,12 @@ def test_silent_live_connection_never_announces_a_session():
     )
 
     assert AnnounceSessionStarted not in [type(c) for c in commands]
+    assert AnnounceSessionEnded not in [type(c) for c in commands]
     assert effects(commands) == [
-        OpenLiveConnection(session_id="s1"),
-        StartIdleTimer(session_id="s1"),
-        CancelIdleTimer(session_id="s1"),
-        CloseLiveConnection(session_id="s1"),
-        AnnounceSessionEnded(client_id="c1", reason=SessionEndReason.NORMAL),
+        OpenLiveConnection(connection_id="s1"),
+        StartIdleTimer(connection_id="s1", timeout=IDLE_TIMEOUT),
+        CancelIdleTimer(connection_id="s1"),
+        CloseLiveConnection(connection_id="s1"),
     ]
 
 
@@ -157,13 +159,14 @@ def test_trace_carries_observability_shape():
     assert trace.source == "core"
     assert trace.kind == "SessionRequested"
     assert trace.level == "info"
-    assert trace.payload["session_id"] == "s1"
+    assert trace.payload["connection_id"] == "s1"
+    assert trace.payload["session_id"] == ""
     assert trace.payload["from_state"] == "Idle"
     assert trace.payload["to_state"] == "LiveConnecting"
     assert trace.payload["client_id"] == "c1"
 
 
-def test_session_ids_are_monotonic_and_deterministic():
+def test_connection_ids_are_monotonic_and_deterministic():
     first = Coordinator()
     drive(
         first,
@@ -173,7 +176,22 @@ def test_session_ids_are_monotonic_and_deterministic():
             SessionRequested(client_id="c1"),
         ],
     )
-    assert first.session_id == "s2"
+    assert first.connection_id == "s2"
+    assert first.session_id == ""
+
+
+def test_visibility_assigns_session_id_to_the_connection():
+    coordinator = Coordinator()
+    drive(
+        coordinator,
+        [
+            SessionRequested(client_id="c1"),
+            LlmOpened(),
+            LlmAudio(data=b"hi"),
+        ],
+    )
+    assert coordinator.connection_id == "s1"
+    assert coordinator.session_id == "s1"
 
 
 def test_events_and_commands_are_frozen_slots_dataclasses():
@@ -187,6 +205,7 @@ def test_events_and_commands_are_frozen_slots_dataclasses():
         LlmTranscription,
         LlmClosed,
         LlmFailed,
+        ShutdownRequested,
         TimerFired,
         OpenLiveConnection,
         CloseLiveConnection,
@@ -213,4 +232,3 @@ def test_frozen_dataclasses_reject_mutation():
 def test_ports_exist():
     for port in (ClientLink, LlmSocket, Clock, TraceSink):
         assert isinstance(port, type)
-
