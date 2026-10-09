@@ -5,7 +5,6 @@ from typing import Union
 from protocol import (
     Audio,
     Interrupt,
-    SessionEnd,
     SessionEnded,
     SessionStart,
     SessionStarted,
@@ -19,9 +18,30 @@ from server.core.commands import (
 from server.core.events import (
     ClientAudio,
     ClientInterrupt,
+    ClientToolResult,
     Event,
     SessionRequested,
 )
+
+
+# Reserved seams — intentional T1 deferrals, not omissions.
+#
+# Outbound ``Text`` and ``Error``: the spec lists them as server → client
+# messages, but no core Command produces them in T1. ``Error`` is emitted by
+# the adapter itself on a rejected Register (transport-originated), and the
+# desktop client ignores ``Text``. Both stay deferred until a core Command
+# produces them; ``outbound_message`` therefore maps none of them.
+#
+# ``ToolCall`` / client Tools: no cross-client Tool routing exists in T1, so
+# ``ClientLink.send_tool_call`` is a reserved no-op and ``client_tools`` stays
+# empty. The inbound counterpart is the reserved ``ClientToolResult`` event.
+#
+# Broadcast: core is single-client in T1 (one visible Session), so every
+# outbound Command is targeted by ``client_id``. Any broadcast is an adapter
+# detail, deliberately not modelled in the core and deferred until needed.
+#
+# Unknown or non-transport Commands are silently ignored (no wire message, no
+# crash): execute() must never fail the connection on a Command it does not own.
 
 
 def translate_inbound(client_id: str, message: object) -> Event | None:
@@ -29,7 +49,10 @@ def translate_inbound(client_id: str, message: object) -> Event | None:
 
     Renvoie ``None`` pour les messages que l'adaptateur traite lui-même
     (``Register``, ``Ping``, ``Pong``) ou qui n'ont pas d'Événement noyau en T1
-    (``ToolResult``, ``SessionEnd``).
+    (``SessionEnd``).
+
+    ``ToolResult`` est traduit vers ``ClientToolResult``, un seam réservé : le
+    noyau l'accepte et le trace, mais aucun routage de Tool n'existe encore.
     """
     if isinstance(message, Audio):
         return ClientAudio(data=message.data)
@@ -37,6 +60,10 @@ def translate_inbound(client_id: str, message: object) -> Event | None:
         return SessionRequested(client_id=client_id)
     if isinstance(message, Interrupt):
         return ClientInterrupt(client_id=client_id)
+    if isinstance(message, ToolResult):
+        return ClientToolResult(
+            tool_id=message.id, name=message.name, result_json=message.result_json
+        )
     return None
 
 

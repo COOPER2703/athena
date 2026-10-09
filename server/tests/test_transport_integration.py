@@ -1,19 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
-from typing import AsyncIterator, Callable
 
 import pytest
 import websockets
-from websockets.asyncio.client import ClientConnection
 
+from conftest import RecordingTraceSink, _url, register, running_transport, wait_until
 from protocol import (
     Audio,
     Interrupt,
     Ping,
     Pong,
-    Register,
     Registered,
     SessionEnd,
     SessionEndReason,
@@ -39,58 +36,12 @@ from server.core.events import (
     ClientAudio,
     ClientInterrupt,
     ClientRegistered,
+    ClientToolResult,
     Event,
     LlmAudio,
     LlmClosed,
     LlmOpened,
 )
-from server.core.ports import TraceEntry
-
-
-class RecordingTraceSink:
-    def __init__(self) -> None:
-        self.entries: list[TraceEntry] = []
-
-    def emit(self, entry: TraceEntry) -> None:
-        self.entries.append(entry)
-
-    def of_kind(self, kind: str) -> list[TraceEntry]:
-        return [entry for entry in self.entries if entry.kind == kind]
-
-
-async def wait_until(predicate: Callable[[], bool], timeout: float = 1.0) -> None:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while not predicate():
-        if loop.time() > deadline:
-            raise AssertionError("condition not met in time")
-        await asyncio.sleep(0.001)
-
-
-@asynccontextmanager
-async def running_transport(
-    *, sink: RecordingTraceSink | None = None
-) -> AsyncIterator[WebSocketTransport]:
-    transport = WebSocketTransport(host="127.0.0.1", port=0, trace_sink=sink)
-    await transport.start()
-    try:
-        yield transport
-    finally:
-        await transport.stop()
-
-
-def _url(transport: WebSocketTransport) -> str:
-    return f"ws://127.0.0.1:{transport.port}"
-
-
-async def _register(
-    ws: ClientConnection, *, client_name: str, platform: str = "linux"
-) -> Registered:
-    """Register without touching the core event queue (the kernel loop owns recv)."""
-    await ws.send(encode(Register(client_name=client_name, platform=platform)))
-    response = decode(await asyncio.wait_for(ws.recv(), 1.0))
-    assert isinstance(response, Registered)
-    return response
 
 
 def _produced(commands: list[Command], command_type: type) -> bool:
@@ -103,7 +54,7 @@ async def _drain_registered(transport: WebSocketTransport, registered: Registere
     assert event.client_id == registered.client_id
 
 
-async def _kernel_loop(
+async def _core_loop(
     transport: WebSocketTransport, coordinator: Coordinator, seen: list[Command]
 ) -> None:
     """The tiny ownership loop ticket #6 will use."""
@@ -126,16 +77,18 @@ async def _deliver(
         await transport.execute(command)
 
 
-def test_session_start_drives_real_kernel_and_wire_sequence() -> None:
+def test_session_start_drives_real_core_and_wire_sequence() -> None:
     async def scenario() -> None:
         sink = RecordingTraceSink()
         async with running_transport(sink=sink) as transport:
             coordinator = Coordinator()
             seen: list[Command] = []
-            runner = asyncio.create_task(_kernel_loop(transport, coordinator, seen))
+            runner = asyncio.create_task(_core_loop(transport, coordinator, seen))
             try:
                 async with websockets.connect(_url(transport)) as ws:
-                    registered = await _register(ws, client_name="desktop")
+                    registered = await register(
+                        ws, transport, client_name="desktop", drain=False
+                    )
 
                     await ws.send(encode(SessionStart()))
                     await wait_until(
@@ -153,7 +106,7 @@ def test_session_start_drives_real_kernel_and_wire_sequence() -> None:
                     with pytest.raises(asyncio.TimeoutError):
                         await asyncio.wait_for(ws.recv(), 0.05)
 
-                    # The kernel opens the Live connection and starts producing.
+                    # The core opens the Live connection and starts producing.
                     await _deliver(transport, coordinator, LlmOpened(), seen)
                     await _deliver(transport, coordinator, LlmAudio(b"reply-1"), seen)
 
@@ -202,8 +155,8 @@ def test_targeted_command_reaches_only_the_addressed_client() -> None:
                 websockets.connect(_url(transport)) as ws_a,
                 websockets.connect(_url(transport)) as ws_b,
             ):
-                a = await _register(ws_a, client_name="a")
-                b = await _register(ws_b, client_name="b")
+                a = await register(ws_a, transport, client_name="a", drain=False)
+                b = await register(ws_b, transport, client_name="b", drain=False)
 
                 await transport.execute(
                     SendAudioToClient(client_id=a.client_id, data=b"to-a")
@@ -245,7 +198,9 @@ def test_inbound_audio_and_interrupt_translate_over_a_real_socket() -> None:
     async def scenario() -> None:
         async with running_transport() as transport:
             async with websockets.connect(_url(transport)) as ws:
-                registered = await _register(ws, client_name="desktop")
+                registered = await register(
+                    ws, transport, client_name="desktop", drain=False
+                )
                 await _drain_registered(transport, registered)
 
                 await ws.send(encode(Audio(data=b"pcm")))
@@ -259,22 +214,48 @@ def test_inbound_audio_and_interrupt_translate_over_a_real_socket() -> None:
     asyncio.run(scenario())
 
 
-def test_reserved_messages_are_dropped_without_crashing_the_connection() -> None:
+def test_tool_result_is_translated_enqueued_and_keeps_connection_alive() -> None:
+    async def scenario() -> None:
+        async with running_transport() as transport:
+            async with websockets.connect(_url(transport)) as ws:
+                registered = await register(
+                    ws, transport, client_name="desktop", drain=False
+                )
+                await _drain_registered(transport, registered)
+
+                await ws.send(
+                    encode(ToolResult(id="t1", name="shell", result_json=b"{}"))
+                )
+                event = await asyncio.wait_for(transport.recv(), 1.0)
+                assert event == ClientToolResult(
+                    tool_id="t1", name="shell", result_json=b"{}"
+                )
+
+                await ws.send(encode(Ping()))
+                assert isinstance(
+                    decode(await asyncio.wait_for(ws.recv(), 1.0)), Pong
+                )
+
+    asyncio.run(scenario())
+
+
+def test_session_end_is_dropped_without_crashing_the_connection() -> None:
     async def scenario() -> None:
         sink = RecordingTraceSink()
         async with running_transport(sink=sink) as transport:
             async with websockets.connect(_url(transport)) as ws:
-                registered = await _register(ws, client_name="desktop")
+                registered = await register(
+                    ws, transport, client_name="desktop", drain=False
+                )
                 await _drain_registered(transport, registered)
 
-                await ws.send(encode(ToolResult(id="t1", name="shell")))
                 await ws.send(encode(SessionEnd()))
-                await wait_until(lambda: len(sink.of_kind("unhandled_message")) == 2)
+                await wait_until(lambda: bool(sink.of_kind("unhandled_message")))
 
                 with pytest.raises(asyncio.TimeoutError):
                     await asyncio.wait_for(transport.recv(), 0.05)
 
-                # The connection is still usable after the dropped messages.
+                # The connection is still usable after the dropped message.
                 await ws.send(encode(Ping()))
                 assert isinstance(
                     decode(await asyncio.wait_for(ws.recv(), 1.0)), Pong

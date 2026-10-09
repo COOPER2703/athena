@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
-from typing import AsyncIterator, Callable
 
 import pytest
 import websockets
-from websockets.asyncio.client import ClientConnection
 
+from conftest import RecordingTraceSink, _url, register, running_transport, wait_until
 from protocol import (
     Audio,
     Error,
@@ -19,78 +17,13 @@ from protocol import (
     decode,
     encode,
 )
-from server.adapters.transport import WebSocketTransport
-from server.core.commands import SendAudioToClient, Trace
+from server.core.commands import (
+    CloseLiveConnection,
+    OpenLiveConnection,
+    SendAudioToClient,
+    Trace,
+)
 from server.core.events import ClientRegistered
-from server.core.ports import TraceEntry
-
-
-class RecordingTraceSink:
-    def __init__(self) -> None:
-        self.entries: list[TraceEntry] = []
-
-    def emit(self, entry: TraceEntry) -> None:
-        self.entries.append(entry)
-
-    def of_kind(self, kind: str) -> list[TraceEntry]:
-        return [entry for entry in self.entries if entry.kind == kind]
-
-
-async def wait_until(predicate: Callable[[], bool], timeout: float = 1.0) -> None:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while not predicate():
-        if loop.time() > deadline:
-            raise AssertionError("condition not met in time")
-        await asyncio.sleep(0.001)
-
-
-@asynccontextmanager
-async def running_transport(
-    *,
-    sink: RecordingTraceSink | None = None,
-    server_tools: list[str] | None = None,
-) -> AsyncIterator[WebSocketTransport]:
-    transport = WebSocketTransport(
-        host="127.0.0.1",
-        port=0,
-        server_tools=server_tools,
-        trace_sink=sink,
-    )
-    await transport.start()
-    try:
-        yield transport
-    finally:
-        await transport.stop()
-
-
-def _url(transport: WebSocketTransport) -> str:
-    return f"ws://127.0.0.1:{transport.port}"
-
-
-async def register(
-    ws: ClientConnection,
-    transport: WebSocketTransport,
-    *,
-    client_name: str = "desktop",
-    platform: str = "linux",
-    tools: list[ToolDeclaration] | None = None,
-) -> Registered:
-    await ws.send(
-        encode(
-            Register(
-                client_name=client_name,
-                platform=platform,
-                client_tools=tools or [],
-            )
-        )
-    )
-    response = decode(await asyncio.wait_for(ws.recv(), 1.0))
-    assert isinstance(response, Registered)
-    event = await asyncio.wait_for(transport.recv(), 1.0)
-    assert isinstance(event, ClientRegistered)
-    assert event.client_id == response.client_id
-    return response
 
 
 def test_register_returns_registered_and_enqueues_event() -> None:
@@ -251,6 +184,24 @@ def test_command_for_unknown_client_is_dropped_and_traced() -> None:
         async with running_transport(sink=sink) as transport:
             await transport.execute(SendAudioToClient(client_id="missing", data=b"x"))
             assert sink.of_kind("client_not_found")
+
+    asyncio.run(scenario())
+
+
+def test_non_transport_command_is_ignored_without_crashing() -> None:
+    async def scenario() -> None:
+        async with running_transport() as transport:
+            async with websockets.connect(_url(transport)) as ws:
+                response = await register(ws, transport)
+
+                # Reserved seams: T1 core emits none of these, and the adapter
+                # must ignore them (no wire message, no crash, connection open).
+                await transport.execute(OpenLiveConnection(connection_id="s1"))
+                await transport.execute(CloseLiveConnection(connection_id="s1"))
+
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(ws.recv(), 0.05)
+                assert response.client_id in transport.clients
 
     asyncio.run(scenario())
 
