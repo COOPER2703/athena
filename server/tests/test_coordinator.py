@@ -15,6 +15,7 @@ from server.core import (
     ClientInterrupt,
     ClientLink,
     ClientRegistered,
+    ClientToolResult,
     Clock,
     CloseLiveConnection,
     Coordinator,
@@ -166,6 +167,16 @@ def test_trace_carries_observability_shape():
     assert trace.payload["client_id"] == "c1"
 
 
+def test_client_tool_result_is_trace_only_and_leaves_state_unchanged():
+    coordinator = Coordinator()
+    commands = coordinator.handle(
+        ClientToolResult(tool_id="t1", name="shell", result_json=b"{}")
+    )
+    assert effects(commands) == []
+    assert coordinator.state is SessionState.IDLE
+    assert any(isinstance(command, Trace) for command in commands)
+
+
 def test_connection_ids_are_monotonic_and_deterministic():
     first = Coordinator()
     drive(
@@ -200,6 +211,7 @@ def test_events_and_commands_are_frozen_slots_dataclasses():
         SessionRequested,
         ClientAudio,
         ClientInterrupt,
+        ClientToolResult,
         LlmOpened,
         LlmAudio,
         LlmTranscription,

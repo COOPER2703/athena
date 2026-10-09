@@ -39,6 +39,13 @@ class ClientInterrupt:
 
 
 @dataclass(frozen=True, slots=True)
+class ClientToolResult:
+    tool_id: str = ""
+    name: str = ""
+    result_json: bytes = b""
+
+
+@dataclass(frozen=True, slots=True)
 class LlmOpened:
     pass
 
@@ -79,6 +86,7 @@ Event = Union[
     SessionRequested,
     ClientAudio,
     ClientInterrupt,
+    ClientToolResult,
     LlmOpened,
     LlmAudio,
     LlmTranscription,

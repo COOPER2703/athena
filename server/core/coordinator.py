@@ -18,6 +18,7 @@ from server.core.events import (
     ClientAudio,
     ClientInterrupt,
     ClientRegistered,
+    ClientToolResult,
     Event,
     LlmAudio,
     LlmClosed,
@@ -73,6 +74,8 @@ class Coordinator:
             return self._on_client_audio(event)
         if isinstance(event, ClientInterrupt):
             return self._on_client_interrupt(event)
+        if isinstance(event, ClientToolResult):
+            return self._on_client_tool_result(event)
         if isinstance(event, LlmOpened):
             return self._on_llm_opened(event)
         if isinstance(event, LlmAudio):
@@ -135,6 +138,10 @@ class Coordinator:
             # visible. No command is emitted for the desktop to stop audio.
             return self._decision("barge_in", client_id=client_id)
         return self._decision("ClientInterrupt", client_id=client_id)
+
+    def _on_client_tool_result(self, event: ClientToolResult) -> list[Command]:
+        # Reserved seam: T1 has no Tool routing, so the result is trace-only.
+        return self._decision("ClientToolResult")
 
     def _on_llm_opened(self, event: LlmOpened) -> list[Command]:
         from_state = self._state
