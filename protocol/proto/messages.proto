@@ -1,0 +1,112 @@
+syntax = "proto3";
+
+package athena;
+
+// ─── Client → Server ────────────────────────────────────────────────────────
+
+message Register {
+  repeated ToolDeclaration client_tools = 1;
+  string client_name = 2;
+  string platform = 3;
+}
+
+message Audio {
+  // Raw PCM bytes (16-bit LE, mono). Client → server uplink is 16 kHz,
+  // server → client downlink is 24 kHz.
+  bytes data = 1;
+}
+
+message SessionStart {}
+
+message SessionEnd {}
+
+message ToolResult {
+  string id = 1;
+  string name = 2;
+  bytes result_json = 3;
+}
+
+message Ping {}
+
+message Interrupt {}
+
+// ─── Server → Client ────────────────────────────────────────────────────────
+
+message Registered {
+  string client_id = 1;
+  repeated string server_tools = 2;
+}
+
+message SessionStarted {
+  bool auto = 1;
+}
+
+message SessionEnded {
+  // Motif de fin de Session. Les valeurs sont stables : ne jamais les
+  // réordonner ni réutiliser un numéro (le motif voyage sur le fil).
+  enum Reason {
+    NORMAL = 0;
+    TIMEOUT = 1;
+    SILENT_EVENT = 2;
+    REPLACED = 3;
+    SHUTDOWN = 4;
+    ERROR = 5;
+  }
+
+  Reason reason = 1;
+}
+
+message ToolCall {
+  string id = 1;
+  string name = 2;
+  bytes args_json = 3;
+}
+
+message Text {
+  string role = 1;
+  string content = 2;
+}
+
+message Notification {
+  string source = 1;
+  string message = 2;
+}
+
+message Pong {}
+
+message Error {
+  string message = 1;
+}
+
+// ─── Types utilitaires ──────────────────────────────────────────────────────
+
+message ToolDeclaration {
+  string name = 1;
+  string description = 2;
+  string parameters_json = 3;
+}
+
+// ─── Envelope ───────────────────────────────────────────────────────────────
+
+message Envelope {
+  oneof payload {
+    // Client → Server
+    Register register = 1;
+    Audio audio = 2;
+    SessionStart session_start = 3;
+    SessionEnd session_end = 4;
+    ToolResult tool_result = 5;
+    Ping ping = 6;
+    Interrupt interrupt = 7;
+
+    // Server → Client
+    Registered registered = 8;
+    SessionStarted session_started = 9;
+    SessionEnded session_ended = 10;
+    ToolCall tool_call = 11;
+    Text text = 12;
+    Notification notification = 13;
+    Pong pong = 14;
+    Error error = 15;
+  }
+}
