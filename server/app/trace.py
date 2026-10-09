@@ -94,17 +94,24 @@ class _TraceLogHandler(logging.Handler):
         )
 
 
+def _logging_level(level: int | str) -> int:
+    if isinstance(level, int):
+        return level
+    return getattr(logging, str(level).upper(), logging.DEBUG)
+
+
 def install_logging_bridge(
-    sink: TraceSink, *, level: int = logging.DEBUG
+    sink: TraceSink, *, level: int | str = logging.DEBUG
 ) -> logging.Handler:
     """Branche le logging tiers sur le flux unique (ADR-0004).
 
     Les handlers racine existants sont remplacés pour qu'aucun log n'échappe au
-    flux ; le handler retourné est le point d'entrée unique du logging.
+    flux ; le handler retourné est le point d'entrée unique du logging. ``level``
+    accepte un niveau numérique ou son nom (``"info"``).
     """
     handler = _TraceLogHandler(sink)
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(handler)
-    root.setLevel(level)
+    root.setLevel(_logging_level(level))
     return handler
