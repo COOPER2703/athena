@@ -19,6 +19,8 @@ class FakeStream:
     def __init__(self) -> None:
         self.read_calls: list[tuple[int, bool]] = []
         self.writes: list[bytes] = []
+        self.stopped = False
+        self.started = False
         self.closed = False
 
     def read(self, frames: int, exception_on_overflow: bool = True) -> bytes:
@@ -27,6 +29,12 @@ class FakeStream:
 
     def write(self, data: bytes) -> None:
         self.writes.append(data)
+
+    def stop_stream(self) -> None:
+        self.stopped = True
+
+    def start_stream(self) -> None:
+        self.started = True
 
     def close(self) -> None:
         self.closed = True
@@ -127,6 +135,33 @@ def test_playback_opens_pcm16_mono_24khz(monkeypatch: pytest.MonkeyPatch) -> Non
     assert opened["rate"] == 24000
     assert opened["output"] is True
     assert instances[-1].streams[-1].writes == [b"\x01\x02"]
+
+
+def test_flush_stops_and_restarts_output_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, instances = make_fake_pyaudio()
+    monkeypatch.setitem(sys.modules, "pyaudio", module)
+    audio = AudioIO(AudioConfig())
+    asyncio.run(audio.start_output())
+
+    asyncio.run(audio.flush())
+
+    stream = instances[-1].streams[-1]
+    assert stream.stopped
+    assert stream.started
+
+
+def test_flush_without_output_stream_is_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, instances = make_fake_pyaudio()
+    monkeypatch.setitem(sys.modules, "pyaudio", module)
+    audio = AudioIO(AudioConfig())
+
+    asyncio.run(audio.flush())
+
+    assert instances == []
 
 
 def test_close_releases_streams_and_portaudio(

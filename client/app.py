@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from protocol import Notification, SessionEnded, SessionStarted, Text
+from protocol import Error, SessionEnded, SessionStarted
 
 from client.audio_io import Audio
 from client.config import AppConfig
@@ -37,24 +37,18 @@ class ClientApp:
         self._playback: asyncio.Queue[bytes] = asyncio.Queue()
         self._stopped = asyncio.Event()
 
-        transport.on_audio(self._handle_audio)
-        transport.on_session_started(self._handle_session_started)
-        transport.on_session_ended(self._handle_session_ended)
-        transport.on_notification(self._handle_notification)
-        transport.on_text(self._handle_text)
-        transport.on_error(self._handle_error)
-        transport.on_disconnect(self._handle_disconnect)
+        transport.set_listener(self)
 
     @property
     def state(self) -> ClientState:
         return self._state
 
-    async def enter(self) -> None:
+    async def tap(self) -> None:
         """Tap/Entrée : démarre une Session, ou interrompt en cours de Session."""
         if self._state is ClientState.ACTIVE:
             log.info("Barge-in : interruption et vidage du playback")
             await self._transport.send_interrupt()
-            self._flush_playback()
+            await self._flush_playback()
             return
         log.info("Démarrage de Session demandé")
         await self._transport.send_session_start()
@@ -83,9 +77,9 @@ class ClientApp:
     async def _capture_loop(self) -> None:
         while True:
             data = await self._audio.read_chunk()
-            await self._forward_audio(data)
+            await self.forward_audio(data)
 
-    async def _forward_audio(self, data: bytes) -> None:
+    async def forward_audio(self, data: bytes) -> None:
         if not data:
             return
         if self._state is ClientState.ACTIVE:
@@ -96,32 +90,29 @@ class ClientApp:
             data = await self._playback.get()
             await self._audio.write_chunk(data)
 
-    def _flush_playback(self) -> None:
+    async def _reset_to_listening(self) -> None:
+        self._state = ClientState.LISTENING
+        await self._flush_playback()
+
+    async def _flush_playback(self) -> None:
         while not self._playback.empty():
             self._playback.get_nowait()
+        await self._audio.flush()
 
-    async def _handle_audio(self, data: bytes) -> None:
+    async def on_audio(self, data: bytes) -> None:
         await self._playback.put(data)
 
-    async def _handle_session_started(self, msg: SessionStarted) -> None:
+    async def on_session_started(self, message: SessionStarted) -> None:
         self._state = ClientState.ACTIVE
         log.info("Session active")
 
-    async def _handle_session_ended(self, msg: SessionEnded) -> None:
-        self._state = ClientState.LISTENING
-        self._flush_playback()
+    async def on_session_ended(self, message: SessionEnded) -> None:
+        await self._reset_to_listening()
         log.info("Session terminée")
 
-    async def _handle_disconnect(self) -> None:
+    async def on_disconnect(self) -> None:
         log.warning("Connexion perdue, retour en écoute")
-        self._state = ClientState.LISTENING
-        self._flush_playback()
+        await self._reset_to_listening()
 
-    async def _handle_notification(self, msg: Notification) -> None:
-        log.info("Notification de %s: %s", msg.source, msg.message)
-
-    async def _handle_text(self, msg: Text) -> None:
-        log.info("Texte [%s]: %s", msg.role, msg.content)
-
-    async def _handle_error(self, message: str) -> None:
-        log.error("Erreur serveur: %s", message)
+    async def on_error(self, message: Error) -> None:
+        log.error("Erreur serveur: %s", message.message)
