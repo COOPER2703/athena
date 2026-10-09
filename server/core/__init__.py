@@ -10,7 +10,7 @@ from server.core.commands import (
     StartIdleTimer,
     Trace,
 )
-from server.core.coordinator import Coordinator
+from server.core.coordinator import Coordinator, IDLE_TIMEOUT
 from server.core.events import (
     ClientAudio,
     ClientInterrupt,
@@ -24,6 +24,7 @@ from server.core.events import (
     LlmTranscription,
     Role,
     SessionRequested,
+    ShutdownRequested,
     TimerFired,
 )
 from server.core.ports import ClientLink, Clock, LlmSocket, TraceEntry, TraceSink
@@ -42,6 +43,7 @@ __all__ = [
     "Command",
     "Coordinator",
     "Event",
+    "IDLE_TIMEOUT",
     "LlmAudio",
     "LlmClosed",
     "LlmFailed",
@@ -55,6 +57,7 @@ __all__ = [
     "SendAudioToLlm",
     "SessionRequested",
     "SessionState",
+    "ShutdownRequested",
     "StartIdleTimer",
     "TimerFired",
     "Trace",
