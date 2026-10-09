@@ -45,7 +45,6 @@ class ClientConnection:
     client_name: str
     platform: str
     websocket: ServerConnection
-    connected_at: float
 
 
 class WebSocketTransport:
@@ -218,7 +217,6 @@ class WebSocketTransport:
             client_name=client_name,
             platform=platform,
             websocket=websocket,
-            connected_at=time.monotonic(),
         )
         self._clients[client_id] = connection
         await self._send(

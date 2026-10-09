@@ -23,7 +23,12 @@ from server.core.commands import (
     SendAudioToLlm,
     StartIdleTimer,
 )
-from server.core.events import ClientAudio, ClientInterrupt, SessionRequested
+from server.core.events import (
+    ClientAudio,
+    ClientInterrupt,
+    ClientToolResult,
+    SessionRequested,
+)
 
 
 def test_audio_maps_to_client_audio() -> None:
@@ -46,8 +51,10 @@ def test_ping_is_not_an_inbound_event() -> None:
     assert translate_inbound("c1", Ping()) is None
 
 
-def test_tool_result_has_no_core_event_in_t1() -> None:
-    assert translate_inbound("c1", ToolResult(id="t", name="n")) is None
+def test_tool_result_maps_to_client_tool_result() -> None:
+    assert translate_inbound(
+        "c1", ToolResult(id="t1", name="shell", result_json=b"{}")
+    ) == ClientToolResult(tool_id="t1", name="shell", result_json=b"{}")
 
 
 def test_session_end_has_no_core_event_in_t1() -> None:
