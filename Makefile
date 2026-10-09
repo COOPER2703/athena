@@ -5,5 +5,5 @@ PYTHON ?= python
 generate:
 	$(PYTHON) protocol/proto/generate.py
 
-test: generate
+test:
 	$(PYTHON) -m pytest protocol/tests

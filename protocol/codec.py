@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Callable, Union
+from typing import Callable, NamedTuple, Union
 
 from protocol.generated import messages_pb2 as pb
 
@@ -19,6 +19,7 @@ class SessionEndReason(IntEnum):
     SHUTDOWN = 4
     ERROR = 5
 
+    # Preserve unknown wire values as explicit sentinels, never coercing them to NORMAL.
     @classmethod
     def _missing_(cls, value: object) -> "SessionEndReason | None":
         if not isinstance(value, int) or isinstance(value, bool):
@@ -27,10 +28,6 @@ class SessionEndReason(IntEnum):
         member._name_ = f"UNKNOWN_{value}"
         member._value_ = value
         return member
-
-    @classmethod
-    def from_value(cls, value: int) -> "SessionEndReason":
-        return cls(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,13 +148,49 @@ Message = Union[ClientToServer, ServerToClient]
 
 _ToFn = Callable[[object, pb.Envelope], None]
 _FromFn = Callable[[object], object]
-_REGISTRY: dict[type, tuple[str, _ToFn, _FromFn]] = {}
+
+
+class _Codec(NamedTuple):
+    field_name: str
+    to_fn: _ToFn
+    from_fn: _FromFn
+
+
+class _Field(NamedTuple):
+    name: str
+    is_bytes: bool = False
+
+
+_REGISTRY: dict[type, _Codec] = {}
+_BY_FIELD: dict[str, _FromFn] = {}
 
 
 def _register(
     message_type: type, field_name: str, to_fn: _ToFn, from_fn: _FromFn
 ) -> None:
-    _REGISTRY[message_type] = (field_name, to_fn, from_fn)
+    _REGISTRY[message_type] = _Codec(field_name, to_fn, from_fn)
+    _BY_FIELD[field_name] = from_fn
+
+
+def _register_flat(
+    message_type: type, field_name: str, fields: tuple[_Field, ...]
+) -> None:
+    def to_fn(message: object, envelope: pb.Envelope) -> None:
+        target = getattr(envelope, field_name)
+        for f in fields:
+            setattr(target, f.name, getattr(message, f.name))
+
+    def from_fn(inner: object) -> object:
+        return message_type(
+            **{
+                f.name: bytes(getattr(inner, f.name))
+                if f.is_bytes
+                else getattr(inner, f.name)
+                for f in fields
+            }
+        )
+
+    _register(message_type, field_name, to_fn, from_fn)
 
 
 def _to_register(message: Register, envelope: pb.Envelope) -> None:
@@ -204,18 +237,6 @@ def _from_empty(message_type: type) -> _FromFn:
     return lambda inner: message_type()
 
 
-def _to_tool_result(message: ToolResult, envelope: pb.Envelope) -> None:
-    envelope.tool_result.id = message.id
-    envelope.tool_result.name = message.name
-    envelope.tool_result.result_json = message.result_json
-
-
-def _from_tool_result(inner: object) -> ToolResult:
-    return ToolResult(
-        id=inner.id, name=inner.name, result_json=bytes(inner.result_json)
-    )
-
-
 def _to_registered(message: Registered, envelope: pb.Envelope) -> None:
     envelope.registered.client_id = message.client_id
     envelope.registered.server_tools.extend(message.server_tools)
@@ -227,56 +248,12 @@ def _from_registered(inner: object) -> Registered:
     )
 
 
-def _to_session_started(message: SessionStarted, envelope: pb.Envelope) -> None:
-    envelope.session_started.auto = message.auto
-
-
-def _from_session_started(inner: object) -> SessionStarted:
-    return SessionStarted(auto=inner.auto)
-
-
 def _to_session_ended(message: SessionEnded, envelope: pb.Envelope) -> None:
     envelope.session_ended.reason = int(message.reason)
 
 
 def _from_session_ended(inner: object) -> SessionEnded:
-    return SessionEnded(reason=SessionEndReason.from_value(inner.reason))
-
-
-def _to_tool_call(message: ToolCall, envelope: pb.Envelope) -> None:
-    envelope.tool_call.id = message.id
-    envelope.tool_call.name = message.name
-    envelope.tool_call.args_json = message.args_json
-
-
-def _from_tool_call(inner: object) -> ToolCall:
-    return ToolCall(id=inner.id, name=inner.name, args_json=bytes(inner.args_json))
-
-
-def _to_text(message: Text, envelope: pb.Envelope) -> None:
-    envelope.text.role = message.role
-    envelope.text.content = message.content
-
-
-def _from_text(inner: object) -> Text:
-    return Text(role=inner.role, content=inner.content)
-
-
-def _to_notification(message: Notification, envelope: pb.Envelope) -> None:
-    envelope.notification.source = message.source
-    envelope.notification.message = message.message
-
-
-def _from_notification(inner: object) -> Notification:
-    return Notification(source=inner.source, message=inner.message)
-
-
-def _to_error(message: Error, envelope: pb.Envelope) -> None:
-    envelope.error.message = message.message
-
-
-def _from_error(inner: object) -> Error:
-    return Error(message=inner.message)
+    return SessionEnded(reason=SessionEndReason(inner.reason))
 
 
 _register(Register, "register", _to_register, _from_register)
@@ -290,33 +267,35 @@ _register(
 _register(
     SessionEnd, "session_end", _to_empty("session_end"), _from_empty(SessionEnd)
 )
-_register(ToolResult, "tool_result", _to_tool_result, _from_tool_result)
+_register_flat(
+    ToolResult,
+    "tool_result",
+    (_Field("id"), _Field("name"), _Field("result_json", is_bytes=True)),
+)
 _register(Ping, "ping", _to_empty("ping"), _from_empty(Ping))
 _register(
     Interrupt, "interrupt", _to_empty("interrupt"), _from_empty(Interrupt)
 )
 _register(Registered, "registered", _to_registered, _from_registered)
-_register(
-    SessionStarted,
-    "session_started",
-    _to_session_started,
-    _from_session_started,
-)
+_register_flat(SessionStarted, "session_started", (_Field("auto"),))
 _register(SessionEnded, "session_ended", _to_session_ended, _from_session_ended)
-_register(ToolCall, "tool_call", _to_tool_call, _from_tool_call)
-_register(Text, "text", _to_text, _from_text)
-_register(Notification, "notification", _to_notification, _from_notification)
+_register_flat(
+    ToolCall,
+    "tool_call",
+    (_Field("id"), _Field("name"), _Field("args_json", is_bytes=True)),
+)
+_register_flat(Text, "text", (_Field("role"), _Field("content")))
+_register_flat(Notification, "notification", (_Field("source"), _Field("message")))
 _register(Pong, "pong", _to_empty("pong"), _from_empty(Pong))
-_register(Error, "error", _to_error, _from_error)
+_register_flat(Error, "error", (_Field("message"),))
 
 
 def encode(message: object) -> bytes:
-    entry = _REGISTRY.get(type(message))
-    if entry is None:
+    codec = _REGISTRY.get(type(message))
+    if codec is None:
         raise ProtocolError(f"Unknown message type: {type(message).__name__}")
-    _, to_fn, _ = entry
     envelope = pb.Envelope()
-    to_fn(message, envelope)
+    codec.to_fn(message, envelope)
     return envelope.SerializeToString()
 
 
@@ -331,8 +310,8 @@ def decode(data: bytes) -> Message:
     if field_name is None:
         raise ProtocolError("Envelope has no payload")
 
-    for field, _, from_fn in _REGISTRY.values():
-        if field == field_name:
-            return from_fn(getattr(envelope, field_name))
+    from_fn = _BY_FIELD.get(field_name)
+    if from_fn is None:
+        raise ProtocolError(f"Unknown payload type: {field_name}")
 
-    raise ProtocolError(f"Unknown payload type: {field_name}")
+    return from_fn(getattr(envelope, field_name))

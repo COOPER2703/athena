@@ -67,7 +67,9 @@ def _require_generated():
 
 
 def _load_generated():
-    spec = importlib.util.spec_from_file_location("_t16_messages_pb2", GENERATED_FILE)
+    spec = importlib.util.spec_from_file_location(
+        "_generated_messages_pb2", GENERATED_FILE
+    )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
