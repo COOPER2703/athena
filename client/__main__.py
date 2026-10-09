@@ -14,13 +14,7 @@ log = logging.getLogger("athena.client")
 
 
 def _build_app(cfg: AppConfig) -> ClientApp:
-    transport = WsTransport(
-        server_url=cfg.client.server_url,
-        client_name=cfg.client.client_name,
-        platform=cfg.client.platform,
-        ping_interval=cfg.client.ping_interval,
-        reconnect=cfg.client.reconnect,
-    )
+    transport = WsTransport(cfg.client)
     return ClientApp(cfg, audio=AudioIO(cfg.audio), transport=transport)
 
 
@@ -30,7 +24,10 @@ async def _enter_loop(app: ClientApp) -> None:
         line = await asyncio.to_thread(sys.stdin.readline)
         if line == "":
             return
-        await app.enter()
+        try:
+            await app.tap()
+        except Exception:
+            log.exception("Échec du démarrage de Session ignoré")
 
 
 async def main() -> None:

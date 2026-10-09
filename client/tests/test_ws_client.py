@@ -7,16 +7,19 @@ from typing import Any
 import pytest
 
 from client import ws_client
-from client.config import BackoffConfig
+from client.config import BackoffConfig, ClientConfig
 from client.ws_client import WsTransport
 from protocol import (
     Audio,
+    Error,
     Interrupt,
     Ping,
     Pong,
     Register,
     Registered,
+    SessionEnded,
     SessionStart,
+    SessionStarted,
     decode,
     encode,
 )
@@ -55,6 +58,30 @@ class FakeConnection:
         return item
 
 
+class RecordingListener:
+    def __init__(self) -> None:
+        self.audio: list[bytes] = []
+        self.started = 0
+        self.ended = 0
+        self.errors: list[str] = []
+        self.disconnects = 0
+
+    async def on_audio(self, data: bytes) -> None:
+        self.audio.append(data)
+
+    async def on_session_started(self, message: SessionStarted) -> None:
+        self.started += 1
+
+    async def on_session_ended(self, message: SessionEnded) -> None:
+        self.ended += 1
+
+    async def on_error(self, message: Error) -> None:
+        self.errors.append(message.message)
+
+    async def on_disconnect(self) -> None:
+        self.disconnects += 1
+
+
 def fake_websockets(connect: Any) -> SimpleNamespace:
     return SimpleNamespace(connect=connect, ConnectionClosed=FakeConnectionClosed)
 
@@ -76,7 +103,9 @@ def test_connect_sends_register(monkeypatch: pytest.MonkeyPatch) -> None:
             return conn
 
         monkeypatch.setattr(ws_client, "websockets", fake_websockets(connect))
-        transport = WsTransport("ws://x", client_name="desktop", platform="desktop")
+        transport = WsTransport(
+            ClientConfig(server_url="ws://x", client_name="desktop", platform="desktop")
+        )
 
         await transport.connect()
 
@@ -101,7 +130,7 @@ def test_ping_is_sent_periodically(monkeypatch: pytest.MonkeyPatch) -> None:
             return conn
 
         monkeypatch.setattr(ws_client, "websockets", fake_websockets(connect))
-        transport = WsTransport("ws://x", ping_interval=0.01)
+        transport = WsTransport(ClientConfig(server_url="ws://x", ping_interval=0.01))
 
         await transport.connect()
         await wait_until(
@@ -122,7 +151,7 @@ def test_pong_is_ignored_and_connection_survives(
             return conn
 
         monkeypatch.setattr(ws_client, "websockets", fake_websockets(connect))
-        transport = WsTransport("ws://x", ping_interval=100.0)
+        transport = WsTransport(ClientConfig(server_url="ws://x", ping_interval=100.0))
 
         await transport.connect()
         await conn.feed(encode(Pong()))
@@ -130,6 +159,37 @@ def test_pong_is_ignored_and_connection_survives(
 
         await wait_until(lambda: transport.client_id == "c1")
         assert transport.is_connected
+        await transport.disconnect()
+
+    asyncio.run(scenario())
+
+
+def test_decoded_messages_are_routed_to_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        conn = FakeConnection()
+
+        async def connect(url: str) -> FakeConnection:
+            return conn
+
+        monkeypatch.setattr(ws_client, "websockets", fake_websockets(connect))
+        transport = WsTransport(ClientConfig(server_url="ws://x", ping_interval=100.0))
+        listener = RecordingListener()
+        transport.set_listener(listener)
+
+        await transport.connect()
+        await conn.feed(encode(Audio(data=b"\xaa")))
+        await conn.feed(encode(SessionStarted()))
+        await conn.feed(encode(SessionEnded()))
+        await conn.feed(encode(Error(message="refus")))
+
+        await wait_until(
+            lambda: listener.audio == [b"\xaa"]
+            and listener.started == 1
+            and listener.ended == 1
+            and listener.errors == ["refus"]
+        )
         await transport.disconnect()
 
     asyncio.run(scenario())
@@ -145,7 +205,7 @@ def test_protocol_error_is_logged_and_non_fatal(
             return conn
 
         monkeypatch.setattr(ws_client, "websockets", fake_websockets(connect))
-        transport = WsTransport("ws://x", ping_interval=100.0)
+        transport = WsTransport(ClientConfig(server_url="ws://x", ping_interval=100.0))
 
         await transport.connect()
         await conn.feed(b"\xff\xff\xff")
@@ -161,6 +221,38 @@ def test_protocol_error_is_logged_and_non_fatal(
     assert any(record.levelname == "WARNING" for record in caplog.records)
 
 
+def test_handler_exception_is_logged_and_connection_survives(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def scenario() -> None:
+        conn = FakeConnection()
+
+        async def connect(url: str) -> FakeConnection:
+            return conn
+
+        monkeypatch.setattr(ws_client, "websockets", fake_websockets(connect))
+        transport = WsTransport(ClientConfig(server_url="ws://x", ping_interval=100.0))
+
+        class ExplodingListener(RecordingListener):
+            async def on_audio(self, data: bytes) -> None:
+                raise ValueError("boom")
+
+        transport.set_listener(ExplodingListener())
+
+        await transport.connect()
+        await conn.feed(encode(Audio(data=b"\x01")))
+        await conn.feed(encode(Registered(client_id="c1")))
+
+        await wait_until(lambda: transport.client_id == "c1")
+        assert transport.is_connected
+        await transport.disconnect()
+
+    with caplog.at_level("ERROR", logger="athena.client"):
+        asyncio.run(scenario())
+
+    assert any(record.levelname == "ERROR" for record in caplog.records)
+
+
 def test_outgoing_messages_are_encoded(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         conn = FakeConnection()
@@ -169,7 +261,7 @@ def test_outgoing_messages_are_encoded(monkeypatch: pytest.MonkeyPatch) -> None:
             return conn
 
         monkeypatch.setattr(ws_client, "websockets", fake_websockets(connect))
-        transport = WsTransport("ws://x", ping_interval=100.0)
+        transport = WsTransport(ClientConfig(server_url="ws://x", ping_interval=100.0))
 
         await transport.connect()
         await transport.send_session_start()
@@ -186,10 +278,60 @@ def test_outgoing_messages_are_encoded(monkeypatch: pytest.MonkeyPatch) -> None:
     asyncio.run(scenario())
 
 
-def test_send_without_connection_raises() -> None:
-    transport = WsTransport("ws://x")
-    with pytest.raises(RuntimeError):
-        asyncio.run(transport.send_session_start())
+def test_message_before_connect_is_queued_until_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        conn = FakeConnection()
+
+        async def connect(url: str) -> FakeConnection:
+            return conn
+
+        monkeypatch.setattr(ws_client, "websockets", fake_websockets(connect))
+        transport = WsTransport(ClientConfig(server_url="ws://x", ping_interval=100.0))
+
+        await transport.send_session_start()
+        assert conn.sent == []
+
+        await transport.connect()
+
+        decoded = [decode(raw) for raw in conn.sent]
+        assert isinstance(decoded[0], Register)
+        assert isinstance(decoded[1], SessionStart)
+
+        await transport.disconnect()
+
+    asyncio.run(scenario())
+
+
+def test_backoff_grows_exponentially_to_cap_through_run_loop() -> None:
+    async def scenario() -> None:
+        delays: list[float] = []
+
+        async def connect(url: str) -> FakeConnection:
+            raise OSError("server down")
+
+        async def sleep(delay: float) -> None:
+            delays.append(delay)
+            if len(delays) >= 5:
+                raise asyncio.CancelledError
+            await asyncio.sleep(0)
+
+        transport = WsTransport(
+            ClientConfig(
+                server_url="ws://x",
+                reconnect=BackoffConfig(initial=1.0, maximum=4.0, factor=2.0),
+            ),
+            connect=connect,
+            sleep=sleep,
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await transport.run()
+
+        assert delays == [1.0, 2.0, 4.0, 4.0, 4.0]
+
+    asyncio.run(scenario())
 
 
 def test_reconnects_after_drop_with_backoff(
@@ -205,23 +347,21 @@ def test_reconnects_after_drop_with_backoff(
 
         monkeypatch.setattr(ws_client, "websockets", fake_websockets(connect))
         transport = WsTransport(
-            "ws://x",
-            ping_interval=100.0,
-            reconnect=BackoffConfig(initial=0.001, maximum=0.004, factor=2.0),
+            ClientConfig(
+                server_url="ws://x",
+                ping_interval=100.0,
+                reconnect=BackoffConfig(initial=0.001, maximum=0.004, factor=2.0),
+            )
         )
-        dropped: list[bool] = []
-
-        async def on_disconnect() -> None:
-            dropped.append(True)
-
-        transport.on_disconnect(on_disconnect)
+        listener = RecordingListener()
+        transport.set_listener(listener)
 
         task = asyncio.create_task(transport.run())
         await wait_until(lambda: len(calls) == 1)
 
         await conns[0].drop()
         await wait_until(lambda: len(calls) == 2)
-        await wait_until(lambda: dropped)
+        await wait_until(lambda: listener.disconnects == 1)
 
         assert transport.is_connected
         assert isinstance(decode(conns[1].sent[0]), Register)
@@ -243,17 +383,14 @@ def test_deliberate_disconnect_does_not_notify(
             return conn
 
         monkeypatch.setattr(ws_client, "websockets", fake_websockets(connect))
-        transport = WsTransport("ws://x", ping_interval=100.0)
-        called: list[bool] = []
+        transport = WsTransport(ClientConfig(server_url="ws://x", ping_interval=100.0))
+        listener = RecordingListener()
+        transport.set_listener(listener)
 
-        async def on_disconnect() -> None:
-            called.append(True)
-
-        transport.on_disconnect(on_disconnect)
         await transport.connect()
         await transport.disconnect()
         await asyncio.sleep(0.01)
 
-        assert called == []
+        assert listener.disconnects == 0
 
     asyncio.run(scenario())

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import dataclasses
+
+import pytest
+
 from client.config import AppConfig, AudioConfig, BackoffConfig, ClientConfig
 
 
@@ -8,7 +12,7 @@ def test_backoff_delays_grow_exponentially_then_cap() -> None:
     assert [next(delays) for _ in range(5)] == [0.5, 1.0, 2.0, 4.0, 4.0]
 
 
-def test_client_config_defaults(monkeypatch) -> None:
+def test_client_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("WS_SERVER_URL", raising=False)
     monkeypatch.delenv("CLIENT_NAME", raising=False)
     cfg = ClientConfig()
@@ -17,7 +21,7 @@ def test_client_config_defaults(monkeypatch) -> None:
     assert cfg.platform == "desktop"
 
 
-def test_client_config_reads_env(monkeypatch) -> None:
+def test_client_config_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("WS_SERVER_URL", "ws://example:1234")
     monkeypatch.setenv("CLIENT_NAME", "laptop")
     cfg = ClientConfig()
@@ -36,3 +40,9 @@ def test_app_config_composes_audio_and_client() -> None:
     cfg = AppConfig()
     assert isinstance(cfg.audio, AudioConfig)
     assert isinstance(cfg.client, ClientConfig)
+
+
+def test_config_value_objects_are_frozen() -> None:
+    cfg = ClientConfig()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        setattr(cfg, "platform", "mobile")

@@ -9,32 +9,41 @@ from websockets.asyncio.client import ClientConnection
 
 from protocol import (
     Audio,
+    ClientToServer,
     Error,
     Interrupt,
-    Notification,
     Ping,
     ProtocolError,
     Register,
     Registered,
+    ServerToClient,
     SessionEnded,
     SessionStart,
     SessionStarted,
-    Text,
     decode,
     encode,
 )
 
-from client.config import BackoffConfig
+from client.config import ClientConfig
 
 log = logging.getLogger("athena.client")
 
-AudioHandler = Callable[[bytes], Awaitable[None]]
-SessionStartedHandler = Callable[[SessionStarted], Awaitable[None]]
-SessionEndedHandler = Callable[[SessionEnded], Awaitable[None]]
-NotificationHandler = Callable[[Notification], Awaitable[None]]
-TextHandler = Callable[[Text], Awaitable[None]]
-ErrorHandler = Callable[[str], Awaitable[None]]
-DisconnectHandler = Callable[[], Awaitable[None]]
+Connector = Callable[[str], Awaitable[ClientConnection]]
+Sleeper = Callable[[float], Awaitable[None]]
+
+
+class TransportListener(Protocol):
+    """Récepteur des événements et messages décodés du transport."""
+
+    async def on_audio(self, data: bytes) -> None: ...
+
+    async def on_session_started(self, message: SessionStarted) -> None: ...
+
+    async def on_session_ended(self, message: SessionEnded) -> None: ...
+
+    async def on_error(self, message: Error) -> None: ...
+
+    async def on_disconnect(self) -> None: ...
 
 
 class Transport(Protocol):
@@ -56,42 +65,29 @@ class Transport(Protocol):
 
     async def send_interrupt(self) -> None: ...
 
-    def on_audio(self, handler: AudioHandler) -> None: ...
-
-    def on_session_started(self, handler: SessionStartedHandler) -> None: ...
-
-    def on_session_ended(self, handler: SessionEndedHandler) -> None: ...
-
-    def on_notification(self, handler: NotificationHandler) -> None: ...
-
-    def on_text(self, handler: TextHandler) -> None: ...
-
-    def on_error(self, handler: ErrorHandler) -> None: ...
-
-    def on_disconnect(self, handler: DisconnectHandler) -> None: ...
+    def set_listener(self, listener: TransportListener) -> None: ...
 
 
 class WsTransport:
     """Transport WebSocket.
 
     Ne contient aucune logique de Session : il se limite à la connexion,
-    l'encodage/décodage, l'envoi, la répartition des messages reçus vers les
-    callbacks, et la reconnexion avec backoff exponentiel après une coupure.
+    l'encodage/décodage, l'envoi, la répartition des messages reçus vers le
+    listener, et la reconnexion avec backoff exponentiel après une coupure.
+    Un message émis avant que le socket soit prêt est mis en attente et envoyé
+    dès la connexion établie.
     """
 
     def __init__(
         self,
-        server_url: str,
-        client_name: str = "desktop",
-        platform: str = "desktop",
-        ping_interval: float = 30.0,
-        reconnect: BackoffConfig | None = None,
+        client: ClientConfig,
+        *,
+        connect: Connector | None = None,
+        sleep: Sleeper | None = None,
     ) -> None:
-        self._server_url = server_url
-        self._client_name = client_name
-        self._platform = platform
-        self._ping_interval = ping_interval
-        self._reconnect = reconnect or BackoffConfig()
+        self._client = client
+        self._connect = connect or websockets.connect
+        self._sleep_fn = sleep or asyncio.sleep
 
         self._ws: ClientConnection | None = None
         self._client_id: str | None = None
@@ -100,14 +96,8 @@ class WsTransport:
         self._closed = asyncio.Event()
         self._recv_task: asyncio.Task[None] | None = None
         self._ping_task: asyncio.Task[None] | None = None
-
-        self._on_audio: AudioHandler | None = None
-        self._on_session_started: SessionStartedHandler | None = None
-        self._on_session_ended: SessionEndedHandler | None = None
-        self._on_notification: NotificationHandler | None = None
-        self._on_text: TextHandler | None = None
-        self._on_error: ErrorHandler | None = None
-        self._on_disconnect: DisconnectHandler | None = None
+        self._pending: list[ClientToServer] = []
+        self._listener: TransportListener | None = None
 
     @property
     def client_id(self) -> str | None:
@@ -117,31 +107,13 @@ class WsTransport:
     def is_connected(self) -> bool:
         return self._ws is not None and self._connected.is_set()
 
-    def on_audio(self, handler: AudioHandler) -> None:
-        self._on_audio = handler
-
-    def on_session_started(self, handler: SessionStartedHandler) -> None:
-        self._on_session_started = handler
-
-    def on_session_ended(self, handler: SessionEndedHandler) -> None:
-        self._on_session_ended = handler
-
-    def on_notification(self, handler: NotificationHandler) -> None:
-        self._on_notification = handler
-
-    def on_text(self, handler: TextHandler) -> None:
-        self._on_text = handler
-
-    def on_error(self, handler: ErrorHandler) -> None:
-        self._on_error = handler
-
-    def on_disconnect(self, handler: DisconnectHandler) -> None:
-        self._on_disconnect = handler
+    def set_listener(self, listener: TransportListener) -> None:
+        self._listener = listener
 
     async def run(self) -> None:
         """Maintient la connexion : connecte, et reconnecte avec backoff."""
         self._running = True
-        delays = self._reconnect.delays()
+        delays = self._client.reconnect.delays()
         while self._running:
             try:
                 await self.connect()
@@ -155,7 +127,7 @@ class WsTransport:
                 await self._sleep(delay)
                 continue
 
-            delays = self._reconnect.delays()
+            delays = self._client.reconnect.delays()
             log.info("Connecté au serveur (client_id=%s)", self.client_id)
             await self._closed.wait()
             if not self._running:
@@ -175,16 +147,17 @@ class WsTransport:
         self._client_id = None
         self._closed.clear()
 
-        self._ws = await websockets.connect(self._server_url)
+        self._ws = await self._connect(self._client.server_url)
         self._connected.set()
 
         await self._send(
             Register(
                 client_tools=[],
-                client_name=self._client_name,
-                platform=self._platform,
+                client_name=self._client.client_name,
+                platform=self._client.platform,
             )
         )
+        await self._flush_pending()
 
         self._recv_task = asyncio.create_task(self._receive_loop())
         self._ping_task = asyncio.create_task(self._ping_loop())
@@ -192,6 +165,7 @@ class WsTransport:
     async def disconnect(self) -> None:
         self._running = False
         self._connected.clear()
+        self._pending.clear()
 
         await self._cancel_task(self._ping_task)
         await self._cancel_task(self._recv_task)
@@ -214,13 +188,20 @@ class WsTransport:
     async def send_interrupt(self) -> None:
         await self._send(Interrupt())
 
-    async def _send(self, message: object) -> None:
-        if not self._ws:
-            raise RuntimeError("Not connected")
+    async def _send(self, message: ClientToServer) -> None:
+        ws = self._ws
+        if ws is None or not self._connected.is_set():
+            self._pending.append(message)
+            return
         try:
-            await self._ws.send(encode(message))
+            await ws.send(encode(message))
         except websockets.ConnectionClosed:
             self._connected.clear()
+
+    async def _flush_pending(self) -> None:
+        pending, self._pending = self._pending, []
+        for message in pending:
+            await self._send(message)
 
     async def _receive_loop(self) -> None:
         assert self._ws is not None
@@ -230,10 +211,13 @@ class WsTransport:
                     continue
                 try:
                     message = decode(raw)
+                    await self._dispatch(message)
                 except ProtocolError as exc:
                     log.warning("Message protocole invalide ignoré: %s", exc)
                     continue
-                await self._dispatch(message)
+                except Exception:
+                    log.exception("Erreur de traitement d'un message ignorée")
+                    continue
         except websockets.ConnectionClosed:
             pass
         except asyncio.CancelledError:
@@ -242,47 +226,44 @@ class WsTransport:
             self._connected.clear()
             await self._cancel_task(self._ping_task)
             self._ping_task = None
-            if self._running and self._on_disconnect:
+            if self._running and self._listener:
                 log.warning("Connexion au serveur perdue")
-                await self._on_disconnect()
+                try:
+                    await self._listener.on_disconnect()
+                except Exception:
+                    log.exception("Erreur du handler de déconnexion ignorée")
             self._closed.set()
 
-    async def _dispatch(self, message: object) -> None:
+    async def _dispatch(self, message: ServerToClient) -> None:
         if isinstance(message, Registered):
             self._client_id = message.client_id
-        elif isinstance(message, Audio):
-            if self._on_audio:
-                await self._on_audio(message.data)
+            return
+        listener = self._listener
+        if listener is None:
+            return
+        if isinstance(message, Audio):
+            await listener.on_audio(message.data)
         elif isinstance(message, SessionStarted):
-            if self._on_session_started:
-                await self._on_session_started(message)
+            await listener.on_session_started(message)
         elif isinstance(message, SessionEnded):
-            if self._on_session_ended:
-                await self._on_session_ended(message)
-        elif isinstance(message, Notification):
-            if self._on_notification:
-                await self._on_notification(message)
-        elif isinstance(message, Text):
-            if self._on_text:
-                await self._on_text(message)
+            await listener.on_session_ended(message)
         elif isinstance(message, Error):
-            if self._on_error:
-                await self._on_error(message.message)
+            await listener.on_error(message)
 
     async def _ping_loop(self) -> None:
         try:
             while True:
-                await asyncio.sleep(self._ping_interval)
+                await asyncio.sleep(self._client.ping_interval)
                 if self.is_connected:
                     await self._send(Ping())
         except asyncio.CancelledError:
             raise
         except Exception:
-            pass
+            log.exception("Erreur de la boucle de ping ignorée")
 
     async def _sleep(self, delay: float) -> None:
         try:
-            await asyncio.sleep(delay)
+            await self._sleep_fn(delay)
         except asyncio.CancelledError:
             self._running = False
             raise

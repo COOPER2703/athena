@@ -9,7 +9,7 @@ def _get_env(key: str, default: str) -> str:
     return os.getenv(key, default)
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class AudioConfig:
     channels: int = 1
     send_sample_rate: int = 16000
@@ -17,7 +17,7 @@ class AudioConfig:
     chunk_size: int = 1024
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class BackoffConfig:
     """Paramètres du backoff exponentiel de reconnexion."""
 
@@ -33,7 +33,7 @@ class BackoffConfig:
             delay = min(delay * self.factor, self.maximum)
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ClientConfig:
     server_url: str = field(
         default_factory=lambda: _get_env("WS_SERVER_URL", "ws://localhost:8765")
@@ -46,7 +46,7 @@ class ClientConfig:
     reconnect: BackoffConfig = field(default_factory=BackoffConfig)
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     audio: AudioConfig = field(default_factory=AudioConfig)
     client: ClientConfig = field(default_factory=ClientConfig)

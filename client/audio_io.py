@@ -17,6 +17,8 @@ class Audio(Protocol):
 
     async def write_chunk(self, data: bytes) -> None: ...
 
+    async def flush(self) -> None: ...
+
     async def close(self) -> None: ...
 
 
@@ -83,6 +85,12 @@ class AudioIO:
         if self._output_stream is None:
             raise RuntimeError("Output stream not started")
         await asyncio.to_thread(self._output_stream.write, data)
+
+    async def flush(self) -> None:
+        if self._output_stream is None:
+            return
+        await asyncio.to_thread(self._output_stream.stop_stream)
+        await asyncio.to_thread(self._output_stream.start_stream)
 
     async def close(self) -> None:
         if self._input_stream:
