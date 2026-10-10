@@ -127,9 +127,17 @@ class GeminiLiveAdapter:
 
     async def _receive_loop(self, live: Any) -> None:
         try:
-            async for response in live.receive():
-                await self._handle_response(response)
-                if self._terminated:
+            # ``receive()`` yields one complete model turn and returns while the
+            # connection stays open, so a Session spans many turns; keep pulling
+            # turns until the stream ends or the connection terminally fails.
+            while not self._terminated:
+                delivered = False
+                async for response in live.receive():
+                    delivered = True
+                    await self._handle_response(response)
+                    if self._terminated:
+                        break
+                if not delivered:
                     break
         except asyncio.CancelledError:
             raise

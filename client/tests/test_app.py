@@ -125,6 +125,26 @@ def test_tap_sends_session_start() -> None:
     asyncio.run(scenario())
 
 
+def test_tap_puts_client_active() -> None:
+    async def scenario() -> None:
+        app = make_app()
+        await app.tap()
+        assert app.state is ClientState.ACTIVE
+
+    asyncio.run(scenario())
+
+
+def test_audio_forwarded_after_tap() -> None:
+    async def scenario() -> None:
+        transport = FakeTransport()
+        app = make_app(transport=transport)
+        await app.tap()
+        await app.forward_audio(b"\x01\x02")
+        assert transport.sent_audio == [b"\x01\x02"]
+
+    asyncio.run(scenario())
+
+
 def test_session_started_moves_to_active() -> None:
     async def scenario() -> None:
         app = make_app()

@@ -44,10 +44,33 @@ class FakeSession:
     async def receive(self) -> Any:
         if self._block:
             await asyncio.Event().wait()
-        for response in self._responses:
-            yield response
+        while self._responses:
+            yield self._responses.pop(0)
         if self._receive_error is not None:
             raise self._receive_error
+
+
+class PerTurnSession:
+    """Models google-genai's per-turn ``receive()`` contract.
+
+    ``AsyncSession.receive()`` yields one complete model turn and returns while
+    the connection stays open; a later call yields the next turn. This fake
+    reproduces that seam, unlike ``FakeSession`` which drains a single iterator.
+    """
+
+    def __init__(self, turns: list[list[Any]]) -> None:
+        self._turns = list(turns)
+        self.sent_realtime: list[Any] = []
+
+    async def send_realtime_input(self, **kwargs: Any) -> None:
+        self.sent_realtime.append(kwargs)
+
+    async def receive(self) -> Any:
+        if not self._turns:
+            await asyncio.Event().wait()
+        turn = self._turns.pop(0)
+        for response in turn:
+            yield response
 
 
 class FakeLiveConnect:
@@ -286,6 +309,27 @@ def test_close_emits_closed_once_and_exits_the_context() -> None:
         await adapter.execute(CloseLiveConnection(connection_id="s1"))
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(adapter.recv(), 0.05)
+
+    asyncio.run(scenario())
+
+
+def test_consecutive_turns_do_not_close_the_live_connection() -> None:
+    async def scenario() -> None:
+        turns = [
+            [SimpleNamespace(data=b"\x11")],
+            [SimpleNamespace(data=b"\x22")],
+        ]
+        live_connect = FakeLiveConnect(session=PerTurnSession(turns))
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmAudio(data=b"\x11")
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmAudio(data=b"\x22")
+
+        await adapter.execute(CloseLiveConnection(connection_id="s1"))
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed()
 
     asyncio.run(scenario())
 

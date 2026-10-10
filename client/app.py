@@ -51,6 +51,10 @@ class ClientApp:
             await self._flush_playback()
             return
         log.info("Démarrage de Session demandé")
+        # Un tap démarre la Session côté client : la transmission du micro
+        # commence tout de suite. Le serveur seul décide quand la Session
+        # devient visible (il peut la refermer sans qu'Athena parle).
+        self._state = ClientState.ACTIVE
         await self._transport.send_session_start()
 
     async def run(self) -> None:
