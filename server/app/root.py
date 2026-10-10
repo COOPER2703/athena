@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from typing import Mapping, TextIO
+from typing import Awaitable, Callable, Mapping
 
 from server.adapters.gemini import GeminiLiveAdapter
 from server.adapters.trace import emit
@@ -45,13 +44,12 @@ class App:
         gemini: GeminiLiveAdapter,
         clock: AsyncioClock,
         trace_sink: TraceSink,
-        coordinator: Coordinator | None = None,
     ) -> None:
         self._transport = transport
         self._gemini = gemini
         self._clock = clock
         self._trace_sink = trace_sink
-        self._coordinator = coordinator or Coordinator()
+        self._coordinator = Coordinator()
         self._events: asyncio.Queue[Event] = asyncio.Queue()
 
     async def run(self) -> None:
@@ -127,12 +125,13 @@ class App:
         emit(self._trace_sink, _TRACE_SOURCE, kind, payload=payload, level=level)
 
 
-def build_app(config: AppConfig, *, trace_stream: TextIO | None = None) -> App:
+def build_app(config: AppConfig) -> App:
     """Construit explicitement : config → trace → adaptateurs → Coordinator."""
-    trace_sink = build_trace_sink(
-        debug_decisions=config.debug_decisions, stream=trace_stream
+    trace_sink = build_trace_sink(debug_decisions=config.debug_decisions)
+    install_logging_bridge(
+        trace_sink,
+        level="DEBUG" if config.debug_decisions else config.log_level,
     )
-    install_logging_bridge(trace_sink, level=config.log_level)
 
     transport = WebSocketTransport(
         host=config.server.host,

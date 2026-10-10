@@ -18,6 +18,7 @@ from server.app.trace import (
 from server.core.commands import Trace
 from server.core.coordinator import Coordinator
 from server.core.events import (
+    ClientRegistered,
     LlmOpened,
     LlmTranscription,
     Role,
@@ -87,6 +88,30 @@ def test_debug_decisions_off_by_default_hides_debug_render() -> None:
     sink = build_trace_sink(debug_decisions=False, stream=stream)
     sink.emit(_entry(kind="ClientAudio", level="debug"))
     assert stream.getvalue() == ""
+
+
+def test_debug_decisions_gates_a_real_decision_entry_end_to_end() -> None:
+    off_stream = io.StringIO()
+    off_sink = build_trace_sink(debug_decisions=False, stream=off_stream)
+    on_stream = io.StringIO()
+    on_sink = build_trace_sink(debug_decisions=True, stream=on_stream)
+
+    decision = next(
+        command
+        for command in Coordinator().handle(ClientRegistered(client_id="c1"))
+        if isinstance(command, Trace)
+    )
+    for sink in (off_sink, on_sink):
+        emit(
+            sink,
+            decision.source,
+            decision.kind,
+            payload=decision.payload,
+            level=decision.level,
+        )
+
+    assert "ClientRegistered" not in off_stream.getvalue()
+    assert "ClientRegistered" in on_stream.getvalue()
 
 
 def test_logging_bridge_feeds_third_party_logs_into_the_stream() -> None:

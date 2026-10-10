@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TypeVar
 
 from conftest import RecordingTraceSink, wait_until
 from protocol import SessionEndReason
-from server.app.root import App
+from server.app.config import AppConfig, GeminiConfig
+from server.app.root import App, build_app
 from server.core.commands import (
     AnnounceSessionEnded,
     AnnounceSessionStarted,
@@ -279,3 +281,19 @@ def test_shutdown_requested_is_traced_even_when_idle() -> None:
         assert any(e.kind == "ShutdownRequested" for e in sink.entries)
 
     asyncio.run(scenario())
+
+
+def test_build_app_installs_logging_bridge_debug_only_when_flag_on() -> None:
+    root = logging.getLogger()
+    original_handlers = root.handlers[:]
+    original_level = root.level
+    gemini = GeminiConfig(api_key="test-key")
+    try:
+        build_app(AppConfig(gemini=gemini, debug_decisions=True))
+        assert root.level == logging.DEBUG
+
+        build_app(AppConfig(gemini=gemini, debug_decisions=False, log_level="WARNING"))
+        assert root.level == logging.WARNING
+    finally:
+        root.handlers[:] = original_handlers
+        root.setLevel(original_level)
