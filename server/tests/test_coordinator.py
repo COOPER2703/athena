@@ -167,6 +167,15 @@ def test_trace_carries_observability_shape():
     assert trace.payload["client_id"] == "c1"
 
 
+def test_decision_trace_is_emitted_at_debug_level():
+    coordinator = Coordinator()
+    commands = coordinator.handle(ClientRegistered(client_id="c1"))
+    trace = next(command for command in commands if isinstance(command, Trace))
+
+    assert trace.kind == "ClientRegistered"
+    assert trace.level == "debug"
+
+
 def test_client_tool_result_is_trace_only_and_leaves_state_unchanged():
     coordinator = Coordinator()
     commands = coordinator.handle(

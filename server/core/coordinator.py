@@ -317,6 +317,7 @@ class Coordinator:
                 to_state=self._state,
                 client_id=self._client_id if client_id is None else client_id,
                 cause=cause,
+                level="debug",
             )
         ]
 
@@ -331,6 +332,7 @@ class Coordinator:
         cause: str | None = None,
         connection_id: str | None = None,
         session_id: str | None = None,
+        level: str = "info",
     ) -> Trace:
         payload: dict[str, object] = {
             "connection_id": (
@@ -345,4 +347,4 @@ class Coordinator:
             payload["reason"] = reason
         if cause is not None:
             payload["cause"] = cause
-        return Trace(source=_TRACE_SOURCE, kind=kind, payload=payload)
+        return Trace(source=_TRACE_SOURCE, kind=kind, payload=payload, level=level)

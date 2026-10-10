@@ -11,3 +11,6 @@ console web en sont deux consommateurs. Rien n'est loggé en dehors de ce flux.
   situer un bug, ce qui est un objectif de premier ordre de la réécriture.
 - Options rejetées : deux canaux séparés (logs texte + flux d'événements), qui obligent à
   recoller mentalement les morceaux ; le débogage ad hoc de `ATHENA_DEBUG_DECISIONS`.
+- `ATHENA_DEBUG_DECISIONS` élève la verbosité du flux unique (les décisions du noyau et les
+  logs `DEBUG` tiers y entrent, sinon filtrés) : il n'ouvre jamais un second canal de
+  débogage, contrairement au mécanisme legacy rejeté.
