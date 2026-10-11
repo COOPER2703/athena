@@ -38,6 +38,7 @@ from server.core.events import (
     ShutdownRequested,
     TimerFired,
 )
+from server.core.memory_tools import register_memory_tools
 from server.core.ports import (
     ClientLink,
     Clock,
@@ -104,4 +105,5 @@ __all__ = [
     "TraceEntry",
     "TraceSink",
     "local_now",
+    "register_memory_tools",
 ]

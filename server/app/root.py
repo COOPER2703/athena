@@ -38,6 +38,7 @@ from server.core.commands import (
 )
 from server.core.coordinator import Coordinator
 from server.core.events import Event, ShutdownRequested
+from server.core.memory_tools import register_memory_tools
 from server.core.ports import MemoryStore, TraceSink
 from server.core.tools import ToolRegistry
 
@@ -108,6 +109,7 @@ class App:
         self._trace_sink = trace_sink
         self._memory = memory
         self._scheduler = scheduler
+        self._tools = tools
         self._coordinator = Coordinator(
             memory=memory,
             user_id=user_id,
@@ -122,6 +124,10 @@ class App:
     @property
     def scheduler(self) -> ConsolidationScheduler | None:
         return self._scheduler
+
+    @property
+    def tools(self) -> ToolRegistry | None:
+        return self._tools
 
     async def run(self) -> None:
         """Démarre les adaptateurs puis traite les Événements jusqu'à l'arrêt."""
@@ -265,6 +271,14 @@ def build_app(config: AppConfig) -> App:
         on_run=lambda report: _trace_consolidation(trace_sink, report),
     )
 
+    tools = ToolRegistry()
+    register_memory_tools(
+        tools,
+        memory,
+        config.memory.user_id,
+        forget_max_distance=config.memory.recall_max_distance,
+    )
+
     return App(
         transport=transport,
         gemini=gemini,
@@ -273,6 +287,7 @@ def build_app(config: AppConfig) -> App:
         memory=memory,
         user_id=config.memory.user_id,
         system_prompt=load_system_prompt(),
+        tools=tools,
         recall_k=config.memory.recall_k,
         recall_window_turns=config.memory.recall_window_turns,
         recall_max_distance=config.memory.recall_max_distance,
