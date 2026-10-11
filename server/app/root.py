@@ -5,12 +5,23 @@ from pathlib import Path
 from typing import Awaitable, Callable, Mapping
 
 from server.adapters.gemini import GeminiLiveAdapter
-from server.adapters.memory import SentenceTransformerEmbedder, SqliteMemoryStore
+from server.adapters.memory import (
+    GeminiFactExtractor,
+    SentenceTransformerEmbedder,
+    SqliteMemoryStore,
+)
 from server.adapters.trace import emit
 from server.adapters.transport import WebSocketTransport
 from server.app.clock import AsyncioClock
 from server.app.config import AppConfig
 from server.app.trace import build_trace_sink, install_logging_bridge
+from server.core.consolidation import (
+    Consolidation,
+    ConsolidationPolicy,
+    ConsolidationReport,
+    ConsolidationScheduler,
+    local_now,
+)
 from server.core.commands import (
     AnnounceSessionEnded,
     AnnounceSessionStarted,
@@ -39,6 +50,33 @@ def load_system_prompt(path: str | Path | None = None) -> str:
     return Path(path or _SYSTEM_PROMPT_PATH).read_text(encoding="utf-8")
 
 
+def _trace_consolidation(
+    trace_sink: TraceSink, report: ConsolidationReport
+) -> None:
+    """Émet la décision de Consolidation dans le flux unique (ADR-0004)."""
+    emit(
+        trace_sink,
+        "consolidation",
+        "Consolidation",
+        payload={
+            "facts_extracted": report.facts_extracted,
+            "facts_stored": report.facts_stored,
+            "duplicates": report.duplicates,
+        },
+    )
+    emit(
+        trace_sink,
+        "consolidation",
+        "ConsolidationDetail",
+        payload={
+            "since": report.since.isoformat() if report.since else None,
+            "purged": report.purged,
+            "transcript_chars": report.transcript_chars,
+        },
+        level="debug",
+    )
+
+
 class App:
     """Racine de composition : possède les adaptateurs et la boucle de propriété.
 
@@ -62,12 +100,14 @@ class App:
         recall_k: int = 5,
         recall_window_turns: int = 3,
         recall_max_distance: float = 0.6,
+        scheduler: ConsolidationScheduler | None = None,
     ) -> None:
         self._transport = transport
         self._gemini = gemini
         self._clock = clock
         self._trace_sink = trace_sink
         self._memory = memory
+        self._scheduler = scheduler
         self._coordinator = Coordinator(
             memory=memory,
             user_id=user_id,
@@ -78,6 +118,10 @@ class App:
             recall_max_distance=recall_max_distance,
         )
         self._events: asyncio.Queue[Event] = asyncio.Queue()
+
+    @property
+    def scheduler(self) -> ConsolidationScheduler | None:
+        return self._scheduler
 
     async def run(self) -> None:
         """Démarre les adaptateurs puis traite les Événements jusqu'à l'arrêt."""
@@ -90,6 +134,9 @@ class App:
             asyncio.create_task(self._pump(self._gemini.recv)),
             asyncio.create_task(self._pump(self._clock.recv)),
         ]
+        if self._scheduler is not None:
+            # Background task: never on the event-handling path (ADR-0009).
+            pumps.append(asyncio.create_task(self._scheduler.run()))
         try:
             await self._core_loop()
         finally:
@@ -196,6 +243,28 @@ def build_app(config: AppConfig) -> App:
         journal_retention_days=config.memory.journal_retention_days,
     )
 
+    extractor = GeminiFactExtractor(
+        api_key=config.gemini.api_key,
+        model=config.memory.consolidation_model,
+        trace_sink=trace_sink,
+    )
+    policy = ConsolidationPolicy(config.memory.consolidation_hours)
+    consolidation = Consolidation(
+        memory=memory,
+        extractor=extractor,
+        policy=policy,
+        user_id=config.memory.user_id,
+        dedup_threshold=config.memory.dedup_threshold,
+        journal_retention_days=config.memory.journal_retention_days,
+    )
+    scheduler = ConsolidationScheduler(
+        consolidation=consolidation,
+        policy=policy,
+        now=local_now,
+        sleep=asyncio.sleep,
+        on_run=lambda report: _trace_consolidation(trace_sink, report),
+    )
+
     return App(
         transport=transport,
         gemini=gemini,
@@ -207,4 +276,5 @@ def build_app(config: AppConfig) -> App:
         recall_k=config.memory.recall_k,
         recall_window_turns=config.memory.recall_window_turns,
         recall_max_distance=config.memory.recall_max_distance,
+        scheduler=scheduler,
     )

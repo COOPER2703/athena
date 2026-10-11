@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Mapping, NamedTuple, Protocol, Sequence
 
 from protocol import SessionEndReason
@@ -67,12 +68,23 @@ class MemoryHit:
     source: str
 
 
+@dataclass(frozen=True, slots=True)
+class JournalEntry:
+    """One Journal turn, as read back by the Consolidation (pure)."""
+
+    role: str
+    text: str
+
+
 class MemoryStore(Protocol):
     """Async memory port injected into the pure kernel (D2).
 
     ``session_context``/``append_turn`` are the ticket-#26 seam; ``recall``,
     ``save`` and ``forget`` are declared here so the adapter can grow into them
-    without the kernel changing signature (issues #27/#29/#30).
+    without the kernel changing signature (issues #27/#29). The Consolidation
+    seam (#30) is ``journal_entries_since``/``last_consolidation``/
+    ``mark_consolidated`` (Journal window and run marker), ``is_duplicate`` and
+    ``append_fact`` (long-term writes), and ``purge_older_than`` (retention).
     """
 
     async def session_context(self, user_id: str) -> str: ...
@@ -86,6 +98,34 @@ class MemoryStore(Protocol):
     async def forget(
         self, user_id: str, query: str, max_distance: float
     ) -> bool: ...
+
+    async def journal_entries_since(
+        self, user_id: str, since: datetime | None
+    ) -> list[JournalEntry]: ...
+
+    async def last_consolidation(self, user_id: str) -> datetime | None: ...
+
+    async def mark_consolidated(self, user_id: str, when: datetime) -> None: ...
+
+    async def is_duplicate(
+        self, user_id: str, text: str, max_distance: float
+    ) -> bool: ...
+
+    async def append_fact(
+        self, user_id: str, text: str, *, pinned: bool = False
+    ) -> None: ...
+
+    async def purge_older_than(self, days: int | None = None) -> int: ...
+
+
+class FactExtractor(Protocol):
+    """Turns a Journal transcript into durable facts (issue #30).
+
+    The adapter owns the LLM call (non-live ``generate_content``) and never
+    raises: an extraction failure yields an empty list.
+    """
+
+    async def extract(self, transcript: str) -> list[str]: ...
 
 
 class Embedder(Protocol):

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import sqlite_vec
 
-from server.core.ports import Embedder, MemoryHit
+from server.core.ports import Embedder, JournalEntry, MemoryHit
 
 DEFAULT_SHORT_TERM_WINDOW = 20
 DEFAULT_RECENT_EVENTS_WINDOW = 20
@@ -15,6 +15,7 @@ DEFAULT_RETENTION_DAYS = 3
 EMBEDDING_DIM = 384
 _RECALL_FETCH = 20
 _UTC_FORMAT = "%Y-%m-%d %H:%M:%S"
+_CONSOLIDATION_KEY = "last_consolidation:{user_id}"
 
 _JOURNAL_SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS journal USING vec0(
@@ -42,6 +43,13 @@ CREATE TABLE IF NOT EXISTS fact_sources (
     journal_id INTEGER,
     user_id TEXT,
     PRIMARY KEY (fact_id, journal_id)
+)
+"""
+
+_CONSOLIDATION_STATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS consolidation_state (
+    key TEXT PRIMARY KEY,
+    value TEXT
 )
 """
 
@@ -87,6 +95,7 @@ class SqliteMemoryStore:
             db.execute(_JOURNAL_SCHEMA)
             db.execute(_FACTS_SCHEMA)
             db.execute(_FACT_SOURCES_SCHEMA)
+            db.execute(_CONSOLIDATION_STATE_SCHEMA)
             db.commit()
             self._db = db
         return self._db
@@ -170,6 +179,74 @@ class SqliteMemoryStore:
         hits.sort(key=lambda hit: hit.distance)
         return hits[:_RECALL_FETCH]
 
+    async def journal_entries_since(
+        self, user_id: str, since: datetime | None
+    ) -> list[JournalEntry]:
+        """Journal turns for ``user_id`` since ``since`` (all if ``None``)."""
+        db = self._get_db()
+        query = "SELECT role, content FROM journal WHERE user_id = ?"
+        params: list[object] = [user_id]
+        if since is not None:
+            query += " AND created_at >= ?"
+            params.append(self._format_utc(since))
+        query += " ORDER BY rowid ASC"
+        with self._lock:
+            rows = db.execute(query, params).fetchall()
+        return [JournalEntry(role=row[0], text=row[1]) for row in rows]
+
+    async def last_consolidation(self, user_id: str) -> datetime | None:
+        """Instant of the last Consolidation for ``user_id``, or ``None``."""
+        db = self._get_db()
+        with self._lock:
+            row = db.execute(
+                "SELECT value FROM consolidation_state WHERE key = ?",
+                (self._consolidation_key(user_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        return datetime.strptime(row[0], _UTC_FORMAT).replace(tzinfo=timezone.utc)
+
+    async def mark_consolidated(self, user_id: str, when: datetime) -> None:
+        """Record that a Consolidation ran at ``when`` (idempotent per user)."""
+        db = self._get_db()
+        with self._lock:
+            db.execute(
+                "INSERT INTO consolidation_state (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (self._consolidation_key(user_id), self._format_utc(when)),
+            )
+            db.commit()
+
+    async def is_duplicate(
+        self, user_id: str, text: str, max_distance: float
+    ) -> bool:
+        """True when the nearest long-term fact is closer than ``max_distance``."""
+        vector = json.dumps(await self._embedder.embed(text))
+        db = self._get_db()
+        with self._lock:
+            row = db.execute(
+                "SELECT vec_distance_cosine(embedding, ?) AS dist FROM facts "
+                "WHERE user_id = ? ORDER BY dist LIMIT 1",
+                (vector, user_id),
+            ).fetchone()
+        if row is None:
+            return False
+        return row[0] < max_distance
+
+    async def append_fact(
+        self, user_id: str, text: str, *, pinned: bool = False
+    ) -> None:
+        """Write a durable long-term fact (Consolidation never pins)."""
+        vector = await self._embedder.embed(text)
+        db = self._get_db()
+        with self._lock:
+            db.execute(
+                "INSERT INTO facts (embedding, user_id, content, pinned, created_at) "
+                "VALUES (?, ?, ?, ?, datetime('now'))",
+                (json.dumps(vector), user_id, text, 1 if pinned else 0),
+            )
+            db.commit()
+
     async def purge_older_than(self, days: int | None = None) -> int:
         """Delete Journal entries older than ``days`` (default: retention)."""
         db = self._get_db()
@@ -187,4 +264,14 @@ class SqliteMemoryStore:
     def _cutoff(self, days: int | None) -> str:
         retention = self._retention_days if days is None else days
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention)
-        return cutoff.strftime(_UTC_FORMAT)
+        return self._format_utc(cutoff)
+
+    @staticmethod
+    def _format_utc(moment: datetime) -> str:
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return moment.astimezone(timezone.utc).strftime(_UTC_FORMAT)
+
+    @staticmethod
+    def _consolidation_key(user_id: str) -> str:
+        return _CONSOLIDATION_KEY.format(user_id=user_id)
