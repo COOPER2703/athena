@@ -30,6 +30,9 @@ class FakeMemoryStore:
             return ""
         return "Profil:\n" + "\n".join(f"- {content}" for content in pinned)
 
+    async def pinned_facts(self, user_id: str) -> list[str]:
+        return [content for content, is_pinned in self._facts if is_pinned]
+
     async def append_turn(self, user_id: str, role: str, text: str) -> None:
         self.turns.append((user_id, role, text))
 
@@ -187,9 +190,51 @@ def test_save_memory_coerces_loose_arguments() -> None:
         coordinator,
         [_tool_call("save_memory", {"content": 42, "kind": "Profile"})],
     )
-    _drive(coordinator, [_tool_call("save_memory", {"content": "x", "kind": 7})])
 
-    assert memory.saved == [("alice", "42", True), ("alice", "x", False)]
+    assert memory.saved == [("alice", "42", True)]
+
+
+def test_save_memory_with_an_unknown_kind_is_rejected_without_writing() -> None:
+    memory = FakeMemoryStore()
+    coordinator = Coordinator(memory=memory, user_id="alice", tools=_registry(memory))
+    _open_session(coordinator)
+
+    results = _results(
+        _drive(
+            coordinator,
+            [_tool_call("save_memory", {"content": "x", "kind": "préférence"})],
+        )
+    )
+
+    assert results[0].result["status"] == "error"
+    assert memory.saved == []
+
+
+def test_save_memory_with_a_non_string_kind_is_rejected_without_writing() -> None:
+    memory = FakeMemoryStore()
+    coordinator = Coordinator(memory=memory, user_id="alice", tools=_registry(memory))
+    _open_session(coordinator)
+
+    results = _results(
+        _drive(coordinator, [_tool_call("save_memory", {"content": "x", "kind": 7})])
+    )
+
+    assert results[0].result["status"] == "error"
+    assert memory.saved == []
+
+
+def test_save_memory_without_a_kind_is_rejected_without_writing() -> None:
+    memory = FakeMemoryStore()
+    coordinator = Coordinator(memory=memory, user_id="alice", tools=_registry(memory))
+    _open_session(coordinator)
+
+    results = _results(
+        _drive(coordinator, [_tool_call("save_memory", {"content": "x"})])
+    )
+
+    assert results[0].result["status"] == "error"
+    assert memory.saved == []
+
 
 
 def test_forget_memory_without_content_is_a_non_fatal_error() -> None:

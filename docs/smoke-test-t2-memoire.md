@@ -7,6 +7,9 @@ la boucle serveur/client d'origine.
 
 ## Prérequis
 
+Toutes les commandes de ce document se lancent **depuis la racine du dépôt**
+(le python de la venv locale s'écrit donc `.venv/bin/python`).
+
 - Un `GEMINI_API_KEY` valide (modèle Live et Consolidation).
 - Le protocole généré : `python protocol/proto/generate.py` (ou `make generate`).
 - Un micro et un haut-parleur accessibles au client (`pyaudio`).
@@ -105,7 +108,7 @@ marqueur de dernière consolidation puis redémarrez le serveur : le
 planificateur la rattrape au démarrage.
 
 ```sh
-/home/cooper/Documents/perso/athena/.venv/bin/python - <<'PY'
+.venv/bin/python - <<'PY'
 import sqlite3
 db = sqlite3.connect("athena_memory.db")   # ou ATHENA_MEMORY_DB
 db.execute("DELETE FROM consolidation_state")
@@ -122,7 +125,7 @@ run », étape 6).
 ## 7. Inspecter la base et l'injection `[MÉMOIRE]`
 
 ```sh
-/home/cooper/Documents/perso/athena/.venv/bin/python - <<'PY'
+.venv/bin/python - <<'PY'
 import sqlite3
 db = sqlite3.connect("athena_memory.db")
 print("faits:", db.execute(
@@ -142,7 +145,7 @@ nombre de caractères l'est) ; pour le reproduire, cherchez les candidats dans l
 Journal et la mémoire long terme :
 
 ```sh
-/home/cooper/Documents/perso/athena/.venv/bin/python - <<'PY'
+.venv/bin/python - <<'PY'
 import asyncio
 from server.adapters.memory import SentenceTransformerEmbedder, SqliteMemoryStore
 
@@ -155,6 +158,31 @@ async def main():
 asyncio.run(main())
 PY
 ```
+
+## Mécanisme d'injection du Rappel (spike #25)
+
+Le bloc `[MÉMOIRE]` est injecté en cours de Session via `send_client_content`
+avec `role="user"` et **`turn_complete=False`** :
+
+```python
+await live.send_client_content(
+    turns=types.Content(role="user", parts=[types.Part(text=text)]),
+    turn_complete=False,   # ne déclenche aucune réponse du modèle
+)
+```
+
+- **Vérifié sur le vrai modèle** `gemini-3.1-flash-live-preview` (spike #25) :
+  aucune réponse parasite non sollicitée, et le contexte injecté est bien pris
+  en compte par le modèle.
+- Le rôle **`system` est refusé** par l'API (`1007 invalid argument`) ; le rôle
+  `model` est accepté mais sémantiquement faux. Le rôle retenu est `user`, la
+  traduction vivant dans l'adaptateur (le noyau ne connaît que le texte
+  `[MÉMOIRE]`).
+- **Repli documenté** : la doc du SDK déconseille de mélanger
+  `send_client_content` et `send_realtime_input` (l'audio montant) dans une même
+  conversation. Si l'entrelacement échoue en Session vocale réelle (caveat #25),
+  le repli est le **rappel à l'ouverture seulement** (Activation), sans injection
+  en cours de tour.
 
 ## Vérification automatisée
 
@@ -169,7 +197,7 @@ Consolidation (fenêtre, dédup, rétention, marqueur) et le câblage de la raci
 ## Résultat du run
 
 **Date** : 2026-10-11 · **Machine** : poste de dev Linux · **Python** : 3.12.13
-(venv partagée `/home/cooper/Documents/perso/athena/.venv`) ·
+(venv locale `.venv`, à exécuter depuis la racine du dépôt) ·
 `sentence-transformers` 6.1.0, `torch` 2.14.1+cpu, `sqlite-vec`.
 
 **Ce qui a été exécuté pour de vrai** (chemin non-voix, audio/VAD humain non

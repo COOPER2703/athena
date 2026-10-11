@@ -18,6 +18,7 @@ from server.core.commands import (
     SendAudioToClient,
     SendAudioToLlm,
     SendMemoryToLlm,
+    SendToolResultToLlm,
     StartIdleTimer,
 )
 from server.core.events import (
@@ -60,6 +61,10 @@ class FakeAdapter:
 
     async def execute(self, command: Command) -> None:
         self.commands.append(command)
+        if isinstance(command, SendToolResultToLlm):
+            self.tool_results.append(
+                (command.connection_id, command.tool_id, command.name, command.result)
+            )
 
     async def send_tool_result(
         self, connection_id: str, tool_id: str, name: str, result: object
@@ -107,6 +112,9 @@ class FakeMemory:
 
     async def session_context(self, user_id: str) -> str:
         return "\n".join(self._pinned)
+
+    async def pinned_facts(self, user_id: str) -> list[str]:
+        return list(self._pinned)
 
     async def append_turn(self, user_id: str, role: str, text: str) -> None:
         self.turns.append((role, text))

@@ -92,6 +92,11 @@ def register_memory_tools(
         if not content:
             return {"status": "error", "message": "content is required"}
         kind = _as_text(arguments.get("kind")).lower()
+        if kind not in (_PROFILE, _FACT):
+            return {
+                "status": "error",
+                "message": "kind must be 'profile' or 'fact'",
+            }
         pinned = kind == _PROFILE
         try:
             await memory.save(user_id, content, pinned=pinned)

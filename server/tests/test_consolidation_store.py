@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, timezone
 
 from server.adapters.memory import SqliteMemoryStore
 from server.core.consolidation import Consolidation, ConsolidationPolicy
-from server.core.ports import JournalEntry
 
 _DIM = 384
 
@@ -153,7 +152,10 @@ def test_journal_entries_since_returns_only_the_window_in_order(tmp_path) -> Non
         since = datetime.now(timezone.utc) - timedelta(hours=1)
         entries = await store.journal_entries_since("alice", since)
 
-        assert entries == [JournalEntry("assistant", "récent")]
+        assert [(entry.role, entry.text) for entry in entries] == [
+            ("assistant", "récent")
+        ]
+        assert entries[0].id > 0
 
     asyncio.run(scenario())
 
@@ -168,6 +170,48 @@ def test_journal_entries_since_none_returns_the_whole_journal(tmp_path) -> None:
         entries = await store.journal_entries_since("alice", None)
 
         assert [entry.text for entry in entries] == ["un", "deux"]
+
+    asyncio.run(scenario())
+
+
+def test_forget_cascades_to_the_source_journal_turns(tmp_path) -> None:
+    store = _store(tmp_path)
+
+    async def scenario() -> None:
+        await store.append_turn(
+            "alice", "user", "je travaille comme développeur Python"
+        )
+        await store.append_turn("alice", "assistant", "noté")
+        consolidation = Consolidation(
+            memory=store,
+            extractor=StaticExtractor(["L'utilisateur est développeur Python"]),
+            policy=ConsolidationPolicy((0, 12)),
+            user_id="alice",
+        )
+
+        await consolidation.run(datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc))
+
+        db = store._get_db()
+        stored_sources = db.execute(
+            "SELECT COUNT(*) FROM fact_sources WHERE user_id = 'alice'"
+        ).fetchone()[0]
+        assert stored_sources > 0
+
+        removed = await store.forget("alice", "développeur Python", 0.6)
+
+        assert removed is True
+        assert (
+            db.execute(
+                "SELECT COUNT(*) FROM journal WHERE user_id = 'alice'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            db.execute(
+                "SELECT COUNT(*) FROM fact_sources WHERE user_id = 'alice'"
+            ).fetchone()[0]
+            == 0
+        )
 
     asyncio.run(scenario())
 

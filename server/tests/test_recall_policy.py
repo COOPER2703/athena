@@ -22,15 +22,22 @@ class FakeMemory:
     """Pure in-memory ``MemoryStore`` double (no I/O, no torch)."""
 
     def __init__(
-        self, hits: list[MemoryHit] | None = None, context: str = ""
+        self,
+        hits: list[MemoryHit] | None = None,
+        context: str = "",
+        pinned: list[str] | None = None,
     ) -> None:
         self.context = context
         self._hits = list(hits or [])
+        self._pinned = list(pinned or [])
         self.turns: list[tuple[str, str, str]] = []
         self.queries: list[tuple[str, str]] = []
 
     async def session_context(self, user_id: str) -> str:
         return self.context
+
+    async def pinned_facts(self, user_id: str) -> list[str]:
+        return list(self._pinned)
 
     async def append_turn(self, user_id: str, role: str, text: str) -> None:
         self.turns.append((user_id, role, text))
@@ -139,6 +146,38 @@ def test_a_memory_is_injected_at_most_once_per_session():
 
     assert memories(say(coordinator, "un"))
     assert memories(say(coordinator, "deux")) == []
+
+
+def test_a_pinned_fact_already_in_the_prompt_is_not_reinjected_by_recall():
+    memory = FakeMemory(
+        hits=[MemoryHit("Camille habite à Lyon", 0.1, "fact")],
+        context="Camille habite à Lyon",
+        pinned=["Camille habite à Lyon"],
+    )
+    coordinator = Coordinator(memory=memory)
+    open_session(coordinator)
+
+    assert memories(say(coordinator, "où habite Camille ?")) == []
+
+
+def test_a_non_pinned_hit_is_still_injected_when_pinned_facts_exist():
+    memory = FakeMemory(
+        hits=[
+            MemoryHit("Camille habite à Lyon", 0.1, "fact"),
+            MemoryHit("Les parents de Camille habitent à Nantes", 0.2, "fact"),
+        ],
+        pinned=["Camille habite à Lyon"],
+    )
+    coordinator = Coordinator(memory=memory)
+    open_session(coordinator)
+
+    assert memories(say(coordinator, "où habitent mes parents ?")) == [
+        SendMemoryToLlm(
+            connection_id="s1",
+            text="[MÉMOIRE]\n- Les parents de Camille habitent à Nantes",
+        )
+    ]
+
 
 
 def test_injection_is_truncated_to_recall_k():

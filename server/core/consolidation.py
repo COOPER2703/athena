@@ -110,6 +110,7 @@ class Consolidation:
         entries = await self._memory.journal_entries_since(self._user_id, last)
         transcript = self._transcript(entries)
         facts = await self._extractor.extract(transcript) if transcript else []
+        source_ids = self._source_ids(entries)
 
         stored = 0
         duplicates = 0
@@ -121,7 +122,9 @@ class Consolidation:
             ):
                 duplicates += 1
                 continue
-            await self._memory.append_fact(self._user_id, fact, pinned=False)
+            await self._memory.append_fact(
+                self._user_id, fact, pinned=False, source_ids=source_ids
+            )
             stored += 1
 
         purged = await self._memory.purge_older_than(self._retention_days)
@@ -143,6 +146,13 @@ class Consolidation:
             f"[{entry.role}] {entry.text}"
             for entry in entries
             if entry.role != RECENT_EVENT_ROLE
+        )
+
+    @staticmethod
+    def _source_ids(entries: list[JournalEntry]) -> tuple[int, ...]:
+        """Journal ids of the non-Event turns the facts were extracted from."""
+        return tuple(
+            entry.id for entry in entries if entry.role != RECENT_EVENT_ROLE
         )
 
 

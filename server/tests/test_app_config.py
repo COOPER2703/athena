@@ -163,6 +163,21 @@ def test_memory_reads_and_coerces_environment() -> None:
     assert cfg.memory.consolidation_hours == (6, 18)
 
 
+def test_cosine_distance_thresholds_allow_values_above_one() -> None:
+    # ``vec_distance_cosine`` ranges over [0, 2]; both thresholds are upper
+    # bounds on that distance, so a legitimate value in (1, 2] must be accepted.
+    cfg = load_config(
+        env={
+            "GEMINI_API_KEY": "k",
+            "ATHENA_RECALL_MAX_DISTANCE": "1.5",
+            "ATHENA_DEDUP_THRESHOLD": "1.9",
+        },
+        env_file=None,
+    )
+    assert cfg.memory.recall_max_distance == 1.5
+    assert cfg.memory.dedup_threshold == 1.9
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -174,7 +189,8 @@ def test_memory_reads_and_coerces_environment() -> None:
         {"ATHENA_JOURNAL_RETENTION_DAYS": "0"},
         {"ATHENA_RECALL_K": "0"},
         {"ATHENA_RECALL_WINDOW_TURNS": "0"},
-        {"ATHENA_RECALL_MAX_DISTANCE": "1.5"},
+        {"ATHENA_RECALL_MAX_DISTANCE": "2.5"},
+        {"ATHENA_DEDUP_THRESHOLD": "2.5"},
         {"ATHENA_DEDUP_THRESHOLD": "-0.1"},
         {"ATHENA_SHORT_TERM_WINDOW": "not-a-number"},
         {"ATHENA_CONSOLIDATION_HOURS": "24"},

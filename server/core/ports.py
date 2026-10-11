@@ -72,6 +72,7 @@ class MemoryHit:
 class JournalEntry:
     """One Journal turn, as read back by the Consolidation (pure)."""
 
+    id: int
     role: str
     text: str
 
@@ -88,6 +89,8 @@ class MemoryStore(Protocol):
     """
 
     async def session_context(self, user_id: str) -> str: ...
+
+    async def pinned_facts(self, user_id: str) -> list[str]: ...
 
     async def append_turn(self, user_id: str, role: str, text: str) -> None: ...
 
@@ -112,7 +115,12 @@ class MemoryStore(Protocol):
     ) -> bool: ...
 
     async def append_fact(
-        self, user_id: str, text: str, *, pinned: bool = False
+        self,
+        user_id: str,
+        text: str,
+        *,
+        pinned: bool = False,
+        source_ids: Sequence[int] = (),
     ) -> None: ...
 
     async def purge_older_than(self, days: int | None = None) -> int: ...

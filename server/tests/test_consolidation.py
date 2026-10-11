@@ -98,6 +98,7 @@ class FakeStore:
         self.duplicates = set(duplicates or [])
         self.last = last
         self.facts: list[tuple[str, bool]] = []
+        self.sources: list[tuple[int, ...]] = []
         self.marks: list[datetime] = []
         self.purged: list[int | None] = []
         self.since_seen: list[datetime | None] = []
@@ -105,6 +106,9 @@ class FakeStore:
 
     async def session_context(self, user_id: str) -> str:
         return ""
+
+    async def pinned_facts(self, user_id: str) -> list[str]:
+        return []
 
     async def append_turn(self, user_id: str, role: str, text: str) -> None:
         pass
@@ -135,8 +139,16 @@ class FakeStore:
         self.duplicate_checks.append((text, max_distance))
         return text in self.duplicates
 
-    async def append_fact(self, user_id: str, text: str, *, pinned: bool = False) -> None:
+    async def append_fact(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        pinned: bool = False,
+        source_ids: tuple[int, ...] = (),
+    ) -> None:
         self.facts.append((text, pinned))
+        self.sources.append(tuple(source_ids))
 
     async def purge_older_than(self, days: int | None = None) -> int:
         self.purged.append(days)
@@ -175,7 +187,7 @@ def _run(consolidation: Consolidation, now: datetime) -> ConsolidationReport:
 
 def test_extracted_facts_are_stored_as_non_pinned_durable_facts() -> None:
     store = FakeStore(
-        entries=[JournalEntry("user", "j'habite à Lyon")],
+        entries=[JournalEntry(1, "user", "j'habite à Lyon")],
         last=_dt(day=1, hour=0),
     )
     extractor = RecordingExtractor(["L'utilisateur habite à Lyon"])
@@ -190,9 +202,9 @@ def test_extracted_facts_are_stored_as_non_pinned_durable_facts() -> None:
 def test_event_turns_are_excluded_from_the_transcript() -> None:
     store = FakeStore(
         entries=[
-            JournalEntry("user", "bonjour"),
-            JournalEntry("event", "REUNION ANNULÉE"),
-            JournalEntry("assistant", "salut"),
+            JournalEntry(1, "user", "bonjour"),
+            JournalEntry(2, "event", "REUNION ANNULÉE"),
+            JournalEntry(3, "assistant", "salut"),
         ],
         last=_dt(day=1, hour=0),
     )
@@ -206,9 +218,26 @@ def test_event_turns_are_excluded_from_the_transcript() -> None:
     assert "REUNION" not in transcript
 
 
+def test_stored_facts_are_linked_to_the_non_event_source_journal_ids() -> None:
+    store = FakeStore(
+        entries=[
+            JournalEntry(1, "user", "bonjour"),
+            JournalEntry(2, "event", "REUNION ANNULÉE"),
+            JournalEntry(3, "assistant", "salut"),
+        ],
+        last=_dt(day=1, hour=0),
+    )
+
+    _run(_consolidation(store, RecordingExtractor(["un fait"])), _dt(hour=12))
+
+    assert store.facts == [("un fait", False)]
+    assert store.sources == [(1, 3)]
+
+
+
 def test_duplicates_are_skipped_using_the_dedup_threshold() -> None:
     store = FakeStore(
-        entries=[JournalEntry("user", "j'aime le café")],
+        entries=[JournalEntry(1, "user", "j'aime le café")],
         duplicates={"L'utilisateur aime le café"},
         last=_dt(day=1, hour=0),
     )
@@ -228,7 +257,7 @@ def test_duplicates_are_skipped_using_the_dedup_threshold() -> None:
 
 def test_journal_is_purged_at_the_retention_setting() -> None:
     store = FakeStore(
-        entries=[JournalEntry("user", "salut")], last=_dt(day=1, hour=0)
+        entries=[JournalEntry(1, "user", "salut")], last=_dt(day=1, hour=0)
     )
 
     _run(_consolidation(store, RecordingExtractor([]), journal_retention_days=3), _dt(hour=12))
@@ -238,7 +267,7 @@ def test_journal_is_purged_at_the_retention_setting() -> None:
 
 def test_a_run_marks_the_consolidation_time() -> None:
     store = FakeStore(
-        entries=[JournalEntry("user", "salut")], last=_dt(day=1, hour=0)
+        entries=[JournalEntry(1, "user", "salut")], last=_dt(day=1, hour=0)
     )
     now = _dt(hour=12)
 
@@ -249,7 +278,7 @@ def test_a_run_marks_the_consolidation_time() -> None:
 
 def test_consolidation_never_pins() -> None:
     store = FakeStore(
-        entries=[JournalEntry("user", "je suis développeur")],
+        entries=[JournalEntry(1, "user", "je suis développeur")],
         last=_dt(day=1, hour=0),
     )
     extractor = RecordingExtractor(["L'utilisateur est développeur", "Il code en Python"])
@@ -261,7 +290,7 @@ def test_consolidation_never_pins() -> None:
 
 def test_an_undue_run_touches_nothing() -> None:
     store = FakeStore(
-        entries=[JournalEntry("user", "salut")], last=_dt(hour=0)
+        entries=[JournalEntry(1, "user", "salut")], last=_dt(hour=0)
     )
     extractor = RecordingExtractor(["un fait"])
 
@@ -276,7 +305,7 @@ def test_an_undue_run_touches_nothing() -> None:
 
 def test_an_event_only_window_skips_extraction_but_still_purges_and_marks() -> None:
     store = FakeStore(
-        entries=[JournalEntry("event", "quelque chose")],
+        entries=[JournalEntry(1, "event", "quelque chose")],
         last=_dt(day=1, hour=0),
     )
     extractor = RecordingExtractor(["ne doit pas être appelé"])
@@ -292,7 +321,7 @@ def test_an_event_only_window_skips_extraction_but_still_purges_and_marks() -> N
 
 def test_the_window_starts_at_the_last_consolidation() -> None:
     last = _dt(day=1, hour=0)
-    store = FakeStore(entries=[JournalEntry("user", "salut")], last=last)
+    store = FakeStore(entries=[JournalEntry(1, "user", "salut")], last=last)
 
     _run(_consolidation(store, RecordingExtractor([])), _dt(hour=12))
 
