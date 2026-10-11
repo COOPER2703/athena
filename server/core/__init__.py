@@ -12,6 +12,13 @@ from server.core.commands import (
     StartIdleTimer,
     Trace,
 )
+from server.core.consolidation import (
+    Consolidation,
+    ConsolidationPolicy,
+    ConsolidationReport,
+    ConsolidationScheduler,
+    local_now,
+)
 from server.core.coordinator import Coordinator, IDLE_TIMEOUT
 from server.core.events import (
     ClientAudio,
@@ -35,6 +42,8 @@ from server.core.ports import (
     ClientLink,
     Clock,
     Embedder,
+    FactExtractor,
+    JournalEntry,
     LlmSocket,
     MemoryHit,
     MemoryStore,
@@ -57,10 +66,16 @@ __all__ = [
     "Clock",
     "CloseLiveConnection",
     "Command",
+    "Consolidation",
+    "ConsolidationPolicy",
+    "ConsolidationReport",
+    "ConsolidationScheduler",
     "Coordinator",
     "Embedder",
     "Event",
+    "FactExtractor",
     "IDLE_TIMEOUT",
+    "JournalEntry",
     "LlmAudio",
     "LlmClosed",
     "LlmFailed",
@@ -88,4 +103,5 @@ __all__ = [
     "Trace",
     "TraceEntry",
     "TraceSink",
+    "local_now",
 ]
