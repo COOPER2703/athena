@@ -33,6 +33,8 @@ from server.core.events import (
     TimerFired,
 )
 from server.core.ports import MemoryHit
+from server.core.tools import ToolRegistry
+from server.core.memory_tools import register_memory_tools
 
 _CommandT = TypeVar("_CommandT", bound=Command)
 
@@ -99,9 +101,12 @@ class FakeMemory:
         self._hits = list(hits or [])
         self.turns: list[tuple[str, str]] = []
         self.queries: list[str] = []
+        self.saved: list[tuple[str, str, bool]] = []
+        self.forgotten: list[str] = []
+        self._pinned: list[str] = []
 
     async def session_context(self, user_id: str) -> str:
-        return ""
+        return "\n".join(self._pinned)
 
     async def append_turn(self, user_id: str, role: str, text: str) -> None:
         self.turns.append((role, text))
@@ -110,8 +115,21 @@ class FakeMemory:
         self.queries.append(query)
         return list(self._hits)
 
+    async def save(self, user_id: str, content: str, *, pinned: bool) -> None:
+        self.saved.append((user_id, content, pinned))
+        if pinned:
+            self._pinned.append(content)
 
-def _build(memory=None) -> tuple[FakeAdapter, FakeAdapter, FakeClock, RecordingTraceSink, App]:
+    async def forget(self, user_id: str, query: str, max_distance: float) -> bool:
+        self.forgotten.append(query)
+        for index, content in enumerate(self._pinned):
+            if query in content:
+                del self._pinned[index]
+                return True
+        return False
+
+
+def _build(memory=None, tools=None) -> tuple[FakeAdapter, FakeAdapter, FakeClock, RecordingTraceSink, App]:
     transport = FakeAdapter()
     gemini = FakeAdapter()
     clock = FakeClock()
@@ -123,6 +141,7 @@ def _build(memory=None) -> tuple[FakeAdapter, FakeAdapter, FakeClock, RecordingT
         trace_sink=sink,
         memory=memory,
         user_id="alice",
+        tools=tools,
     )
     return transport, gemini, clock, sink, app
 
@@ -390,3 +409,52 @@ def test_build_app_installs_logging_bridge_debug_only_when_flag_on() -> None:
     finally:
         root.handlers[:] = original_handlers
         root.setLevel(original_level)
+
+
+def test_build_app_wires_the_kernel_memory_tools() -> None:
+    app = build_app(AppConfig(gemini=GeminiConfig(api_key="test-key")))
+
+    assert app.tools is not None
+    assert {spec.name for spec in app.tools.specs()} == {"save_memory", "forget_memory"}
+
+
+def test_save_memory_tool_call_reaches_the_store_and_the_model() -> None:
+    async def scenario() -> None:
+        memory = FakeMemory()
+        registry = ToolRegistry()
+        register_memory_tools(registry, memory, "alice")
+        transport, gemini, clock, sink, app = _build(memory, tools=registry)
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: transport.started)
+            await transport.feed(SessionRequested(client_id="c1"))
+            await wait_until(lambda: gemini.of_type(OpenLiveConnection))
+            opened = gemini.of_type(OpenLiveConnection)[0]
+            assert {spec.name for spec in opened.tools} == {
+                "save_memory",
+                "forget_memory",
+            }
+            await gemini.feed(LlmOpened())
+
+            await gemini.feed(
+                LlmToolCall(
+                    tool_id="t1",
+                    name="save_memory",
+                    arguments={"content": "aime le bleu", "kind": "profile"},
+                )
+            )
+            await wait_until(lambda: gemini.tool_results)
+
+            assert memory.saved == [("alice", "aime le bleu", True)]
+            _, tool_id, name, result = gemini.tool_results[0]
+            assert (tool_id, name) == ("t1", "save_memory")
+            assert result["status"] == "ok"
+
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+        finally:
+            if not runner.done():
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(scenario())

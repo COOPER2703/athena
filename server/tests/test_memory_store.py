@@ -222,3 +222,101 @@ def test_recall_on_an_empty_journal_is_empty(store) -> None:
         assert await store.recall("alice", "rien") == []
 
     asyncio.run(scenario())
+
+
+def test_saved_pinned_fact_is_injected_as_profile(store) -> None:
+    async def scenario() -> None:
+        await store.save("alice", "aime le bleu", pinned=True)
+        await store.save("alice", "a un chien", pinned=False)
+
+        context = await store.session_context("alice")
+
+        assert "faits épinglés" in context
+        assert "aime le bleu" in context
+        assert "a un chien" not in context
+
+    asyncio.run(scenario())
+
+
+def test_saved_facts_are_user_scoped(store) -> None:
+    async def scenario() -> None:
+        await store.save("alice", "aime le bleu", pinned=True)
+
+        assert "aime le bleu" in await store.session_context("alice")
+        assert await store.session_context("bob") == ""
+
+    asyncio.run(scenario())
+
+
+def test_saved_fact_is_recallable(tmp_path) -> None:
+    store = _store(tmp_path, BagOfWordsEmbedder())
+
+    async def scenario() -> None:
+        await store.save("alice", "le chien s'appelle Rex", pinned=False)
+
+        hits = await store.recall("alice", "chien")
+
+        assert any(h.text == "le chien s'appelle Rex" and h.source == "fact" for h in hits)
+
+    asyncio.run(scenario())
+
+
+def test_forget_removes_the_nearest_fact_and_its_source_journal_turns(tmp_path) -> None:
+    store = _store(tmp_path, BagOfWordsEmbedder())
+
+    async def scenario() -> None:
+        await store.append_turn("alice", "user", "je suis végétarien")
+        await store.save("alice", "est végétarien", pinned=True)
+        db = store._get_db()
+        fact_id = db.execute(
+            "SELECT rowid FROM facts WHERE user_id = 'alice'"
+        ).fetchone()[0]
+        journal_id = db.execute(
+            "SELECT rowid FROM journal WHERE user_id = 'alice'"
+        ).fetchone()[0]
+        db.execute(
+            "INSERT INTO fact_sources (fact_id, journal_id, user_id) VALUES (?, ?, ?)",
+            (fact_id, journal_id, "alice"),
+        )
+        db.commit()
+
+        removed = await store.forget("alice", "végétarien", 0.6)
+
+        assert removed is True
+        assert db.execute("SELECT COUNT(*) FROM facts WHERE user_id = 'alice'").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM journal WHERE user_id = 'alice'").fetchone()[0] == 0
+        assert db.execute(
+            "SELECT COUNT(*) FROM fact_sources WHERE user_id = 'alice'"
+        ).fetchone()[0] == 0
+
+    asyncio.run(scenario())
+
+
+def test_forget_returns_false_when_nothing_is_close_enough(tmp_path) -> None:
+    store = _store(tmp_path, BagOfWordsEmbedder())
+
+    async def scenario() -> None:
+        await store.save("alice", "le chien s'appelle Rex", pinned=False)
+
+        removed = await store.forget("alice", "végétarien", 0.6)
+
+        assert removed is False
+        assert store._get_db().execute(
+            "SELECT COUNT(*) FROM facts WHERE user_id = 'alice'"
+        ).fetchone()[0] == 1
+
+    asyncio.run(scenario())
+
+
+def test_forget_is_user_scoped(tmp_path) -> None:
+    store = _store(tmp_path, BagOfWordsEmbedder())
+
+    async def scenario() -> None:
+        await store.save("alice", "est végétarien", pinned=True)
+
+        removed = await store.forget("bob", "végétarien", 0.6)
+
+        assert removed is False
+        assert "est végétarien" in await store.session_context("alice")
+
+    asyncio.run(scenario())

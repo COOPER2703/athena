@@ -121,8 +121,14 @@ class SqliteMemoryStore:
         return "\n\n".join(parts)
 
     def _pinned_facts(self, user_id: str) -> list[str]:
-        # Pinned profile facts land in issue #29; empty for now.
-        return []
+        db = self._get_db()
+        with self._lock:
+            rows = db.execute(
+                "SELECT content FROM facts WHERE user_id = ? AND pinned = 1 "
+                "ORDER BY rowid",
+                (user_id,),
+            ).fetchall()
+        return [row[0] for row in rows]
 
     def _recent_turns(self, user_id: str, n: int) -> list[tuple[str, str]]:
         db = self._get_db()
@@ -178,6 +184,75 @@ class SqliteMemoryStore:
         ]
         hits.sort(key=lambda hit: hit.distance)
         return hits[:_RECALL_FETCH]
+
+    async def save(self, user_id: str, content: str, *, pinned: bool) -> None:
+        """Write a durable long-term fact (issue #29).
+
+        ``pinned`` profile facts are always injected by ``session_context``; the
+        rest are recalled by semantic search. Explicit saves are not deduplicated
+        (the Consolidation owns dedup).
+        """
+        vector = await self._embedder.embed(content)
+        db = self._get_db()
+        with self._lock:
+            db.execute(
+                "INSERT INTO facts (embedding, user_id, content, pinned, created_at) "
+                "VALUES (?, ?, ?, ?, datetime('now'))",
+                (json.dumps(vector), user_id, content, 1 if pinned else 0),
+            )
+            db.commit()
+
+    async def forget(
+        self, user_id: str, query: str, max_distance: float
+    ) -> bool:
+        """Delete the nearest fact of ``user_id`` closer than ``max_distance``.
+
+        The match is by cosine distance over the query embedding (the distance
+        must be strictly below the threshold). Deleting a fact also deletes the
+        Journal turns it was consolidated from, through ``fact_sources``. Returns
+        whether a fact was removed; never raises.
+        """
+        vector = json.dumps(await self._embedder.embed(query))
+        db = self._get_db()
+        with self._lock:
+            row = db.execute(
+                "SELECT rowid, vec_distance_cosine(embedding, ?) AS dist FROM facts "
+                "WHERE user_id = ? ORDER BY dist LIMIT 1",
+                (vector, user_id),
+            ).fetchone()
+            if row is None or row[1] >= max_distance:
+                return False
+            fact_id = row[0]
+            journal_ids = [
+                source[0]
+                for source in db.execute(
+                    "SELECT journal_id FROM fact_sources "
+                    "WHERE user_id = ? AND fact_id = ?",
+                    (user_id, fact_id),
+                ).fetchall()
+            ]
+            db.execute(
+                "DELETE FROM facts WHERE rowid = ? AND user_id = ?",
+                (fact_id, user_id),
+            )
+            db.execute(
+                "DELETE FROM fact_sources WHERE user_id = ? AND fact_id = ?",
+                (user_id, fact_id),
+            )
+            if journal_ids:
+                placeholders = ",".join("?" for _ in journal_ids)
+                db.execute(
+                    f"DELETE FROM journal WHERE user_id = ? "
+                    f"AND rowid IN ({placeholders})",
+                    [user_id, *journal_ids],
+                )
+                db.execute(
+                    f"DELETE FROM fact_sources WHERE user_id = ? "
+                    f"AND journal_id IN ({placeholders})",
+                    [user_id, *journal_ids],
+                )
+            db.commit()
+        return True
 
     async def journal_entries_since(
         self, user_id: str, since: datetime | None
