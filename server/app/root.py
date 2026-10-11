@@ -21,12 +21,14 @@ from server.core.commands import (
     SendAudioToClient,
     SendAudioToLlm,
     SendMemoryToLlm,
+    SendToolResultToLlm,
     StartIdleTimer,
     Trace,
 )
 from server.core.coordinator import Coordinator
 from server.core.events import Event, ShutdownRequested
 from server.core.ports import MemoryStore, TraceSink
+from server.core.tools import ToolRegistry
 
 _TRACE_SOURCE = "app"
 _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent.parent / "system-prompt.txt"
@@ -56,7 +58,7 @@ class App:
         memory: MemoryStore | None = None,
         user_id: str = "owner",
         system_prompt: str = "",
-        tools: object | None = None,
+        tools: ToolRegistry | None = None,
         recall_k: int = 5,
         recall_window_turns: int = 3,
         recall_max_distance: float = 0.6,
@@ -133,6 +135,14 @@ class App:
             command, (OpenLiveConnection, CloseLiveConnection, SendAudioToLlm, SendMemoryToLlm)
         ):
             await self._gemini.execute(command)
+            return
+        if isinstance(command, SendToolResultToLlm):
+            await self._gemini.send_tool_result(
+                command.connection_id,
+                command.tool_id,
+                command.name,
+                command.result,
+            )
             return
         if isinstance(
             command,

@@ -5,6 +5,7 @@ from server.core.events import (
     LlmAudio,
     LlmFailed,
     LlmFailureCause,
+    LlmToolCall,
     LlmTranscription,
     Role,
 )
@@ -14,9 +15,8 @@ def translate_response(response: object) -> list[Event]:
     """Traduit une réponse Live Gemini en Événements du noyau.
 
     Un même message peut porter plusieurs champs : il produit alors plusieurs
-    Événements (audio descendant ET transcription). Renvoie ``[]`` pour les
-    messages sans Événement noyau en T1 (``tool_call`` est lu puis ignoré par
-    l'adaptateur, qui le trace sans le traduire).
+    Événements (audio descendant ET transcription ET appels de Tool). Renvoie
+    ``[]`` pour les messages sans Événement noyau.
     """
     events: list[Event] = []
 
@@ -26,6 +26,17 @@ def translate_response(response: object) -> list[Event]:
 
     if getattr(response, "go_away", None) is not None:
         events.append(LlmFailed(cause=LlmFailureCause.GO_AWAY))
+
+    tool_call = getattr(response, "tool_call", None)
+    if tool_call is not None:
+        for function_call in getattr(tool_call, "function_calls", None) or []:
+            events.append(
+                LlmToolCall(
+                    tool_id=getattr(function_call, "id", None) or "",
+                    name=getattr(function_call, "name", None) or "",
+                    arguments=getattr(function_call, "args", None) or {},
+                )
+            )
 
     server_content = getattr(response, "server_content", None)
     if server_content is not None:

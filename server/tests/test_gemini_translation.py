@@ -7,6 +7,7 @@ from server.core.events import (
     LlmAudio,
     LlmFailed,
     LlmFailureCause,
+    LlmToolCall,
     LlmTranscription,
     Role,
 )
@@ -60,7 +61,37 @@ def test_go_away_maps_to_go_away_failure() -> None:
     assert translate_response(response) == [LlmFailed(cause=LlmFailureCause.GO_AWAY)]
 
 
-def test_tool_call_yields_no_events() -> None:
+def test_tool_call_function_calls_map_to_llm_tool_call_events() -> None:
+    response = SimpleNamespace(
+        tool_call=SimpleNamespace(
+            function_calls=[
+                SimpleNamespace(
+                    id="1",
+                    name="save_memory",
+                    args={"content": "x", "kind": "profile"},
+                )
+            ]
+        )
+    )
+    assert translate_response(response) == [
+        LlmToolCall(
+            tool_id="1",
+            name="save_memory",
+            arguments={"content": "x", "kind": "profile"},
+        )
+    ]
+
+
+def test_tool_call_with_missing_fields_defaults_to_empty_values() -> None:
+    response = SimpleNamespace(
+        tool_call=SimpleNamespace(function_calls=[SimpleNamespace()])
+    )
+    assert translate_response(response) == [
+        LlmToolCall(tool_id="", name="", arguments={})
+    ]
+
+
+def test_tool_call_without_function_calls_yields_no_events() -> None:
     response = SimpleNamespace(tool_call=SimpleNamespace(function_calls=[]))
     assert translate_response(response) == []
 

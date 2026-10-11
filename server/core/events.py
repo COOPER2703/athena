@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Union
+from typing import Mapping, Union
 
 
 class Role(StrEnum):
@@ -62,6 +62,13 @@ class LlmTranscription:
 
 
 @dataclass(frozen=True, slots=True)
+class LlmToolCall:
+    tool_id: str
+    name: str
+    arguments: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
 class LlmClosed:
     pass
 
@@ -90,6 +97,7 @@ Event = Union[
     LlmOpened,
     LlmAudio,
     LlmTranscription,
+    LlmToolCall,
     LlmClosed,
     LlmFailed,
     ShutdownRequested,

@@ -39,6 +39,14 @@ class SendAudioToClient:
 
 
 @dataclass(frozen=True, slots=True)
+class SendToolResultToLlm:
+    connection_id: str
+    tool_id: str
+    name: str
+    result: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
 class AnnounceSessionStarted:
     client_id: str
     auto: bool = False
@@ -75,6 +83,7 @@ Command = Union[
     SendAudioToLlm,
     SendMemoryToLlm,
     SendAudioToClient,
+    SendToolResultToLlm,
     AnnounceSessionStarted,
     AnnounceSessionEnded,
     StartIdleTimer,
