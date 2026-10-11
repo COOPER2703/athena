@@ -77,7 +77,9 @@ def test_python_m_server_starts_and_shuts_down_cleanly_on_sigint(
     reader = threading.Thread(target=_drain, daemon=True)
     reader.start()
     try:
-        deadline = time.monotonic() + 5.0
+        # Startup now warms the local embedding model before announcing
+        # "started" (T2 memory), so allow a generous readiness budget.
+        deadline = time.monotonic() + 30.0
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 break
