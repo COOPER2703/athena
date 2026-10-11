@@ -20,6 +20,7 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
+    SendMemoryToLlm,
     StartIdleTimer,
     Trace,
 )
@@ -56,6 +57,9 @@ class App:
         user_id: str = "owner",
         system_prompt: str = "",
         tools: object | None = None,
+        recall_k: int = 5,
+        recall_window_turns: int = 3,
+        recall_max_distance: float = 0.6,
     ) -> None:
         self._transport = transport
         self._gemini = gemini
@@ -67,6 +71,9 @@ class App:
             user_id=user_id,
             system_prompt=system_prompt,
             tools=tools,
+            recall_k=recall_k,
+            recall_window_turns=recall_window_turns,
+            recall_max_distance=recall_max_distance,
         )
         self._events: asyncio.Queue[Event] = asyncio.Queue()
 
@@ -123,7 +130,7 @@ class App:
             )
             return
         if isinstance(
-            command, (OpenLiveConnection, CloseLiveConnection, SendAudioToLlm)
+            command, (OpenLiveConnection, CloseLiveConnection, SendAudioToLlm, SendMemoryToLlm)
         ):
             await self._gemini.execute(command)
             return
@@ -187,4 +194,7 @@ def build_app(config: AppConfig) -> App:
         memory=memory,
         user_id=config.memory.user_id,
         system_prompt=load_system_prompt(),
+        recall_k=config.memory.recall_k,
+        recall_window_turns=config.memory.recall_window_turns,
+        recall_max_distance=config.memory.recall_max_distance,
     )

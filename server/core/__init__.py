@@ -7,6 +7,7 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
+    SendMemoryToLlm,
     StartIdleTimer,
     Trace,
 )
@@ -70,6 +71,7 @@ __all__ = [
     "Role",
     "SendAudioToClient",
     "SendAudioToLlm",
+    "SendMemoryToLlm",
     "SessionRequested",
     "SessionState",
     "ShutdownRequested",

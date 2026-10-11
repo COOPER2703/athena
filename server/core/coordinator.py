@@ -11,6 +11,7 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
+    SendMemoryToLlm,
     StartIdleTimer,
     Trace,
 )
@@ -35,6 +36,7 @@ from server.core.state import SessionState
 
 _TRACE_SOURCE = "core"
 IDLE_TIMEOUT = 30.0
+_MEMORY_HEADER = "[MÉMOIRE]"
 
 
 class Coordinator:
@@ -52,11 +54,17 @@ class Coordinator:
         user_id: str = "owner",
         system_prompt: str = "",
         tools: object | None = None,
+        recall_k: int = 5,
+        recall_window_turns: int = 3,
+        recall_max_distance: float = 0.6,
     ) -> None:
         self._memory = memory
         self._user_id = user_id
         self._system_prompt = system_prompt
         self._tools = tools  # Tool registry seam (issue #28).
+        self._recall_k = recall_k
+        self._recall_window_turns = recall_window_turns
+        self._recall_max_distance = recall_max_distance
         self._state = SessionState.IDLE
         self._client_id = ""
         self._connection_id = ""
@@ -65,6 +73,8 @@ class Coordinator:
         self._auto = False
         self._session_counter = 0
         self._audio_buffer: list[bytes] = []
+        self._recent_utterances: list[str] = []
+        self._injected_memories: set[str] = set()
 
     @property
     def state(self) -> SessionState:
@@ -94,7 +104,7 @@ class Coordinator:
         if isinstance(event, LlmAudio):
             return self._on_llm_audio(event)
         if isinstance(event, LlmTranscription):
-            return self._on_llm_transcription(event)
+            return await self._on_llm_transcription(event)
         if isinstance(event, LlmClosed):
             return self._on_llm_closed(event)
         if isinstance(event, LlmFailed):
@@ -123,6 +133,8 @@ class Coordinator:
         self._client_id = event.client_id
         self._auto = event.auto
         self._state = SessionState.LIVE_CONNECTING
+        self._recent_utterances = []
+        self._injected_memories = set()
 
         # Activation (D3): assemble the generic prompt and the memory context the
         # Session opens with. The instruction is frozen here, at connect time.
@@ -216,15 +228,67 @@ class Coordinator:
             ]
         return self._decision("LlmAudio")
 
-    def _on_llm_transcription(self, event: LlmTranscription) -> list[Command]:
-        if event.role is Role.USER and self._state is not SessionState.IDLE:
-            return [
-                self._rearm_timer(),
-                *self._decision("LlmTranscription"),
-            ]
+    async def _on_llm_transcription(
+        self, event: LlmTranscription
+    ) -> list[Command]:
+        if event.role is Role.USER:
+            return await self._on_user_utterance(event)
+        if self._state is not SessionState.IDLE:
+            await self._journal("assistant", event.text)
         if event.role is Role.ASSISTANT and self._state is SessionState.LIVE_ACTIVE:
             return self._become_visible("LlmTranscription")
         return self._decision("LlmTranscription")
+
+    async def _on_user_utterance(self, event: LlmTranscription) -> list[Command]:
+        if self._state is SessionState.IDLE:
+            return self._decision("LlmTranscription")
+        commands: list[Command] = [self._rearm_timer()]
+        if self._memory is not None:
+            await self._journal("user", event.text)
+            text, trace = await self._recall(event.text)
+            commands.append(trace)
+            if text is not None:
+                commands.append(
+                    SendMemoryToLlm(connection_id=self._connection_id, text=text)
+                )
+        commands.extend(self._decision("LlmTranscription"))
+        self._recent_utterances.append(event.text)
+        return commands
+
+    async def _journal(self, role: str, text: str) -> None:
+        if self._memory is not None:
+            await self._memory.append_turn(self._user_id, role, text)
+
+    async def _recall(self, utterance: str) -> tuple[str | None, Trace]:
+        window = self._recent_utterances[-self._recall_window_turns :]
+        query = " ".join([*window, utterance])
+        hits = await self._memory.recall(self._user_id, query)
+
+        lines: list[str] = []
+        for hit in hits:
+            text = hit.text
+            if not text or text in self._injected_memories:
+                continue
+            if hit.distance > self._recall_max_distance:
+                continue
+            self._injected_memories.add(text)
+            lines.append(f"- {text}")
+            if len(lines) >= self._recall_k:
+                break
+
+        trace = Trace(
+            source=_TRACE_SOURCE,
+            kind="Rappel",
+            payload={
+                "connection_id": self._connection_id,
+                "query": query,
+                "candidates": len(hits),
+                "injected": len(lines),
+            },
+        )
+        if not lines:
+            return None, trace
+        return _MEMORY_HEADER + "\n" + "\n".join(lines), trace
 
     def _on_llm_closed(self, event: LlmClosed) -> list[Command]:
         if self._state in (
@@ -346,6 +410,8 @@ class Coordinator:
         self._visible = False
         self._auto = False
         self._audio_buffer.clear()
+        self._recent_utterances = []
+        self._injected_memories = set()
 
     def _decision(
         self,
