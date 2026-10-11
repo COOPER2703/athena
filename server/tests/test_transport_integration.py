@@ -60,7 +60,7 @@ async def _core_loop(
     """The tiny ownership loop ticket #6 will use."""
     while True:
         event = await transport.recv()
-        for command in coordinator.handle(event):
+        for command in await coordinator.handle(event):
             seen.append(command)
             await transport.execute(command)
 
@@ -72,7 +72,7 @@ async def _deliver(
     seen: list[Command],
 ) -> None:
     """Feed an LLM-side event as a Gemini adapter would, through the same seam."""
-    for command in coordinator.handle(event):
+    for command in await coordinator.handle(event):
         seen.append(command)
         await transport.execute(command)
 

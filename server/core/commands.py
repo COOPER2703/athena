@@ -5,10 +5,14 @@ from typing import Mapping, Union
 
 from protocol import SessionEndReason
 
+from server.core.ports import ToolSpec
+
 
 @dataclass(frozen=True, slots=True)
 class OpenLiveConnection:
     connection_id: str
+    instruction: str = ""
+    tools: tuple[ToolSpec, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

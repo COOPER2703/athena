@@ -9,6 +9,9 @@ dependencies = [
     "websockets>=15.0",
     "pyaudio>=0.2.14",
     "pydantic>=2.14",
+    "sentence-transformers>=3.0.0",
+    "sqlite-vec>=0.1.0",
+    "numpy>=2.0",
 ]
 
 [project.optional-dependencies]

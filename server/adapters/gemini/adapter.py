@@ -20,7 +20,7 @@ from server.core.events import (
     LlmFailureCause,
     LlmOpened,
 )
-from server.core.ports import TraceSink
+from server.core.ports import ToolSpec, TraceSink
 
 _TRACE_SOURCE = "gemini"
 _UPSTREAM_MIME_TYPE = "audio/pcm;rate=16000"
@@ -84,7 +84,7 @@ class GeminiLiveAdapter:
             )
             return
         if isinstance(command, OpenLiveConnection):
-            await self.open(command.connection_id)
+            await self.open(command.connection_id, command.instruction, command.tools)
             return
         if isinstance(command, CloseLiveConnection):
             await self.close(command.connection_id)
@@ -93,13 +93,18 @@ class GeminiLiveAdapter:
             await self.send_audio(command.connection_id, command.data)
             return
 
-    async def open(self, connection_id: str) -> None:
+    async def open(
+        self,
+        connection_id: str,
+        instruction: str = "",
+        tools: tuple[ToolSpec, ...] = (),
+    ) -> None:
         if self._receiver is not None or self._context is not None:
             await self._shutdown()
         self._connection_id = connection_id
         self._terminated = False
         try:
-            config = self._build_config()
+            config = self._build_config(instruction, tools)
             self._context = self._live_connect(self._model, config)
             self._live = await self._context.__aenter__()
         except asyncio.CancelledError:
@@ -226,9 +231,19 @@ class GeminiLiveAdapter:
             self._emit("send_error", payload={"error": str(exc)}, level="error")
             await self._fail(LlmFailureCause.ERROR)
 
-    def _build_config(self) -> Any:
+    def _build_config(
+        self,
+        instruction: str = "",
+        tools: tuple[ToolSpec, ...] = (),
+    ) -> Any:
         from google.genai import types
 
+        system_instruction = (
+            types.Content(parts=[types.Part(text=instruction)])
+            if instruction
+            else None
+        )
+        # Tool declarations are wired in issue #28; ``tools`` is a carried seam.
         return types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             speech_config=types.SpeechConfig(
@@ -240,6 +255,7 @@ class GeminiLiveAdapter:
             ),
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
+            system_instruction=system_instruction,
         )
 
     def _emit(
