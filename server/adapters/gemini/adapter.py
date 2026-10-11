@@ -162,9 +162,8 @@ class GeminiLiveAdapter:
             )
         elif getattr(response, "tool_call", None) is not None:
             self._emit(
-                "tool_call_ignored",
+                "tool_call",
                 payload={"connection_id": self._connection_id},
-                level="warning",
             )
 
         for event in translate_response(response):
@@ -231,6 +230,44 @@ class GeminiLiveAdapter:
             self._emit("send_error", payload={"error": str(exc)}, level="error")
             await self._fail(LlmFailureCause.ERROR)
 
+    async def send_tool_result(
+        self,
+        session_id: str,
+        tool_id: str,
+        name: str,
+        result: Mapping[str, object],
+    ) -> None:
+        live = self._live
+        if live is None or self._terminated:
+            self._emit(
+                "send_tool_result_ignored",
+                payload={"connection_id": session_id, "tool_id": tool_id},
+                level="warning",
+            )
+            return
+        try:
+            from google.genai import types
+
+            await live.send_tool_response(
+                function_responses=types.FunctionResponse(
+                    id=tool_id, name=name, response=dict(result)
+                )
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._emit("send_error", payload={"error": str(exc)}, level="error")
+            await self._fail(LlmFailureCause.ERROR)
+            return
+        self._emit(
+            "tool_result_sent",
+            payload={
+                "connection_id": session_id,
+                "tool_id": tool_id,
+                "name": name,
+            },
+        )
+
     def _build_config(
         self,
         instruction: str = "",
@@ -243,7 +280,17 @@ class GeminiLiveAdapter:
             if instruction
             else None
         )
-        # Tool declarations are wired in issue #28; ``tools`` is a carried seam.
+        declarations = [
+            types.FunctionDeclaration(
+                name=spec.name,
+                description=spec.description,
+                parameters_json_schema=dict(spec.parameters),
+            )
+            for spec in tools
+        ]
+        tool_list = (
+            [types.Tool(function_declarations=declarations)] if declarations else None
+        )
         return types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             speech_config=types.SpeechConfig(
@@ -256,6 +303,7 @@ class GeminiLiveAdapter:
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
             system_instruction=system_instruction,
+            tools=tool_list,
         )
 
     def _emit(

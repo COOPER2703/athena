@@ -26,6 +26,7 @@ from server.core import (
     LlmFailed,
     LlmOpened,
     LlmSocket,
+    LlmToolCall,
     LlmTranscription,
     MemoryHit,
     MemoryStore,
@@ -33,11 +34,14 @@ from server.core import (
     Role,
     SendAudioToClient,
     SendAudioToLlm,
+    SendToolResultToLlm,
     SessionRequested,
     SessionState,
     ShutdownRequested,
     StartIdleTimer,
     TimerFired,
+    ToolHandler,
+    ToolRegistry,
     ToolSpec,
     Trace,
     TraceSink,
@@ -238,6 +242,7 @@ def test_events_and_commands_are_frozen_slots_dataclasses():
         LlmOpened,
         LlmAudio,
         LlmTranscription,
+        LlmToolCall,
         LlmClosed,
         LlmFailed,
         ShutdownRequested,
@@ -246,6 +251,7 @@ def test_events_and_commands_are_frozen_slots_dataclasses():
         CloseLiveConnection,
         SendAudioToLlm,
         SendAudioToClient,
+        SendToolResultToLlm,
         AnnounceSessionStarted,
         AnnounceSessionEnded,
         StartIdleTimer,
@@ -360,3 +366,88 @@ def test_activation_traces_absence_of_context():
     activation = _activation(commands)
     assert activation.payload["has_context"] is False
     assert activation.payload["context_chars"] == 0
+
+
+class FakeTools:
+    def __init__(self, specs: tuple[ToolSpec, ...] = ()) -> None:
+        self._specs = specs
+        self.executed: list[tuple[str, object]] = []
+
+    def specs(self) -> tuple[ToolSpec, ...]:
+        return self._specs
+
+    async def execute(self, name, arguments):
+        self.executed.append((name, arguments))
+        if name == "echo":
+            return {"echo": arguments.get("value", "")}
+        return {"status": "error", "message": f"unknown tool: {name}"}
+
+
+def _tool_results(commands):
+    return [c for c in commands if isinstance(c, SendToolResultToLlm)]
+
+
+def test_session_requested_carries_the_registered_tool_declarations():
+    spec = ToolSpec(name="echo", description="écho", parameters={"type": "object"})
+    coordinator = Coordinator(tools=FakeTools(specs=(spec,)))
+
+    commands = asyncio.run(coordinator.handle(SessionRequested(client_id="c1")))
+
+    assert _opened(commands).tools == (spec,)
+
+
+def test_tool_call_executes_the_handler_and_emits_the_result():
+    registry = FakeTools()
+    coordinator = Coordinator(tools=registry)
+    drive(coordinator, [SessionRequested(client_id="c1"), LlmOpened()])
+
+    commands = asyncio.run(
+        coordinator.handle(
+            LlmToolCall(tool_id="t1", name="echo", arguments={"value": "bonjour"})
+        )
+    )
+
+    assert registry.executed == [("echo", {"value": "bonjour"})]
+    assert _tool_results(commands) == [
+        SendToolResultToLlm(
+            connection_id="s1",
+            tool_id="t1",
+            name="echo",
+            result={"echo": "bonjour"},
+        )
+    ]
+    assert any(isinstance(c, Trace) for c in commands)
+
+
+def test_unknown_tool_call_yields_a_traced_error_without_crashing():
+    coordinator = Coordinator(tools=FakeTools())
+    drive(coordinator, [SessionRequested(client_id="c1"), LlmOpened()])
+
+    commands = asyncio.run(
+        coordinator.handle(LlmToolCall(tool_id="t9", name="ghost", arguments={}))
+    )
+
+    assert _tool_results(commands) == [
+        SendToolResultToLlm(
+            connection_id="s1",
+            tool_id="t9",
+            name="ghost",
+            result={"status": "error", "message": "unknown tool: ghost"},
+        )
+    ]
+    assert any(isinstance(c, Trace) for c in commands)
+    assert coordinator.state is SessionState.LIVE_ACTIVE
+
+
+def test_tool_call_without_registry_is_a_traced_error_without_crashing():
+    coordinator = Coordinator()
+    drive(coordinator, [SessionRequested(client_id="c1"), LlmOpened()])
+
+    commands = asyncio.run(
+        coordinator.handle(LlmToolCall(tool_id="t1", name="echo", arguments={}))
+    )
+
+    results = _tool_results(commands)
+    assert results and results[0].result["status"] == "error"
+    assert any(isinstance(c, Trace) for c in commands)
+

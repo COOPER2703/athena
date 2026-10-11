@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Mapping
+
 from protocol import SessionEndReason
 
 from server.core.commands import (
@@ -11,6 +13,7 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
+    SendToolResultToLlm,
     StartIdleTimer,
     Trace,
 )
@@ -24,6 +27,7 @@ from server.core.events import (
     LlmClosed,
     LlmFailed,
     LlmOpened,
+    LlmToolCall,
     LlmTranscription,
     Role,
     SessionRequested,
@@ -32,6 +36,7 @@ from server.core.events import (
 )
 from server.core.ports import MemoryStore, ToolSpec
 from server.core.state import SessionState
+from server.core.tools import ToolRegistry
 
 _TRACE_SOURCE = "core"
 IDLE_TIMEOUT = 30.0
@@ -51,12 +56,12 @@ class Coordinator:
         memory: MemoryStore | None = None,
         user_id: str = "owner",
         system_prompt: str = "",
-        tools: object | None = None,
+        tools: ToolRegistry | None = None,
     ) -> None:
         self._memory = memory
         self._user_id = user_id
         self._system_prompt = system_prompt
-        self._tools = tools  # Tool registry seam (issue #28).
+        self._tools = tools
         self._state = SessionState.IDLE
         self._client_id = ""
         self._connection_id = ""
@@ -95,6 +100,8 @@ class Coordinator:
             return self._on_llm_audio(event)
         if isinstance(event, LlmTranscription):
             return self._on_llm_transcription(event)
+        if isinstance(event, LlmToolCall):
+            return await self._on_llm_tool_call(event)
         if isinstance(event, LlmClosed):
             return self._on_llm_closed(event)
         if isinstance(event, LlmFailed):
@@ -164,8 +171,9 @@ class Coordinator:
         return commands
 
     def _open_tools(self) -> tuple[ToolSpec, ...]:
-        # The Tool registry lands in issue #28; until then no declaration is sent.
-        return ()
+        if self._tools is None:
+            return ()
+        return self._tools.specs()
 
     def _on_client_audio(self, event: ClientAudio) -> list[Command]:
         if self._state in (SessionState.LIVE_ACTIVE, SessionState.SESSION_VISIBLE):
@@ -225,6 +233,53 @@ class Coordinator:
         if event.role is Role.ASSISTANT and self._state is SessionState.LIVE_ACTIVE:
             return self._become_visible("LlmTranscription")
         return self._decision("LlmTranscription")
+
+    async def _on_llm_tool_call(self, event: LlmToolCall) -> list[Command]:
+        """Exécute un Tool du noyau et renvoie son résultat au modèle.
+
+        Un nom inconnu (ou l'absence de registre) produit un résultat d'erreur
+        tracé : le round-trip ne lève jamais, la Session reste vivante.
+        """
+        commands: list[Command] = [
+            self._trace(
+                "ToolCall",
+                from_state=self._state,
+                to_state=self._state,
+                client_id=self._client_id,
+                level="debug",
+                extra={"tool_id": event.tool_id, "name": event.name},
+            )
+        ]
+        if self._tools is None:
+            result: Mapping[str, object] = {
+                "status": "error",
+                "message": f"unknown tool: {event.name}",
+            }
+        else:
+            result = await self._tools.execute(event.name, event.arguments)
+        commands.append(
+            SendToolResultToLlm(
+                connection_id=self._connection_id,
+                tool_id=event.tool_id,
+                name=event.name,
+                result=result,
+            )
+        )
+        commands.append(
+            self._trace(
+                "ToolResult",
+                from_state=self._state,
+                to_state=self._state,
+                client_id=self._client_id,
+                level="debug",
+                extra={
+                    "tool_id": event.tool_id,
+                    "name": event.name,
+                    "status": str(result.get("status", "ok")),
+                },
+            )
+        )
+        return commands
 
     def _on_llm_closed(self, event: LlmClosed) -> list[Command]:
         if self._state in (
@@ -378,6 +433,7 @@ class Coordinator:
         connection_id: str | None = None,
         session_id: str | None = None,
         level: str = "info",
+        extra: Mapping[str, object] | None = None,
     ) -> Trace:
         payload: dict[str, object] = {
             "connection_id": (
@@ -392,4 +448,6 @@ class Coordinator:
             payload["reason"] = reason
         if cause is not None:
             payload["cause"] = cause
+        if extra is not None:
+            payload.update(extra)
         return Trace(source=_TRACE_SOURCE, kind=kind, payload=payload, level=level)

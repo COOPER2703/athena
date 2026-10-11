@@ -7,6 +7,7 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
+    SendToolResultToLlm,
     StartIdleTimer,
     Trace,
 )
@@ -22,6 +23,7 @@ from server.core.events import (
     LlmFailed,
     LlmFailureCause,
     LlmOpened,
+    LlmToolCall,
     LlmTranscription,
     Role,
     SessionRequested,
@@ -40,6 +42,7 @@ from server.core.ports import (
     TraceSink,
 )
 from server.core.state import SessionState
+from server.core.tools import ToolHandler, ToolRegistry
 
 __all__ = [
     "AnnounceSessionEnded",
@@ -63,6 +66,7 @@ __all__ = [
     "LlmFailureCause",
     "LlmOpened",
     "LlmSocket",
+    "LlmToolCall",
     "LlmTranscription",
     "MemoryHit",
     "MemoryStore",
@@ -70,11 +74,14 @@ __all__ = [
     "Role",
     "SendAudioToClient",
     "SendAudioToLlm",
+    "SendToolResultToLlm",
     "SessionRequested",
     "SessionState",
     "ShutdownRequested",
     "StartIdleTimer",
     "TimerFired",
+    "ToolHandler",
+    "ToolRegistry",
     "ToolSpec",
     "Trace",
     "TraceEntry",

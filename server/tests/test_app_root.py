@@ -25,6 +25,7 @@ from server.core.events import (
     Event,
     LlmAudio,
     LlmOpened,
+    LlmToolCall,
     SessionRequested,
     TimerFired,
 )
@@ -38,6 +39,7 @@ class FakeAdapter:
     def __init__(self) -> None:
         self.events: asyncio.Queue[Event] = asyncio.Queue()
         self.commands: list[Command] = []
+        self.tool_results: list[tuple[str, str, str, object]] = []
         self.started = False
         self.stopped = False
 
@@ -52,6 +54,11 @@ class FakeAdapter:
 
     async def execute(self, command: Command) -> None:
         self.commands.append(command)
+
+    async def send_tool_result(
+        self, connection_id: str, tool_id: str, name: str, result: object
+    ) -> None:
+        self.tool_results.append((connection_id, tool_id, name, result))
 
     async def feed(self, event: Event) -> None:
         await self.events.put(event)
@@ -147,6 +154,38 @@ def test_client_audio_during_a_live_session_goes_to_the_llm() -> None:
             await transport.feed(ClientAudio(data=b"mic"))
             await wait_until(lambda: gemini.of_type(SendAudioToLlm))
             assert gemini.of_type(SendAudioToLlm)[0].data == b"mic"
+
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+        finally:
+            if not runner.done():
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_tool_result_is_routed_to_gemini_send_tool_result() -> None:
+    async def scenario() -> None:
+        transport, gemini, clock, sink, app = _build()
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: transport.started)
+            await transport.feed(ClientRegistered(client_id="c1"))
+            await transport.feed(SessionRequested(client_id="c1"))
+            await wait_until(lambda: gemini.of_type(OpenLiveConnection))
+            connection_id = gemini.of_type(OpenLiveConnection)[0].connection_id
+            await gemini.feed(LlmOpened())
+
+            await gemini.feed(
+                LlmToolCall(tool_id="t1", name="echo", arguments={"value": "x"})
+            )
+            await wait_until(lambda: gemini.tool_results)
+
+            routed_connection, tool_id, name, _ = gemini.tool_results[0]
+            assert routed_connection == connection_id
+            assert tool_id == "t1"
+            assert name == "echo"
 
             app.request_shutdown()
             await asyncio.wait_for(runner, 1.0)

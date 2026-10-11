@@ -41,6 +41,14 @@ class LlmSocket(Protocol):
 
     async def send_audio(self, session_id: str, data: bytes) -> None: ...
 
+    async def send_tool_result(
+        self,
+        session_id: str,
+        tool_id: str,
+        name: str,
+        result: Mapping[str, object],
+    ) -> None: ...
+
 
 class Clock(Protocol):
     def schedule(self, connection_id: str, timeout: float) -> None: ...
