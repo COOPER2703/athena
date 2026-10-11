@@ -12,6 +12,7 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToLlm,
     SendMemoryToLlm,
+    SendToolResultToLlm,
     Trace,
 )
 from server.core.events import (
@@ -95,6 +96,14 @@ class GeminiLiveAdapter:
             return
         if isinstance(command, SendMemoryToLlm):
             await self.send_memory(command.connection_id, command.text)
+            return
+        if isinstance(command, SendToolResultToLlm):
+            await self.send_tool_result(
+                command.connection_id,
+                command.tool_id,
+                command.name,
+                command.result,
+            )
             return
 
     async def open(
@@ -235,6 +244,15 @@ class GeminiLiveAdapter:
             await self._fail(LlmFailureCause.ERROR)
 
     async def send_memory(self, connection_id: str, text: str) -> None:
+        # Recall injection mechanism, proven on the real
+        # ``gemini-3.1-flash-live-preview`` (spike #25): a mid-session
+        # ``send_client_content`` with ``role="user"`` and ``turn_complete=False``
+        # adds the ``[MÉMOIRE]`` block to the context WITHOUT triggering a
+        # spurious model reply. Role ``system`` is rejected by the API (1007) and
+        # ``model`` is semantically pointless. The SDK warns against interleaving
+        # ``send_client_content`` with ``send_realtime_input`` (the upstream audio
+        # path); if that ever fails in a real voice Session, the documented
+        # fallback is to recall at Session open only (Activation), never mid-turn.
         live = self._live
         if live is None or self._terminated:
             self._emit(

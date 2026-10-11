@@ -185,17 +185,16 @@ class App:
             )
             return
         if isinstance(
-            command, (OpenLiveConnection, CloseLiveConnection, SendAudioToLlm, SendMemoryToLlm)
+            command,
+            (
+                OpenLiveConnection,
+                CloseLiveConnection,
+                SendAudioToLlm,
+                SendMemoryToLlm,
+                SendToolResultToLlm,
+            ),
         ):
             await self._gemini.execute(command)
-            return
-        if isinstance(command, SendToolResultToLlm):
-            await self._gemini.send_tool_result(
-                command.connection_id,
-                command.tool_id,
-                command.name,
-                command.result,
-            )
             return
         if isinstance(
             command,

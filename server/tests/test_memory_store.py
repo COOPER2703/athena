@@ -248,6 +248,20 @@ def test_saved_facts_are_user_scoped(store) -> None:
     asyncio.run(scenario())
 
 
+def test_pinned_facts_lists_only_this_users_pinned_facts(store) -> None:
+    async def scenario() -> None:
+        await store.save("alice", "aime le bleu", pinned=True)
+        await store.save("alice", "a un chien", pinned=False)
+        await store.save("bob", "aime le vert", pinned=True)
+
+        assert await store.pinned_facts("alice") == ["aime le bleu"]
+        assert await store.pinned_facts("bob") == ["aime le vert"]
+        assert await store.pinned_facts("carol") == []
+
+    asyncio.run(scenario())
+
+
+
 def test_saved_fact_is_recallable(tmp_path) -> None:
     store = _store(tmp_path, BagOfWordsEmbedder())
 

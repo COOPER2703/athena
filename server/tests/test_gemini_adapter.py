@@ -13,6 +13,7 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToLlm,
     SendMemoryToLlm,
+    SendToolResultToLlm,
     StartIdleTimer,
     Trace,
 )
@@ -267,6 +268,35 @@ def test_send_tool_result_forwards_a_function_response_with_the_echoed_id() -> N
         assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
 
         await adapter.send_tool_result("s1", "1", "save_memory", {"status": "ok"})
+
+        assert len(session.sent_tool_responses) == 1
+        response = session.sent_tool_responses[0]["function_responses"]
+        assert response.id == "1"
+        assert response.name == "save_memory"
+        assert response.response == {"status": "ok"}
+
+        await adapter.execute(CloseLiveConnection(connection_id="s1"))
+
+    asyncio.run(scenario())
+
+
+def test_execute_routes_send_tool_result_through_the_uniform_seam() -> None:
+    async def scenario() -> None:
+        session = FakeSession(block=True)
+        live_connect = FakeLiveConnect(session=session)
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        await adapter.execute(
+            SendToolResultToLlm(
+                connection_id="s1",
+                tool_id="1",
+                name="save_memory",
+                result={"status": "ok"},
+            )
+        )
 
         assert len(session.sent_tool_responses) == 1
         response = session.sent_tool_responses[0]["function_responses"]

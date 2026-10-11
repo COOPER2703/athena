@@ -6,6 +6,15 @@ import time
 from server.adapters.memory import SentenceTransformerEmbedder
 
 
+def test_default_embed_model_has_a_single_source_of_truth() -> None:
+    from server.adapters.memory.embedder import (
+        DEFAULT_EMBED_MODEL as embedder_default,
+    )
+    from server.app.config import DEFAULT_EMBED_MODEL as config_default
+
+    assert config_default is embedder_default
+
+
 class _Vector:
     def __init__(self, values: list[float]) -> None:
         self._values = values

@@ -294,13 +294,17 @@ def test_memory_and_tool_seams_are_frozen_slots_dataclasses():
 
 
 class FakeMemory:
-    def __init__(self, context: str = "") -> None:
+    def __init__(self, context: str = "", pinned: list[str] | None = None) -> None:
         self.context = context
+        self.pinned = list(pinned or [])
         self.users: list[str] = []
 
     async def session_context(self, user_id: str) -> str:
         self.users.append(user_id)
         return self.context
+
+    async def pinned_facts(self, user_id: str) -> list[str]:
+        return list(self.pinned)
 
     async def append_turn(self, user_id: str, role: str, text: str) -> None:
         pass

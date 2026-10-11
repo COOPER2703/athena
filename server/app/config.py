@@ -7,12 +7,12 @@ from typing import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from server.adapters.memory.embedder import DEFAULT_EMBED_MODEL
 from server.app.secrets import EnvSecretResolver, SecretResolver
 
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-live-preview"
 DEFAULT_GEMINI_VOICE = "Zephyr"
 DEFAULT_MEMORY_DB = "athena_memory.db"
-DEFAULT_EMBED_MODEL = "all-MiniLM-L6-v2"
 DEFAULT_CONSOLIDATION_MODEL = "gemini-2.0-flash"
 
 
@@ -61,8 +61,8 @@ class MemoryConfig(BaseModel):
     recent_events_window: int = Field(default=20, ge=1)
     recall_k: int = Field(default=5, ge=1)
     recall_window_turns: int = Field(default=3, ge=1)
-    recall_max_distance: float = Field(default=0.6, ge=0.0, le=1.0)
-    dedup_threshold: float = Field(default=0.15, ge=0.0, le=1.0)
+    recall_max_distance: float = Field(default=0.6, ge=0.0, le=2.0)
+    dedup_threshold: float = Field(default=0.15, ge=0.0, le=2.0)
     journal_retention_days: int = Field(default=3, ge=1)
     embed_model: str = Field(default=DEFAULT_EMBED_MODEL, min_length=1)
     consolidation_model: str = Field(

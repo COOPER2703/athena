@@ -145,9 +145,14 @@ class Coordinator:
 
         # Activation (D3): assemble the generic prompt and the memory context the
         # Session opens with. The instruction is frozen here, at connect time.
+        # Pinned profile facts are part of that instruction, so seed the recall
+        # dedup with them: recall must not re-inject what is already in context.
         context = ""
         if self._memory is not None:
             context = await self._memory.session_context(self._user_id)
+            self._injected_memories = set(
+                await self._memory.pinned_facts(self._user_id)
+            )
         instruction = (self._system_prompt + "\n\n" + context).strip()
 
         commands.append(

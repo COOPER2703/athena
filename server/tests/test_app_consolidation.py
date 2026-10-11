@@ -43,6 +43,9 @@ class FakeStore:
     async def session_context(self, user_id: str) -> str:
         return ""
 
+    async def pinned_facts(self, user_id: str) -> list[str]:
+        return []
+
     async def append_turn(self, user_id: str, role: str, text: str) -> None:
         pass
 
@@ -71,7 +74,14 @@ class FakeStore:
     async def is_duplicate(self, user_id: str, text: str, max_distance: float) -> bool:
         return False
 
-    async def append_fact(self, user_id: str, text: str, *, pinned: bool = False) -> None:
+    async def append_fact(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        pinned: bool = False,
+        source_ids: tuple[int, ...] = (),
+    ) -> None:
         self.facts.append((text, pinned))
 
     async def purge_older_than(self, days: int | None = None) -> int:
@@ -148,7 +158,7 @@ def test_local_now_is_timezone_aware() -> None:
 
 
 def test_scheduler_fires_at_the_fixed_slots() -> None:
-    store = FakeStore(entries=[JournalEntry("user", "salut")], last=None)
+    store = FakeStore(entries=[JournalEntry(1, "user", "salut")], last=None)
     extractor = StaticExtractor(["un fait"])
     clock = ManualClock(_dt(hour=8), max_sleeps=3)
     scheduler = _scheduler(store, extractor, clock)
@@ -164,7 +174,7 @@ def test_scheduler_fires_at_the_fixed_slots() -> None:
 
 
 def test_scheduler_catches_up_a_missed_slot() -> None:
-    store = FakeStore(entries=[JournalEntry("user", "salut")], last=_dt(day=1, hour=0))
+    store = FakeStore(entries=[JournalEntry(1, "user", "salut")], last=_dt(day=1, hour=0))
     extractor = StaticExtractor(["un fait"])
     clock = ManualClock(_dt(day=2, hour=15), max_sleeps=1)
     scheduler = _scheduler(store, extractor, clock)
@@ -180,7 +190,7 @@ def test_scheduler_catches_up_a_missed_slot() -> None:
 
 
 def test_scheduler_does_not_run_twice_for_the_same_slot() -> None:
-    store = FakeStore(entries=[JournalEntry("user", "salut")], last=_dt(hour=12))
+    store = FakeStore(entries=[JournalEntry(1, "user", "salut")], last=_dt(hour=12))
     extractor = StaticExtractor(["un fait"])
     clock = ManualClock(_dt(hour=12, minute=30), max_sleeps=1)
     scheduler = _scheduler(store, extractor, clock)
@@ -196,7 +206,7 @@ def test_scheduler_does_not_run_twice_for_the_same_slot() -> None:
 
 
 def test_scheduler_reports_runs_to_the_trace_callback() -> None:
-    store = FakeStore(entries=[JournalEntry("user", "salut")], last=None)
+    store = FakeStore(entries=[JournalEntry(1, "user", "salut")], last=None)
     clock = ManualClock(_dt(hour=8), max_sleeps=1)
     reports: list[ConsolidationReport] = []
     scheduler = _scheduler(store, StaticExtractor(["fait"]), clock, on_run=reports.append)
@@ -213,7 +223,7 @@ def test_scheduler_reports_runs_to_the_trace_callback() -> None:
 
 
 def test_consolidation_does_not_block_an_in_progress_session() -> None:
-    store = FakeStore(entries=[JournalEntry("user", "salut")], last=None)
+    store = FakeStore(entries=[JournalEntry(1, "user", "salut")], last=None)
     extractor = BlockingExtractor(["un fait long terme"])
     clock = ManualClock(_dt(hour=8), max_sleeps=1)
     scheduler = _scheduler(store, extractor, clock)
@@ -293,7 +303,7 @@ def test_build_app_wires_a_consolidation_scheduler() -> None:
 
 def test_consolidation_trace_enters_the_single_stream() -> None:
     sink = RecordingTraceSink()
-    store = FakeStore(entries=[JournalEntry("user", "salut")], last=None)
+    store = FakeStore(entries=[JournalEntry(1, "user", "salut")], last=None)
     clock = ManualClock(_dt(hour=8), max_sleeps=1)
 
     def on_run(report: ConsolidationReport) -> None:
