@@ -7,12 +7,13 @@ from datetime import datetime, timedelta, timezone
 
 import sqlite_vec
 
-from server.core.ports import Embedder
+from server.core.ports import Embedder, MemoryHit
 
 DEFAULT_SHORT_TERM_WINDOW = 20
 DEFAULT_RECENT_EVENTS_WINDOW = 20
 DEFAULT_RETENTION_DAYS = 3
 EMBEDDING_DIM = 384
+_RECALL_FETCH = 20
 _UTC_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 _JOURNAL_SCHEMA = """
@@ -22,6 +23,25 @@ CREATE VIRTUAL TABLE IF NOT EXISTS journal USING vec0(
     +role TEXT,
     +content TEXT,
     +created_at TEXT
+)
+"""
+
+_FACTS_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS facts USING vec0(
+    embedding float[384],
+    +user_id TEXT,
+    +content TEXT,
+    +pinned INTEGER,
+    +created_at TEXT
+)
+"""
+
+_FACT_SOURCES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS fact_sources (
+    fact_id INTEGER,
+    journal_id INTEGER,
+    user_id TEXT,
+    PRIMARY KEY (fact_id, journal_id)
 )
 """
 
@@ -65,6 +85,8 @@ class SqliteMemoryStore:
             db.enable_load_extension(True)
             sqlite_vec.load(db)
             db.execute(_JOURNAL_SCHEMA)
+            db.execute(_FACTS_SCHEMA)
+            db.execute(_FACT_SOURCES_SCHEMA)
             db.commit()
             self._db = db
         return self._db
@@ -115,6 +137,38 @@ class SqliteMemoryStore:
             )
             self._purge(db)
             db.commit()
+
+    async def recall(self, user_id: str, query: str) -> list[MemoryHit]:
+        """Semantic search over the Journal and long-term facts (issue #27).
+
+        Returns the union of both tiers, ranked by cosine distance ascending and
+        capped at an internal fetch budget; the kernel applies the distance
+        threshold, dedup and ``recall_k`` truncation.
+        """
+        vector = json.dumps(await self._embedder.embed(query))
+        db = self._get_db()
+        with self._lock:
+            journal_rows = db.execute(
+                "SELECT content, vec_distance_cosine(embedding, ?) AS dist "
+                "FROM journal WHERE user_id = ? ORDER BY dist LIMIT ?",
+                (vector, user_id, _RECALL_FETCH),
+            ).fetchall()
+            fact_rows = db.execute(
+                "SELECT content, vec_distance_cosine(embedding, ?) AS dist "
+                "FROM facts WHERE user_id = ? ORDER BY dist LIMIT ?",
+                (vector, user_id, _RECALL_FETCH),
+            ).fetchall()
+
+        hits = [
+            MemoryHit(text=row[0], distance=row[1], source="journal")
+            for row in journal_rows
+        ]
+        hits += [
+            MemoryHit(text=row[0], distance=row[1], source="fact")
+            for row in fact_rows
+        ]
+        hits.sort(key=lambda hit: hit.distance)
+        return hits[:_RECALL_FETCH]
 
     async def purge_older_than(self, days: int | None = None) -> int:
         """Delete Journal entries older than ``days`` (default: retention)."""

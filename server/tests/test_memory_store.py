@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -21,6 +23,23 @@ class FakeEmbedder:
     async def embed(self, text: str) -> list[float]:
         self.calls.append(text)
         return [0.01] * self.dim
+
+
+class BagOfWordsEmbedder:
+    """Deterministic bag-of-words embedding so cosine ranking is meaningful."""
+
+    def __init__(self, dim: int = _DIM) -> None:
+        self.dim = dim
+
+    def encode(self, text: str) -> list[float]:
+        vector = [0.0] * self.dim
+        for token in text.lower().split():
+            index = int(hashlib.md5(token.encode()).hexdigest(), 16) % self.dim
+            vector[index] += 1.0
+        return vector
+
+    async def embed(self, text: str) -> list[float]:
+        return self.encode(text)
 
 
 @pytest.fixture
@@ -135,5 +154,71 @@ def test_recent_turns_reach_the_next_session_instruction(store) -> None:
         opened = next(c for c in commands if isinstance(c, OpenLiveConnection))
         assert opened.instruction.startswith("SYSTÈME")
         assert "ma couleur préférée est le bleu" in opened.instruction
+
+    asyncio.run(scenario())
+
+
+def _store(tmp_path, embedder) -> SqliteMemoryStore:
+    return SqliteMemoryStore(db_path=str(tmp_path / "memory.db"), embedder=embedder)
+
+
+def test_recall_ranks_journal_entries_by_cosine_distance(tmp_path) -> None:
+    store = _store(tmp_path, BagOfWordsEmbedder())
+
+    async def scenario() -> None:
+        await store.append_turn("alice", "user", "mon chien s'appelle Rex")
+        await store.append_turn("alice", "user", "j'aime les voitures rouges")
+        hits = await store.recall("alice", "chien")
+
+        assert hits
+        assert hits[0].text == "mon chien s'appelle Rex"
+        assert hits[0].source == "journal"
+        assert hits[0].distance <= 1.0
+
+    asyncio.run(scenario())
+
+
+def test_recall_is_user_scoped(tmp_path) -> None:
+    store = _store(tmp_path, BagOfWordsEmbedder())
+
+    async def scenario() -> None:
+        await store.append_turn("bob", "user", "le chien de bob")
+        assert await store.recall("alice", "chien") == []
+
+    asyncio.run(scenario())
+
+
+def test_recall_merges_long_term_facts(tmp_path) -> None:
+    embedder = BagOfWordsEmbedder()
+    store = _store(tmp_path, embedder)
+
+    async def scenario() -> None:
+        db = store._get_db()
+        db.execute(
+            "INSERT INTO facts (embedding, user_id, content, pinned, created_at) "
+            "VALUES (?, ?, ?, ?, datetime('now'))",
+            (json.dumps(embedder.encode("fait durable à retenir")), "alice",
+             "fait durable à retenir", 0),
+        )
+        db.commit()
+
+        hits = await store.recall("alice", "fait durable")
+
+        assert any(h.text == "fait durable à retenir" and h.source == "fact" for h in hits)
+
+    asyncio.run(scenario())
+
+
+def test_fact_sources_link_table_is_created(tmp_path) -> None:
+    store = _store(tmp_path, BagOfWordsEmbedder())
+    row = store._get_db().execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='fact_sources'"
+    ).fetchone()
+    assert row is not None
+
+
+def test_recall_on_an_empty_journal_is_empty(store) -> None:
+    async def scenario() -> None:
+        assert await store.recall("alice", "rien") == []
 
     asyncio.run(scenario())

@@ -11,6 +11,7 @@ from server.core.commands import (
     Command,
     OpenLiveConnection,
     SendAudioToLlm,
+    SendMemoryToLlm,
     Trace,
 )
 from server.core.events import (
@@ -91,6 +92,9 @@ class GeminiLiveAdapter:
             return
         if isinstance(command, SendAudioToLlm):
             await self.send_audio(command.connection_id, command.data)
+            return
+        if isinstance(command, SendMemoryToLlm):
+            await self.send_memory(command.connection_id, command.text)
             return
 
     async def open(
@@ -230,6 +234,37 @@ class GeminiLiveAdapter:
         except Exception as exc:
             self._emit("send_error", payload={"error": str(exc)}, level="error")
             await self._fail(LlmFailureCause.ERROR)
+
+    async def send_memory(self, connection_id: str, text: str) -> None:
+        live = self._live
+        if live is None or self._terminated:
+            self._emit(
+                "send_memory_ignored",
+                payload={"connection_id": connection_id},
+                level="warning",
+            )
+            return
+        try:
+            from google.genai import types
+
+            await live.send_client_content(
+                turns=types.Content(role="user", parts=[types.Part(text=text)]),
+                turn_complete=False,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Recall is best effort: never tear the Session down over it.
+            self._emit(
+                "send_memory_error",
+                payload={"connection_id": connection_id, "error": str(exc)},
+                level="error",
+            )
+            return
+        self._emit(
+            "memory_injected",
+            payload={"connection_id": connection_id, "chars": len(text)},
+        )
 
     def _build_config(
         self,

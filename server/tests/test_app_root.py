@@ -17,6 +17,7 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
+    SendMemoryToLlm,
     StartIdleTimer,
 )
 from server.core.events import (
@@ -25,9 +26,12 @@ from server.core.events import (
     Event,
     LlmAudio,
     LlmOpened,
+    LlmTranscription,
+    Role,
     SessionRequested,
     TimerFired,
 )
+from server.core.ports import MemoryHit
 
 _CommandT = TypeVar("_CommandT", bound=Command)
 
@@ -83,13 +87,35 @@ class FakeClock:
         self.closed = True
 
 
-def _build() -> tuple[FakeAdapter, FakeAdapter, FakeClock, RecordingTraceSink, App]:
+class FakeMemory:
+    def __init__(self, hits: list[MemoryHit] | None = None) -> None:
+        self._hits = list(hits or [])
+        self.turns: list[tuple[str, str]] = []
+        self.queries: list[str] = []
+
+    async def session_context(self, user_id: str) -> str:
+        return ""
+
+    async def append_turn(self, user_id: str, role: str, text: str) -> None:
+        self.turns.append((role, text))
+
+    async def recall(self, user_id: str, query: str) -> list[MemoryHit]:
+        self.queries.append(query)
+        return list(self._hits)
+
+
+def _build(memory=None) -> tuple[FakeAdapter, FakeAdapter, FakeClock, RecordingTraceSink, App]:
     transport = FakeAdapter()
     gemini = FakeAdapter()
     clock = FakeClock()
     sink = RecordingTraceSink()
     app = App(
-        transport=transport, gemini=gemini, clock=clock, trace_sink=sink
+        transport=transport,
+        gemini=gemini,
+        clock=clock,
+        trace_sink=sink,
+        memory=memory,
+        user_id="alice",
     )
     return transport, gemini, clock, sink, app
 
@@ -147,6 +173,34 @@ def test_client_audio_during_a_live_session_goes_to_the_llm() -> None:
             await transport.feed(ClientAudio(data=b"mic"))
             await wait_until(lambda: gemini.of_type(SendAudioToLlm))
             assert gemini.of_type(SendAudioToLlm)[0].data == b"mic"
+
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+        finally:
+            if not runner.done():
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_user_utterance_routes_recall_injection_to_the_llm() -> None:
+    async def scenario() -> None:
+        memory = FakeMemory(hits=[MemoryHit("bleu", 0.2, "journal")])
+        transport, gemini, clock, sink, app = _build(memory)
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: transport.started)
+            await transport.feed(SessionRequested(client_id="c1"))
+            await gemini.feed(LlmOpened())
+
+            await gemini.feed(LlmTranscription(role=Role.USER, text="salut"))
+
+            await wait_until(lambda: gemini.of_type(SendMemoryToLlm))
+            command = gemini.of_type(SendMemoryToLlm)[0]
+            assert command.text == "[MÉMOIRE]\n- bleu"
+            assert memory.turns == [("user", "salut")]
+            assert memory.queries == ["salut"]
 
             app.request_shutdown()
             await asyncio.wait_for(runner, 1.0)

@@ -12,6 +12,7 @@ from server.core.commands import (
     CloseLiveConnection,
     OpenLiveConnection,
     SendAudioToLlm,
+    SendMemoryToLlm,
     StartIdleTimer,
     Trace,
 )
@@ -37,9 +38,13 @@ class FakeSession:
         self._receive_error = receive_error
         self._block = block
         self.sent_realtime: list[Any] = []
+        self.sent_client_content: list[Any] = []
 
     async def send_realtime_input(self, **kwargs: Any) -> None:
         self.sent_realtime.append(kwargs)
+
+    async def send_client_content(self, **kwargs: Any) -> None:
+        self.sent_client_content.append(kwargs)
 
     async def receive(self) -> Any:
         if self._block:
@@ -61,9 +66,13 @@ class PerTurnSession:
     def __init__(self, turns: list[list[Any]]) -> None:
         self._turns = list(turns)
         self.sent_realtime: list[Any] = []
+        self.sent_client_content: list[Any] = []
 
     async def send_realtime_input(self, **kwargs: Any) -> None:
         self.sent_realtime.append(kwargs)
+
+    async def send_client_content(self, **kwargs: Any) -> None:
+        self.sent_client_content.append(kwargs)
 
     async def receive(self) -> Any:
         if not self._turns:
@@ -424,6 +433,80 @@ def test_send_audio_after_terminal_event_is_ignored() -> None:
         await adapter.execute(SendAudioToLlm(connection_id="s1", data=b"\xaa\xbb"))
 
         assert session.sent_realtime == []
+
+    asyncio.run(scenario())
+
+
+def test_send_memory_injects_the_memoire_block_without_completing_the_turn() -> None:
+    async def scenario() -> None:
+        session = FakeSession(block=True)
+        live_connect = FakeLiveConnect(session=session)
+        sink = RecordingTraceSink()
+        adapter = GeminiLiveAdapter(
+            api_key="test-key",
+            model="gemini-live",
+            voice="Aoede",
+            live_connect=live_connect,
+            trace_sink=sink,
+        )
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        await adapter.execute(
+            SendMemoryToLlm(connection_id="s1", text="[MÉMOIRE]\n- bleu")
+        )
+
+        assert len(session.sent_client_content) == 1
+        call = session.sent_client_content[0]
+        assert call["turns"].role == "user"
+        assert call["turns"].parts[0].text == "[MÉMOIRE]\n- bleu"
+        assert call["turn_complete"] is False
+        assert sink.of_kind("memory_injected")
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(adapter.recv(), 0.05)
+
+    asyncio.run(scenario())
+
+
+def test_send_memory_without_open_connection_is_ignored() -> None:
+    async def scenario() -> None:
+        live_connect = FakeLiveConnect(session=FakeSession())
+        sink = RecordingTraceSink()
+        adapter = GeminiLiveAdapter(
+            api_key="test-key",
+            model="gemini-live",
+            voice="Aoede",
+            live_connect=live_connect,
+            trace_sink=sink,
+        )
+
+        await adapter.execute(SendMemoryToLlm(connection_id="s1", text="x"))
+
+        assert sink.of_kind("send_memory_ignored")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(adapter.recv(), 0.05)
+
+    asyncio.run(scenario())
+
+
+def test_send_memory_after_terminal_event_is_ignored() -> None:
+    async def scenario() -> None:
+        responses = [SimpleNamespace(go_away=SimpleNamespace(time_left="1s"))]
+        session = FakeSession(responses=responses)
+        live_connect = FakeLiveConnect(session=session)
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmFailed(
+            cause=LlmFailureCause.GO_AWAY
+        )
+
+        await adapter.execute(SendMemoryToLlm(connection_id="s1", text="x"))
+
+        assert session.sent_client_content == []
 
     asyncio.run(scenario())
 

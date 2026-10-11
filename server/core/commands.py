@@ -27,6 +27,12 @@ class SendAudioToLlm:
 
 
 @dataclass(frozen=True, slots=True)
+class SendMemoryToLlm:
+    connection_id: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class SendAudioToClient:
     client_id: str
     data: bytes
@@ -67,6 +73,7 @@ Command = Union[
     OpenLiveConnection,
     CloseLiveConnection,
     SendAudioToLlm,
+    SendMemoryToLlm,
     SendAudioToClient,
     AnnounceSessionStarted,
     AnnounceSessionEnded,
