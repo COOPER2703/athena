@@ -28,7 +28,17 @@ from server.core.events import (
     ShutdownRequested,
     TimerFired,
 )
-from server.core.ports import ClientLink, Clock, LlmSocket, TraceEntry, TraceSink
+from server.core.ports import (
+    ClientLink,
+    Clock,
+    Embedder,
+    LlmSocket,
+    MemoryHit,
+    MemoryStore,
+    ToolSpec,
+    TraceEntry,
+    TraceSink,
+)
 from server.core.state import SessionState
 
 __all__ = [
@@ -44,6 +54,7 @@ __all__ = [
     "CloseLiveConnection",
     "Command",
     "Coordinator",
+    "Embedder",
     "Event",
     "IDLE_TIMEOUT",
     "LlmAudio",
@@ -53,6 +64,8 @@ __all__ = [
     "LlmOpened",
     "LlmSocket",
     "LlmTranscription",
+    "MemoryHit",
+    "MemoryStore",
     "OpenLiveConnection",
     "Role",
     "SendAudioToClient",
@@ -62,6 +75,7 @@ __all__ = [
     "ShutdownRequested",
     "StartIdleTimer",
     "TimerFired",
+    "ToolSpec",
     "Trace",
     "TraceEntry",
     "TraceSink",

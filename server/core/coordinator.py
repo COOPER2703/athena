@@ -30,6 +30,7 @@ from server.core.events import (
     ShutdownRequested,
     TimerFired,
 )
+from server.core.ports import MemoryStore, ToolSpec
 from server.core.state import SessionState
 
 _TRACE_SOURCE = "core"
@@ -39,11 +40,23 @@ IDLE_TIMEOUT = 30.0
 class Coordinator:
     """Pure, deterministic event -> command transition function.
 
-    Holds no I/O, no clock, no asyncio: it receives domain events and returns
-    the commands the composition root should carry out.
+    Holds no direct I/O, no clock and imports no asyncio: it receives domain
+    events and awaits only the async ports injected by the composition root
+    (``MemoryStore`` today), then returns the commands to carry out.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        memory: MemoryStore | None = None,
+        user_id: str = "owner",
+        system_prompt: str = "",
+        tools: object | None = None,
+    ) -> None:
+        self._memory = memory
+        self._user_id = user_id
+        self._system_prompt = system_prompt
+        self._tools = tools  # Tool registry seam (issue #28).
         self._state = SessionState.IDLE
         self._client_id = ""
         self._connection_id = ""
@@ -65,11 +78,11 @@ class Coordinator:
     def session_id(self) -> str:
         return self._session_id
 
-    def handle(self, event: Event) -> list[Command]:
+    async def handle(self, event: Event) -> list[Command]:
         if isinstance(event, ClientRegistered):
             return self._on_client_registered(event)
         if isinstance(event, SessionRequested):
-            return self._on_session_requested(event)
+            return await self._on_session_requested(event)
         if isinstance(event, ClientAudio):
             return self._on_client_audio(event)
         if isinstance(event, ClientInterrupt):
@@ -95,7 +108,9 @@ class Coordinator:
     def _on_client_registered(self, event: ClientRegistered) -> list[Command]:
         return self._decision("ClientRegistered", client_id=event.client_id)
 
-    def _on_session_requested(self, event: SessionRequested) -> list[Command]:
+    async def _on_session_requested(
+        self, event: SessionRequested
+    ) -> list[Command]:
         commands: list[Command] = []
         original_state = self._state
         if original_state is not SessionState.IDLE:
@@ -108,7 +123,21 @@ class Coordinator:
         self._client_id = event.client_id
         self._auto = event.auto
         self._state = SessionState.LIVE_CONNECTING
-        commands.append(OpenLiveConnection(connection_id=self._connection_id))
+
+        # Activation (D3): assemble the generic prompt and the memory context the
+        # Session opens with. The instruction is frozen here, at connect time.
+        context = ""
+        if self._memory is not None:
+            context = await self._memory.session_context(self._user_id)
+        instruction = (self._system_prompt + "\n\n" + context).strip()
+
+        commands.append(
+            OpenLiveConnection(
+                connection_id=self._connection_id,
+                instruction=instruction,
+                tools=self._open_tools(),
+            )
+        )
         commands.append(
             StartIdleTimer(connection_id=self._connection_id, timeout=IDLE_TIMEOUT)
         )
@@ -120,7 +149,23 @@ class Coordinator:
                 client_id=event.client_id,
             )
         )
+        commands.append(
+            Trace(
+                source=_TRACE_SOURCE,
+                kind="Activation",
+                payload={
+                    "connection_id": self._connection_id,
+                    "user_id": self._user_id,
+                    "has_context": bool(context),
+                    "context_chars": len(context),
+                },
+            )
+        )
         return commands
+
+    def _open_tools(self) -> tuple[ToolSpec, ...]:
+        # The Tool registry lands in issue #28; until then no declaration is sent.
+        return ()
 
     def _on_client_audio(self, event: ClientAudio) -> list[Command]:
         if self._state in (SessionState.LIVE_ACTIVE, SessionState.SESSION_VISIBLE):

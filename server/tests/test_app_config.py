@@ -6,10 +6,14 @@ import pytest
 from pydantic import ValidationError
 
 from server.app.config import (
+    DEFAULT_CONSOLIDATION_MODEL,
+    DEFAULT_EMBED_MODEL,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_GEMINI_VOICE,
+    DEFAULT_MEMORY_DB,
     AppConfig,
     LogLevel,
+    MemoryConfig,
     ServerConfig,
     load_config,
 )
@@ -107,3 +111,81 @@ def test_config_is_immutable() -> None:
     cfg = load_config(env={"GEMINI_API_KEY": "k"}, env_file=None)
     with pytest.raises(ValidationError):
         cfg.log_level = LogLevel.DEBUG  # type: ignore[misc]
+
+
+def test_memory_defaults_are_wired_on_the_app_config() -> None:
+    cfg = load_config(env={"GEMINI_API_KEY": "k"}, env_file=None)
+    assert cfg.memory == MemoryConfig()
+    assert cfg.memory.user_id == "owner"
+    assert cfg.memory.db_path == DEFAULT_MEMORY_DB
+    assert cfg.memory.short_term_window == 20
+    assert cfg.memory.recent_events_window == 20
+    assert cfg.memory.recall_k == 5
+    assert cfg.memory.recall_window_turns == 3
+    assert cfg.memory.recall_max_distance == 0.6
+    assert cfg.memory.dedup_threshold == 0.15
+    assert cfg.memory.journal_retention_days == 3
+    assert cfg.memory.embed_model == DEFAULT_EMBED_MODEL
+    assert cfg.memory.consolidation_model == DEFAULT_CONSOLIDATION_MODEL
+    assert cfg.memory.consolidation_hours == (0, 12)
+
+
+def test_memory_reads_and_coerces_environment() -> None:
+    cfg = load_config(
+        env={
+            "GEMINI_API_KEY": "k",
+            "ATHENA_USER_ID": "alice",
+            "ATHENA_MEMORY_DB": "/tmp/mem.db",
+            "ATHENA_SHORT_TERM_WINDOW": "7",
+            "ATHENA_RECENT_EVENTS_WINDOW": "9",
+            "ATHENA_RECALL_K": "4",
+            "ATHENA_RECALL_WINDOW_TURNS": "2",
+            "ATHENA_RECALL_MAX_DISTANCE": "0.5",
+            "ATHENA_DEDUP_THRESHOLD": "0.2",
+            "ATHENA_JOURNAL_RETENTION_DAYS": "6",
+            "ATHENA_EMBED_MODEL": "custom-embed",
+            "ATHENA_CONSOLIDATION_MODEL": "custom-consolidation",
+            "ATHENA_CONSOLIDATION_HOURS": "6,18",
+        },
+        env_file=None,
+    )
+    assert cfg.memory.user_id == "alice"
+    assert cfg.memory.db_path == "/tmp/mem.db"
+    assert cfg.memory.short_term_window == 7
+    assert cfg.memory.recent_events_window == 9
+    assert cfg.memory.recall_k == 4
+    assert cfg.memory.recall_window_turns == 2
+    assert cfg.memory.recall_max_distance == 0.5
+    assert cfg.memory.dedup_threshold == 0.2
+    assert cfg.memory.journal_retention_days == 6
+    assert cfg.memory.embed_model == "custom-embed"
+    assert cfg.memory.consolidation_model == "custom-consolidation"
+    assert cfg.memory.consolidation_hours == (6, 18)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"ATHENA_USER_ID": ""},
+        {"ATHENA_USER_ID": "   "},
+        {"ATHENA_MEMORY_DB": ""},
+        {"ATHENA_SHORT_TERM_WINDOW": "0"},
+        {"ATHENA_RECENT_EVENTS_WINDOW": "-1"},
+        {"ATHENA_JOURNAL_RETENTION_DAYS": "0"},
+        {"ATHENA_RECALL_K": "0"},
+        {"ATHENA_RECALL_WINDOW_TURNS": "0"},
+        {"ATHENA_RECALL_MAX_DISTANCE": "1.5"},
+        {"ATHENA_DEDUP_THRESHOLD": "-0.1"},
+        {"ATHENA_SHORT_TERM_WINDOW": "not-a-number"},
+        {"ATHENA_CONSOLIDATION_HOURS": "24"},
+    ],
+)
+def test_invalid_memory_config_raises_clear_validation_error(overrides) -> None:
+    with pytest.raises(ValidationError):
+        load_config(env={"GEMINI_API_KEY": "k", **overrides}, env_file=None)
+
+
+def test_memory_config_is_immutable() -> None:
+    cfg = load_config(env={"GEMINI_API_KEY": "k"}, env_file=None)
+    with pytest.raises(ValidationError):
+        cfg.memory.user_id = "other"  # type: ignore[misc]

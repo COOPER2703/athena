@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Awaitable, Callable, Mapping
 
 from server.adapters.gemini import GeminiLiveAdapter
+from server.adapters.memory import SentenceTransformerEmbedder, SqliteMemoryStore
 from server.adapters.trace import emit
 from server.adapters.transport import WebSocketTransport
 from server.app.clock import AsyncioClock
@@ -23,9 +25,15 @@ from server.core.commands import (
 )
 from server.core.coordinator import Coordinator
 from server.core.events import Event, ShutdownRequested
-from server.core.ports import TraceSink
+from server.core.ports import MemoryStore, TraceSink
 
 _TRACE_SOURCE = "app"
+_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent.parent / "system-prompt.txt"
+
+
+def load_system_prompt(path: str | Path | None = None) -> str:
+    """Read the versioned generic system prompt injected into the kernel."""
+    return Path(path or _SYSTEM_PROMPT_PATH).read_text(encoding="utf-8")
 
 
 class App:
@@ -44,16 +52,27 @@ class App:
         gemini: GeminiLiveAdapter,
         clock: AsyncioClock,
         trace_sink: TraceSink,
+        memory: MemoryStore | None = None,
+        user_id: str = "owner",
+        system_prompt: str = "",
+        tools: object | None = None,
     ) -> None:
         self._transport = transport
         self._gemini = gemini
         self._clock = clock
         self._trace_sink = trace_sink
-        self._coordinator = Coordinator()
+        self._memory = memory
+        self._coordinator = Coordinator(
+            memory=memory,
+            user_id=user_id,
+            system_prompt=system_prompt,
+            tools=tools,
+        )
         self._events: asyncio.Queue[Event] = asyncio.Queue()
 
     async def run(self) -> None:
         """Démarre les adaptateurs puis traite les Événements jusqu'à l'arrêt."""
+        await self._warmup_memory()
         await self._transport.start()
         self._emit("started", payload={"state": self._coordinator.state.value})
 
@@ -72,6 +91,11 @@ class App:
             self._clock.close()
             self._emit("stopped")
 
+    async def _warmup_memory(self) -> None:
+        warmup = getattr(self._memory, "warmup", None)
+        if warmup is not None:
+            await warmup()
+
     def request_shutdown(self) -> None:
         """Dépose ``ShutdownRequested`` dans le flux, appelable depuis un signal."""
         self._events.put_nowait(ShutdownRequested())
@@ -83,7 +107,7 @@ class App:
     async def _core_loop(self) -> None:
         while True:
             event = await self._events.get()
-            for command in self._coordinator.handle(event):
+            for command in await self._coordinator.handle(event):
                 await self._dispatch(command)
             if isinstance(event, ShutdownRequested):
                 return
@@ -146,9 +170,21 @@ def build_app(config: AppConfig) -> App:
     )
     clock = AsyncioClock()
 
+    embedder = SentenceTransformerEmbedder(config.memory.embed_model)
+    memory = SqliteMemoryStore(
+        db_path=config.memory.db_path,
+        embedder=embedder,
+        short_term_window=config.memory.short_term_window,
+        recent_events_window=config.memory.recent_events_window,
+        journal_retention_days=config.memory.journal_retention_days,
+    )
+
     return App(
         transport=transport,
         gemini=gemini,
         clock=clock,
         trace_sink=trace_sink,
+        memory=memory,
+        user_id=config.memory.user_id,
+        system_prompt=load_system_prompt(),
     )

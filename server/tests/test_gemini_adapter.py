@@ -149,6 +149,32 @@ def test_open_emits_opened_and_hands_config_to_the_live_connect() -> None:
     asyncio.run(scenario())
 
 
+def test_open_forwards_the_system_instruction_to_the_live_config() -> None:
+    async def scenario() -> None:
+        live_connect = FakeLiveConnect(session=FakeSession())
+        adapter = _adapter(live_connect)
+
+        await adapter.open("s1", "RÈGLES DU NOYAU")
+
+        _, config = live_connect.calls[0]
+        assert config.system_instruction.parts[0].text == "RÈGLES DU NOYAU"
+
+    asyncio.run(scenario())
+
+
+def test_open_without_instruction_leaves_the_system_instruction_empty() -> None:
+    async def scenario() -> None:
+        live_connect = FakeLiveConnect(session=FakeSession())
+        adapter = _adapter(live_connect)
+
+        await adapter.open("s1")
+
+        _, config = live_connect.calls[0]
+        assert config.system_instruction is None
+
+    asyncio.run(scenario())
+
+
 def test_maps_audio_transcriptions_and_ignores_tool_call() -> None:
     async def scenario() -> None:
         responses = [
