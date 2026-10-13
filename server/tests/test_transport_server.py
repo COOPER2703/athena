@@ -23,7 +23,7 @@ from server.core.commands import (
     SendAudioToClient,
     Trace,
 )
-from server.core.events import ClientRegistered
+from server.core.events import ClientDisconnected, ClientRegistered
 
 
 def test_register_returns_registered_and_enqueues_event() -> None:
@@ -153,6 +153,19 @@ def test_disconnect_removes_client_and_traces() -> None:
 
             await wait_until(lambda: not transport.clients)
             assert sink.of_kind("client_disconnected")
+
+    asyncio.run(scenario())
+
+
+def test_disconnect_enqueues_client_disconnected_for_the_core() -> None:
+    async def scenario() -> None:
+        async with running_transport() as transport:
+            async with websockets.connect(_url(transport)) as ws:
+                response = await register(ws, transport)
+
+            event = await asyncio.wait_for(transport.recv(), 1.0)
+
+            assert event == ClientDisconnected(client_id=response.client_id)
 
     asyncio.run(scenario())
 

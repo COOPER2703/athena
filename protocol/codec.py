@@ -18,6 +18,7 @@ class SessionEndReason(IntEnum):
     REPLACED = 3
     SHUTDOWN = 4
     ERROR = 5
+    CLIENT_GONE = 6
 
     # Preserve unknown wire values as explicit sentinels, never coercing them to NORMAL.
     @classmethod

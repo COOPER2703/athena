@@ -28,7 +28,7 @@ from server.core.commands import (
     SendAudioToClient,
     Trace,
 )
-from server.core.events import ClientRegistered, Event
+from server.core.events import ClientDisconnected, ClientRegistered, Event
 from server.core.ports import TraceSink
 
 _TRACE_SOURCE = "transport"
@@ -175,7 +175,7 @@ class WebSocketTransport:
             pass
         finally:
             if connection is not None:
-                self._cleanup(connection)
+                await self._cleanup(connection)
 
     async def _register(
         self, websocket: ServerConnection, message: object
@@ -263,7 +263,7 @@ class WebSocketTransport:
             return
         await self._events.put(event)
 
-    def _cleanup(self, connection: ClientConnection) -> None:
+    async def _cleanup(self, connection: ClientConnection) -> None:
         self._clients.pop(connection.client_id, None)
         self._emit(
             "client_disconnected",
@@ -272,6 +272,7 @@ class WebSocketTransport:
                 "client_name": connection.client_name,
             },
         )
+        await self._events.put(ClientDisconnected(client_id=connection.client_id))
 
     async def _send(self, websocket: ServerConnection, message: object) -> None:
         try:

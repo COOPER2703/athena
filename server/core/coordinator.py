@@ -16,6 +16,7 @@ from server.core.commands import (
 )
 from server.core.events import (
     ClientAudio,
+    ClientDisconnected,
     ClientInterrupt,
     ClientRegistered,
     ClientToolResult,
@@ -72,6 +73,8 @@ class Coordinator:
             return self._on_session_requested(event)
         if isinstance(event, ClientAudio):
             return self._on_client_audio(event)
+        if isinstance(event, ClientDisconnected):
+            return self._on_client_disconnected(event)
         if isinstance(event, ClientInterrupt):
             return self._on_client_interrupt(event)
         if isinstance(event, ClientToolResult):
@@ -131,6 +134,17 @@ class Coordinator:
             ]
         return self._decision("ClientAudio")
 
+    def _on_client_disconnected(self, event: ClientDisconnected) -> list[Command]:
+        # La disparition du Client actif termine la Session par le chemin
+        # déterministe unique ; celle d'un Client non-actif ne la touche pas.
+        if (
+            self._client_id
+            and event.client_id == self._client_id
+            and self._state is not SessionState.IDLE
+        ):
+            return self._teardown(SessionEndReason.CLIENT_GONE, "ClientDisconnected")
+        return self._decision("ClientDisconnected", client_id=event.client_id)
+
     def _on_client_interrupt(self, event: ClientInterrupt) -> list[Command]:
         client_id = event.client_id or self._client_id
         if self._state is SessionState.SESSION_VISIBLE:
@@ -182,6 +196,10 @@ class Coordinator:
         return self._decision("LlmTranscription")
 
     def _on_llm_closed(self, event: LlmClosed) -> list[Command]:
+        if not self._owns(event.connection_id):
+            return self._decision(
+                "LlmClosed", stale_connection_id=event.connection_id
+            )
         if self._state in (
             SessionState.LIVE_CONNECTING,
             SessionState.LIVE_ACTIVE,
@@ -191,6 +209,12 @@ class Coordinator:
         return self._decision("LlmClosed")
 
     def _on_llm_failed(self, event: LlmFailed) -> list[Command]:
+        if not self._owns(event.connection_id):
+            return self._decision(
+                "LlmFailed",
+                cause=event.cause.value,
+                stale_connection_id=event.connection_id,
+            )
         if self._state is not SessionState.IDLE:
             return self._teardown(
                 SessionEndReason.ERROR, "LlmFailed", cause=event.cause.value
@@ -203,16 +227,16 @@ class Coordinator:
         return self._decision("ShutdownRequested")
 
     def _on_timer_fired(self, event: TimerFired) -> list[Command]:
-        if (
-            self._connection_id
-            and event.connection_id == self._connection_id
-            and self._state is not SessionState.IDLE
-        ):
+        if self._owns(event.connection_id) and self._state is not SessionState.IDLE:
             return self._teardown(SessionEndReason.TIMEOUT, "Timeout")
         return self._decision("TimerFired")
 
     def _rearm_timer(self) -> StartIdleTimer:
         return StartIdleTimer(connection_id=self._connection_id, timeout=IDLE_TIMEOUT)
+
+    def _owns(self, connection_id: str) -> bool:
+        """Une identité vide n'est pas un joker : seul l'id courant compte."""
+        return connection_id != "" and connection_id == self._connection_id
 
     def _become_visible(self, kind: str) -> list[Command]:
         from_state = self._state
@@ -308,6 +332,7 @@ class Coordinator:
         *,
         client_id: str | None = None,
         cause: str | None = None,
+        stale_connection_id: str | None = None,
     ) -> list[Command]:
         """Trace for a decision that leaves the state unchanged."""
         return [
@@ -318,6 +343,7 @@ class Coordinator:
                 client_id=self._client_id if client_id is None else client_id,
                 cause=cause,
                 level="debug",
+                stale_connection_id=stale_connection_id,
             )
         ]
 
@@ -332,6 +358,7 @@ class Coordinator:
         cause: str | None = None,
         connection_id: str | None = None,
         session_id: str | None = None,
+        stale_connection_id: str | None = None,
         level: str = "info",
     ) -> Trace:
         payload: dict[str, object] = {
@@ -347,4 +374,6 @@ class Coordinator:
             payload["reason"] = reason
         if cause is not None:
             payload["cause"] = cause
+        if stale_connection_id is not None:
+            payload["stale_connection_id"] = stale_connection_id
         return Trace(source=_TRACE_SOURCE, kind=kind, payload=payload, level=level)

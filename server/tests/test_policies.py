@@ -10,6 +10,7 @@ from server.core import (
     AnnounceSessionStarted,
     CancelIdleTimer,
     ClientAudio,
+    ClientDisconnected,
     ClientInterrupt,
     CloseLiveConnection,
     Coordinator,
@@ -209,7 +210,7 @@ def test_llm_failed_closes_connection_then_ends_session_with_error(cause):
     coordinator = Coordinator()
     drive(coordinator, live_session())
 
-    commands = coordinator.handle(LlmFailed(cause=cause))
+    commands = coordinator.handle(LlmFailed(cause=cause, connection_id="s1"))
 
     assert effects(commands) == [
         CancelIdleTimer(connection_id="s1"),
@@ -224,7 +225,7 @@ def test_llm_failed_trace_distinguishes_go_away_from_raw_error():
     def teardown_trace(cause):
         coordinator = Coordinator()
         drive(coordinator, live_session())
-        commands = coordinator.handle(LlmFailed(cause=cause))
+        commands = coordinator.handle(LlmFailed(cause=cause, connection_id="s1"))
         return next(
             trace
             for trace in traces(commands)
@@ -239,7 +240,9 @@ def test_llm_failed_before_session_is_visible_still_ends_with_error():
     coordinator = Coordinator()
     drive(coordinator, [SessionRequested(client_id="c1")])
 
-    commands = coordinator.handle(LlmFailed(cause=LlmFailureCause.ERROR))
+    commands = coordinator.handle(
+        LlmFailed(cause=LlmFailureCause.ERROR, connection_id="s1")
+    )
 
     assert AnnounceSessionEnded(
         client_id="c1", reason=SessionEndReason.ERROR
@@ -251,7 +254,9 @@ def test_llm_failed_leaves_no_residual_commands_or_zombie_session():
     coordinator = Coordinator()
     drive(coordinator, live_session())
 
-    commands = coordinator.handle(LlmFailed(cause=LlmFailureCause.GO_AWAY))
+    commands = coordinator.handle(
+        LlmFailed(cause=LlmFailureCause.GO_AWAY, connection_id="s1")
+    )
 
     assert all(
         isinstance(command, (CancelIdleTimer, CloseLiveConnection, AnnounceSessionEnded, Trace))
@@ -288,7 +293,7 @@ def test_teardown_traces_transition_into_closing_then_closing_to_idle():
     coordinator = Coordinator()
     drive(coordinator, live_session())
 
-    commands = coordinator.handle(LlmClosed())
+    commands = coordinator.handle(LlmClosed(connection_id="s1"))
 
     ts = traces(commands)
     into_closing = next(t for t in ts if t.payload["to_state"] == "Closing")
@@ -339,3 +344,125 @@ def test_idle_timer_uses_the_shared_constant():
 
     timer = next(c for c in commands if isinstance(c, StartIdleTimer))
     assert timer.timeout == IDLE_TIMEOUT
+
+
+def test_current_llm_closed_ends_the_session():
+    coordinator = Coordinator()
+    drive(coordinator, live_session())
+
+    commands = coordinator.handle(LlmClosed(connection_id="s1"))
+
+    assert effects(commands) == [
+        CancelIdleTimer(connection_id="s1"),
+        CloseLiveConnection(connection_id="s1"),
+        AnnounceSessionEnded(client_id="c1", reason=SessionEndReason.NORMAL),
+    ]
+    assert coordinator.state is SessionState.IDLE
+
+
+def test_stale_llm_closed_from_a_previous_connection_is_ignored():
+    coordinator = Coordinator()
+    drive(coordinator, live_session(client_id="c1"))
+    coordinator.handle(SessionRequested(client_id="c2"))
+
+    commands = coordinator.handle(LlmClosed(connection_id="s1"))
+
+    assert effects(commands) == []
+    assert coordinator.state is SessionState.LIVE_CONNECTING
+    assert coordinator.connection_id == "s2"
+
+
+def test_stale_terminal_trace_carries_both_identities():
+    coordinator = Coordinator()
+    drive(coordinator, live_session(client_id="c1"))
+    coordinator.handle(SessionRequested(client_id="c2"))
+
+    commands = coordinator.handle(LlmClosed(connection_id="s1"))
+
+    stale = next(trace for trace in traces(commands) if trace.kind == "LlmClosed")
+    assert stale.level == "debug"
+    assert stale.payload["connection_id"] == "s2"
+    assert stale.payload["stale_connection_id"] == "s1"
+
+
+def test_stale_llm_failed_from_a_previous_connection_is_ignored():
+    coordinator = Coordinator()
+    drive(coordinator, live_session(client_id="c1"))
+    coordinator.handle(SessionRequested(client_id="c2"))
+
+    commands = coordinator.handle(
+        LlmFailed(cause=LlmFailureCause.ERROR, connection_id="s1")
+    )
+
+    assert effects(commands) == []
+    assert coordinator.state is SessionState.LIVE_CONNECTING
+    assert coordinator.connection_id == "s2"
+
+
+def test_terminal_event_with_empty_identity_is_stale():
+    coordinator = Coordinator()
+    drive(coordinator, live_session(client_id="c1"))
+
+    commands = coordinator.handle(LlmClosed())
+
+    assert effects(commands) == []
+    assert coordinator.state is SessionState.SESSION_VISIBLE
+
+
+def test_client_disconnected_from_the_active_client_ends_the_session():
+    coordinator = Coordinator()
+    drive(coordinator, live_session(client_id="c1"))
+
+    commands = coordinator.handle(ClientDisconnected(client_id="c1"))
+
+    assert effects(commands) == [
+        CancelIdleTimer(connection_id="s1"),
+        CloseLiveConnection(connection_id="s1"),
+        AnnounceSessionEnded(client_id="c1", reason=SessionEndReason.CLIENT_GONE),
+    ]
+    assert coordinator.state is SessionState.IDLE
+    assert coordinator.connection_id == ""
+
+
+def test_client_disconnected_before_the_session_is_visible_still_ends_it():
+    coordinator = Coordinator()
+    drive(coordinator, [SessionRequested(client_id="c1")])
+
+    commands = coordinator.handle(ClientDisconnected(client_id="c1"))
+
+    assert AnnounceSessionEnded(
+        client_id="c1", reason=SessionEndReason.CLIENT_GONE
+    ) in effects(commands)
+    assert coordinator.state is SessionState.IDLE
+
+
+def test_client_disconnected_from_a_non_active_client_leaves_the_session_intact():
+    coordinator = Coordinator()
+    drive(coordinator, live_session(client_id="c1"))
+
+    commands = coordinator.handle(ClientDisconnected(client_id="c2"))
+
+    assert effects(commands) == []
+    assert coordinator.state is SessionState.SESSION_VISIBLE
+    assert coordinator.connection_id == "s1"
+
+
+def test_client_disconnected_while_idle_is_a_noop():
+    coordinator = Coordinator()
+
+    commands = coordinator.handle(ClientDisconnected(client_id="c1"))
+
+    assert effects(commands) == []
+    assert coordinator.state is SessionState.IDLE
+
+
+def test_client_disconnected_after_replacement_does_not_cut_the_new_session():
+    coordinator = Coordinator()
+    drive(coordinator, live_session(client_id="c1"))
+    coordinator.handle(SessionRequested(client_id="c2"))
+
+    commands = coordinator.handle(ClientDisconnected(client_id="c1"))
+
+    assert effects(commands) == []
+    assert coordinator.state is SessionState.LIVE_CONNECTING
+    assert coordinator.connection_id == "s2"

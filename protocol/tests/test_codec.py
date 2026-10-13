@@ -82,6 +82,15 @@ def test_session_ended_defaults_to_normal():
     assert decode(encode(SessionEnded())) == SessionEnded(reason=SessionEndReason.NORMAL)
 
 
+def test_client_gone_reason_is_stable_at_six():
+    # Motif de fin ajouté en fin d'énumération : les valeurs existantes ne
+    # bougent jamais (glossaire, « Motif de fin »).
+    assert SessionEndReason.CLIENT_GONE == 6
+    assert decode(encode(SessionEnded(reason=SessionEndReason.CLIENT_GONE))) == (
+        SessionEnded(reason=SessionEndReason.CLIENT_GONE)
+    )
+
+
 def test_unknown_reason_is_preserved_not_coerced_to_normal():
     decoded = decode(encode(SessionEnded(reason=SessionEndReason(99))))
     assert int(decoded.reason) == 99
