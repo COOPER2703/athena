@@ -58,6 +58,7 @@ FROZEN_REASONS = {
     "REPLACED": 3,
     "SHUTDOWN": 4,
     "ERROR": 5,
+    "CLIENT_GONE": 6,
 }
 
 

@@ -16,6 +16,7 @@ from server.core.commands import (
 )
 from server.core.events import (
     ClientAudio,
+    ClientDisconnected,
     ClientInterrupt,
     ClientRegistered,
     ClientToolResult,
@@ -72,6 +73,8 @@ class Coordinator:
             return self._on_session_requested(event)
         if isinstance(event, ClientAudio):
             return self._on_client_audio(event)
+        if isinstance(event, ClientDisconnected):
+            return self._on_client_disconnected(event)
         if isinstance(event, ClientInterrupt):
             return self._on_client_interrupt(event)
         if isinstance(event, ClientToolResult):
@@ -131,6 +134,17 @@ class Coordinator:
             ]
         return self._decision("ClientAudio")
 
+    def _on_client_disconnected(self, event: ClientDisconnected) -> list[Command]:
+        # La disparition du Client actif termine la Session par le chemin
+        # déterministe unique ; celle d'un Client non-actif ne la touche pas.
+        if (
+            self._client_id
+            and event.client_id == self._client_id
+            and self._state is not SessionState.IDLE
+        ):
+            return self._teardown(SessionEndReason.CLIENT_GONE, "ClientDisconnected")
+        return self._decision("ClientDisconnected", client_id=event.client_id)
+
     def _on_client_interrupt(self, event: ClientInterrupt) -> list[Command]:
         client_id = event.client_id or self._client_id
         if self._state is SessionState.SESSION_VISIBLE:
@@ -182,6 +196,10 @@ class Coordinator:
         return self._decision("LlmTranscription")
 
     def _on_llm_closed(self, event: LlmClosed) -> list[Command]:
+        if not self._owns(event.connection_id):
+            return self._stale_terminal(
+                "LlmClosed", received_connection_id=event.connection_id
+            )
         if self._state in (
             SessionState.LIVE_CONNECTING,
             SessionState.LIVE_ACTIVE,
@@ -191,6 +209,12 @@ class Coordinator:
         return self._decision("LlmClosed")
 
     def _on_llm_failed(self, event: LlmFailed) -> list[Command]:
+        if not self._owns(event.connection_id):
+            return self._stale_terminal(
+                "LlmFailed",
+                received_connection_id=event.connection_id,
+                cause=event.cause.value,
+            )
         if self._state is not SessionState.IDLE:
             return self._teardown(
                 SessionEndReason.ERROR, "LlmFailed", cause=event.cause.value
@@ -213,6 +237,10 @@ class Coordinator:
 
     def _rearm_timer(self) -> StartIdleTimer:
         return StartIdleTimer(connection_id=self._connection_id, timeout=IDLE_TIMEOUT)
+
+    def _owns(self, connection_id: str) -> bool:
+        """Une identité vide n'est pas un joker : seul l'id courant compte."""
+        return connection_id != "" and connection_id == self._connection_id
 
     def _become_visible(self, kind: str) -> list[Command]:
         from_state = self._state
@@ -321,6 +349,30 @@ class Coordinator:
             )
         ]
 
+    def _stale_terminal(
+        self,
+        kind: str,
+        *,
+        received_connection_id: str,
+        cause: str | None = None,
+    ) -> list[Command]:
+        """Trace a terminal event from a Live connection the core no longer owns.
+
+        L'identité voyage avec l'Événement : un terminal périmé ne peut plus
+        tuer la Session courante, quelle que soit la latence de la file.
+        """
+        return [
+            self._trace(
+                kind,
+                from_state=self._state,
+                to_state=self._state,
+                client_id=self._client_id,
+                cause=cause,
+                level="debug",
+                received_connection_id=received_connection_id,
+            )
+        ]
+
     def _trace(
         self,
         kind: str,
@@ -332,6 +384,7 @@ class Coordinator:
         cause: str | None = None,
         connection_id: str | None = None,
         session_id: str | None = None,
+        received_connection_id: str | None = None,
         level: str = "info",
     ) -> Trace:
         payload: dict[str, object] = {
@@ -347,4 +400,6 @@ class Coordinator:
             payload["reason"] = reason
         if cause is not None:
             payload["cause"] = cause
+        if received_connection_id is not None:
+            payload["received_connection_id"] = received_connection_id
         return Trace(source=_TRACE_SOURCE, kind=kind, payload=payload, level=level)
