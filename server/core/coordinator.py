@@ -197,8 +197,8 @@ class Coordinator:
 
     def _on_llm_closed(self, event: LlmClosed) -> list[Command]:
         if not self._owns(event.connection_id):
-            return self._stale_terminal(
-                "LlmClosed", received_connection_id=event.connection_id
+            return self._decision(
+                "LlmClosed", stale_connection_id=event.connection_id
             )
         if self._state in (
             SessionState.LIVE_CONNECTING,
@@ -210,10 +210,10 @@ class Coordinator:
 
     def _on_llm_failed(self, event: LlmFailed) -> list[Command]:
         if not self._owns(event.connection_id):
-            return self._stale_terminal(
+            return self._decision(
                 "LlmFailed",
-                received_connection_id=event.connection_id,
                 cause=event.cause.value,
+                stale_connection_id=event.connection_id,
             )
         if self._state is not SessionState.IDLE:
             return self._teardown(
@@ -227,11 +227,7 @@ class Coordinator:
         return self._decision("ShutdownRequested")
 
     def _on_timer_fired(self, event: TimerFired) -> list[Command]:
-        if (
-            self._connection_id
-            and event.connection_id == self._connection_id
-            and self._state is not SessionState.IDLE
-        ):
+        if self._owns(event.connection_id) and self._state is not SessionState.IDLE:
             return self._teardown(SessionEndReason.TIMEOUT, "Timeout")
         return self._decision("TimerFired")
 
@@ -336,6 +332,7 @@ class Coordinator:
         *,
         client_id: str | None = None,
         cause: str | None = None,
+        stale_connection_id: str | None = None,
     ) -> list[Command]:
         """Trace for a decision that leaves the state unchanged."""
         return [
@@ -346,30 +343,7 @@ class Coordinator:
                 client_id=self._client_id if client_id is None else client_id,
                 cause=cause,
                 level="debug",
-            )
-        ]
-
-    def _stale_terminal(
-        self,
-        kind: str,
-        *,
-        received_connection_id: str,
-        cause: str | None = None,
-    ) -> list[Command]:
-        """Trace a terminal event from a Live connection the core no longer owns.
-
-        L'identité voyage avec l'Événement : un terminal périmé ne peut plus
-        tuer la Session courante, quelle que soit la latence de la file.
-        """
-        return [
-            self._trace(
-                kind,
-                from_state=self._state,
-                to_state=self._state,
-                client_id=self._client_id,
-                cause=cause,
-                level="debug",
-                received_connection_id=received_connection_id,
+                stale_connection_id=stale_connection_id,
             )
         ]
 
@@ -384,7 +358,7 @@ class Coordinator:
         cause: str | None = None,
         connection_id: str | None = None,
         session_id: str | None = None,
-        received_connection_id: str | None = None,
+        stale_connection_id: str | None = None,
         level: str = "info",
     ) -> Trace:
         payload: dict[str, object] = {
@@ -400,6 +374,6 @@ class Coordinator:
             payload["reason"] = reason
         if cause is not None:
             payload["cause"] = cause
-        if received_connection_id is not None:
-            payload["received_connection_id"] = received_connection_id
+        if stale_connection_id is not None:
+            payload["stale_connection_id"] = stale_connection_id
         return Trace(source=_TRACE_SOURCE, kind=kind, payload=payload, level=level)

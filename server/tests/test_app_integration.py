@@ -191,7 +191,7 @@ def test_stale_terminal_after_replacement_does_not_kill_the_new_session() -> Non
         stale = [
             entry
             for entry in sink.of_kind("LlmClosed")
-            if entry.payload.get("received_connection_id") == "s1"
+            if entry.payload.get("stale_connection_id") == "s1"
         ]
         assert stale, "the stale terminal event was not traced"
         assert stale[-1].level == "debug"
@@ -244,5 +244,69 @@ def test_active_client_disconnect_ends_the_session_with_client_gone() -> None:
         closed = sink.of_kind("SessionClosed")
         assert closed[-1].payload["reason"] == "CLIENT_GONE"
         assert closed[-1].payload["to_state"] == "Idle"
+
+    asyncio.run(scenario())
+
+
+def test_client_disconnect_then_new_client_restarts_a_working_session() -> None:
+    async def scenario() -> None:
+        sink = RecordingTraceSink()
+        transport = WebSocketTransport(host="127.0.0.1", port=0, trace_sink=sink)
+        gemini = GeminiLiveAdapter(
+            api_key="test-key",
+            model="gemini-live",
+            voice="Aoede",
+            live_connect=_TalkingLiveConnect(audio=b"reply"),
+            trace_sink=sink,
+        )
+        app = App(
+            transport=transport,
+            gemini=gemini,
+            clock=AsyncioClock(),
+            trace_sink=sink,
+        )
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: bool(sink.of_kind("started")))
+
+            async with websockets.connect(_url(transport)) as ws_a:
+                await register(ws_a, transport, client_name="a", drain=False)
+                await ws_a.send(encode(SessionStart()))
+                assert decode(await asyncio.wait_for(ws_a.recv(), 1.0)) == (
+                    SessionStarted(auto=False)
+                )
+                await wait_until(lambda: _session_visible(sink))
+
+            # A's socket closed: the core ends the Session and returns to Idle.
+            await wait_until(
+                lambda: any(
+                    entry.kind == "SessionClosed"
+                    and entry.payload.get("reason") == "CLIENT_GONE"
+                    for entry in sink.entries
+                )
+            )
+
+            # B taps afterwards: a clean restart, no ghost Session in the way.
+            async with websockets.connect(_url(transport)) as ws_b:
+                await register(ws_b, transport, client_name="b", drain=False)
+                await ws_b.send(encode(SessionStart()))
+                assert decode(await asyncio.wait_for(ws_b.recv(), 1.0)) == (
+                    SessionStarted(auto=False)
+                )
+                assert decode(await asyncio.wait_for(ws_b.recv(), 1.0)) == Audio(
+                    data=b"reply"
+                )
+        finally:
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+
+        # The previous Session ended on disconnect; B's Session survived.
+        client_gone = [
+            entry
+            for entry in sink.of_kind("SessionClosed")
+            if entry.payload["reason"] == "CLIENT_GONE"
+        ]
+        assert client_gone
+        assert client_gone[-1].payload["to_state"] == "Idle"
 
     asyncio.run(scenario())
