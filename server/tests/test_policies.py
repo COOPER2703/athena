@@ -382,7 +382,7 @@ def test_stale_terminal_trace_carries_both_identities():
     stale = next(trace for trace in traces(commands) if trace.kind == "LlmClosed")
     assert stale.level == "debug"
     assert stale.payload["connection_id"] == "s2"
-    assert stale.payload["received_connection_id"] == "s1"
+    assert stale.payload["stale_connection_id"] == "s1"
 
 
 def test_stale_llm_failed_from_a_previous_connection_is_ignored():
