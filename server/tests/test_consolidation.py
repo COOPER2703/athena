@@ -218,6 +218,27 @@ def test_event_turns_are_excluded_from_the_transcript() -> None:
     assert "REUNION" not in transcript
 
 
+def test_announced_event_fact_and_announcement_are_both_excluded() -> None:
+    # Ticket #42 : le fait annoncé et la parole d'annonce sont journalisés en
+    # rôle ``event`` ; ni l'un ni l'autre ne nourrit la Consolidation.
+    store = FakeStore(
+        entries=[
+            JournalEntry(1, "event", "[matrix] porte ouverte"),
+            JournalEntry(2, "event", "La porte d'entrée est ouverte"),
+            JournalEntry(3, "user", "merci"),
+        ],
+        last=_dt(day=1, hour=0),
+    )
+    extractor = RecordingExtractor([])
+
+    _run(_consolidation(store, extractor), _dt(hour=12))
+
+    transcript = extractor.transcripts[0]
+    assert "[matrix] porte ouverte" not in transcript
+    assert "La porte d'entrée est ouverte" not in transcript
+    assert transcript == "[user] merci"
+
+
 def test_stored_facts_are_linked_to_the_non_event_source_journal_ids() -> None:
     store = FakeStore(
         entries=[

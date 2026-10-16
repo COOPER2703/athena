@@ -19,6 +19,7 @@ from server.core.commands import (
     StartIdleTimer,
     Trace,
 )
+from server.core.consolidation import RECENT_EVENT_ROLE
 from server.core.events import (
     ClientAudio,
     ClientDisconnected,
@@ -94,6 +95,14 @@ class Coordinator:
         # d'Événements (état du noyau, pas une seconde file — ADR-0010).
         self._registered_client_id = ""
         self._event_queue: list[EventReceived] = []
+        # Le lot jugé, gardé jusqu'à l'Annonce pour ne le journaliser qu'au
+        # moment où la Connexion de jugement devient visible (ticket #42).
+        self._judged_batch: list[EventReceived] = []
+        # Tour d'annonce en cours : tant qu'il tient, les transcriptions de
+        # l'assistant sont écrites au Journal en rôle ``event`` (la parole qui
+        # annonce), pas en ``assistant``. Il se referme au premier tour
+        # utilisateur, ou avec la Session.
+        self._announcing = False
 
     @property
     def state(self) -> SessionState:
@@ -131,7 +140,7 @@ class Coordinator:
         if isinstance(event, LlmOpened):
             return self._on_llm_opened(event)
         if isinstance(event, LlmAudio):
-            return self._on_llm_audio(event)
+            return await self._on_llm_audio(event)
         if isinstance(event, LlmTranscription):
             return await self._on_llm_transcription(event)
         if isinstance(event, LlmToolCall):
@@ -179,6 +188,7 @@ class Coordinator:
         """
         batch = self._event_queue
         self._event_queue = []
+        self._judged_batch = batch
         self._session_counter += 1
         self._connection_id = f"s{self._session_counter}"
         self._session_id = ""
@@ -329,12 +339,12 @@ class Coordinator:
             )
         ]
 
-    def _on_llm_audio(self, event: LlmAudio) -> list[Command]:
+    async def _on_llm_audio(self, event: LlmAudio) -> list[Command]:
         if self._state is SessionState.LIVE_ACTIVE:
             self._audio_buffer.append(event.data)
             return [
                 self._rearm_timer(),
-                *self._become_visible("LlmAudio"),
+                *(await self._become_visible("LlmAudio")),
             ]
         if self._state is SessionState.SESSION_VISIBLE:
             return [
@@ -349,21 +359,25 @@ class Coordinator:
     ) -> list[Command]:
         if event.role is Role.USER:
             return await self._on_user_utterance(event)
-        if self._state is not SessionState.IDLE:
-            await self._journal("assistant", event.text)
         if event.role is Role.ASSISTANT and self._state is SessionState.LIVE_ACTIVE:
             judging = self._judging
-            commands = self._become_visible("LlmTranscription")
+            commands = await self._become_visible("LlmTranscription")
             if judging:
                 # La Connexion de jugement redevient une Session ordinaire : son
                 # timer reprend le réglage d'inactivité de Session.
                 commands.insert(0, self._rearm_timer())
+            await self._journal_speech(event.text)
             return commands
+        if self._state is not SessionState.IDLE:
+            await self._journal_speech(event.text)
         return self._decision("LlmTranscription")
 
     async def _on_user_utterance(self, event: LlmTranscription) -> list[Command]:
         if self._state is SessionState.IDLE:
             return self._decision("LlmTranscription")
+        # Le premier tour utilisateur referme le tour d'annonce : la parole
+        # suivante d'Athena est une réponse ordinaire, journalisée ``assistant``.
+        self._announcing = False
         commands: list[Command] = [self._rearm_timer()]
         if self._memory is not None:
             await self._journal("user", event.text)
@@ -380,6 +394,28 @@ class Coordinator:
     async def _journal(self, role: str, text: str) -> None:
         if self._memory is not None:
             await self._memory.append_turn(self._user_id, role, text)
+
+    async def _journal_speech(self, text: str) -> None:
+        """Journalise une transcription de l'assistant.
+
+        Pendant le tour d'annonce (Annonce proactive d'un Événement), la parole
+        qui annonce entre au Journal en rôle ``event`` — comme le fait annoncé —
+        pour que la Consolidation l'exclue entièrement (ADR-0007). Hors de ce
+        tour, la parole est une réponse ordinaire (``assistant``).
+        """
+        role = RECENT_EVENT_ROLE if self._announcing else "assistant"
+        await self._journal(role, text)
+
+    async def _journal_judged_facts(self) -> None:
+        """Écrit les faits du lot jugé, en rôle ``event``, à l'Annonce.
+
+        Le lot n'est journalisé qu'au moment où la Connexion de jugement devient
+        visible : un jugement tu ne doit rien écrire au Journal (ticket #42).
+        """
+        batch = self._judged_batch
+        self._judged_batch = []
+        for fact in batch:
+            await self._journal(RECENT_EVENT_ROLE, f"[{fact.source}] {fact.content}")
 
     async def _recall(self, utterance: str) -> tuple[str | None, Trace]:
         window = self._recent_utterances[-self._recall_window_turns :]
@@ -517,12 +553,19 @@ class Coordinator:
         """Une identité vide n'est pas un joker : seul l'id courant compte."""
         return connection_id != "" and connection_id == self._connection_id
 
-    def _become_visible(self, kind: str) -> list[Command]:
+    async def _become_visible(self, kind: str) -> list[Command]:
         from_state = self._state
+        announcing = self._judging
         self._state = SessionState.SESSION_VISIBLE
         self._visible = True
         self._judging = False
         self._session_id = self._connection_id
+        if announcing:
+            # Annonce proactive : le fait annoncé entre au Journal en rôle
+            # ``event`` (le lot jugé n'est journalisé qu'ici, jamais s'il se
+            # tait), et le tour d'annonce reste ouvert pour la parole d'annonce.
+            self._announcing = True
+            await self._journal_judged_facts()
         commands: list[Command] = [
             AnnounceSessionStarted(client_id=self._client_id, auto=self._auto)
         ]
@@ -605,6 +648,8 @@ class Coordinator:
         self._visible = False
         self._auto = False
         self._judging = False
+        self._announcing = False
+        self._judged_batch = []
         self._audio_buffer.clear()
         self._recent_utterances = []
         self._injected_memories = set()

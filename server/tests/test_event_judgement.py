@@ -69,6 +69,7 @@ class FakeMemory:
     def __init__(self, context: str = "") -> None:
         self.context = context
         self.users: list[str] = []
+        self.turns: list[tuple[str, str]] = []
 
     async def session_context(self, user_id: str) -> str:
         self.users.append(user_id)
@@ -78,7 +79,10 @@ class FakeMemory:
         return []
 
     async def append_turn(self, user_id: str, role: str, text: str) -> None:
-        pass
+        self.turns.append((role, text))
+
+    async def recall(self, user_id: str, query: str) -> list:
+        return []
 
 
 def visible_session(client_id="c1"):
@@ -254,4 +258,86 @@ def test_shutdown_drops_the_queued_events_without_opening_a_judgment():
     assert SendJudgeBatchToLlm not in [type(c) for c in commands]
     assert coordinator.state is SessionState.IDLE
     assert any(t.kind == "EventQueueDropped" for t in traces(commands))
+
+
+# ---------------------------------------------------------------------------
+# Journal du fait annoncé (ticket #42, ADR-0007) : un Événement annoncé entre
+# au Journal en rôle ``event`` — le fait et la parole d'annonce — tandis qu'un
+# Événement tu n'écrit rien.
+# ---------------------------------------------------------------------------
+
+
+def judging(memory, *, source="matrix", content="porte"):
+    """Amène le noyau jusqu'au jugement d'un Événement, Connexion Live ouverte."""
+    coordinator = Coordinator(memory=memory, user_id="alice", judge_prompt="JUGE")
+    drive(
+        coordinator,
+        [
+            ClientRegistered(client_id="c9"),
+            EventReceived(source=source, content=content),
+            LlmOpened(),
+        ],
+    )
+    return coordinator
+
+
+def test_announced_event_journals_the_fact_and_the_announcement_under_event():
+    memory = FakeMemory()
+
+    coordinator = judging(memory)
+    handle(
+        coordinator,
+        LlmTranscription(role=Role.ASSISTANT, text="Porte d'entrée ouverte"),
+    )
+
+    assert memory.turns == [
+        ("event", "[matrix] porte"),
+        ("event", "Porte d'entrée ouverte"),
+    ]
+
+
+def test_judgment_audio_journals_the_fact_under_event_without_assistant_role():
+    memory = FakeMemory()
+
+    coordinator = judging(memory)
+    commands = handle(coordinator, LlmAudio(data=b"parle"))
+
+    assert AnnounceSessionStarted(client_id="c9", auto=True) in effects(commands)
+    assert memory.turns == [("event", "[matrix] porte")]
+
+
+def test_silent_judgment_writes_nothing_to_the_journal():
+    memory = FakeMemory()
+
+    coordinator = judging(memory)
+    handle(coordinator, TimerFired(connection_id="s1"))
+
+    assert memory.turns == []
+
+
+def test_announcement_scope_ends_on_the_first_user_turn():
+    memory = FakeMemory()
+
+    coordinator = judging(memory)
+    handle(coordinator, LlmTranscription(role=Role.ASSISTANT, text="Porte ouverte"))
+    handle(coordinator, LlmTranscription(role=Role.USER, text="merci"))
+    handle(coordinator, LlmTranscription(role=Role.ASSISTANT, text="je t'en prie"))
+
+    assert memory.turns == [
+        ("event", "[matrix] porte"),
+        ("event", "Porte ouverte"),
+        ("user", "merci"),
+        ("assistant", "je t'en prie"),
+    ]
+
+
+def test_a_normal_session_keeps_journaling_user_and_assistant():
+    memory = FakeMemory()
+    coordinator = Coordinator(memory=memory, user_id="alice", system_prompt="S")
+    drive(coordinator, visible_session())
+
+    handle(coordinator, LlmTranscription(role=Role.USER, text="salut"))
+    handle(coordinator, LlmTranscription(role=Role.ASSISTANT, text="bonjour"))
+
+    assert memory.turns == [("user", "salut"), ("assistant", "bonjour")]
 
