@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Mapping
 
 from protocol import SessionEndReason
@@ -64,6 +65,23 @@ EVENT_QUEUE_MAX = 120
 EVENT_MAX_CHARS = 4096
 _MEMORY_HEADER = "[MÉMOIRE]"
 _EVENT_HEADER = "[ÉVÉNEMENTS]"
+
+
+class EventDropReason(StrEnum):
+    """Cause d'un rejet d'Événement, portée par une trace ``EventQueueDropped``.
+
+    ``TOO_LARGE`` (contenu au-delà de ``EVENT_MAX_CHARS``), ``DUPLICATE``
+    (répétition exacte ``(source, contenu)``), ``CAPACITY`` (plus ancien jeté
+    au-delà de ``EVENT_QUEUE_MAX``), ``SHUTDOWN`` (File éphémère vidée à
+    l'arrêt) et ``JUDGMENT_ABORTED`` (lot d'un jugement en vol dont la
+    Connexion Live s'est terminée anormalement).
+    """
+
+    TOO_LARGE = "too_large"
+    DUPLICATE = "duplicate"
+    CAPACITY = "capacity"
+    SHUTDOWN = "shutdown"
+    JUDGMENT_ABORTED = "judgment_aborted"
 
 
 class Coordinator:
@@ -193,9 +211,9 @@ class Coordinator:
         doublons accumulés y sont écrasés à l'ouverture de la fenêtre.
         """
         if len(event.content) > EVENT_MAX_CHARS:
-            return [self._event_drop_trace(event, "too_large")]
+            return [self._event_drop_trace(event, EventDropReason.TOO_LARGE)]
         if self._window_collects() and self._is_duplicate(event):
-            return [self._event_drop_trace(event, "duplicate")]
+            return [self._event_drop_trace(event, EventDropReason.DUPLICATE)]
         self._event_queue.append(event)
         commands: list[Command] = [
             self._trace(
@@ -215,17 +233,19 @@ class Coordinator:
         commands: list[Command] = []
         while len(self._event_queue) > EVENT_QUEUE_MAX:
             dropped = self._event_queue.pop(0)
-            commands.append(self._event_drop_trace(dropped, "capacity"))
+            commands.append(self._event_drop_trace(dropped, EventDropReason.CAPACITY))
         return commands
 
-    def _event_drop_trace(self, event: EventReceived, reason: str) -> Trace:
+    def _event_drop_trace(
+        self, event: EventReceived, reason: EventDropReason
+    ) -> Trace:
         """Trace le rejet d'un Événement avec sa cause (jamais jugé)."""
         return self._trace(
             "EventQueueDropped",
             from_state=self._state,
             to_state=self._state,
             client_id=self._registered_client_id,
-            reason=reason,
+            reason=reason.value,
             extra={"source": event.source},
         )
 
@@ -237,12 +257,36 @@ class Coordinator:
         """
         return self._window_open and self._state is SessionState.IDLE
 
+    @staticmethod
+    def _event_key(event: EventReceived) -> tuple[str, str]:
+        """Clé d'identité d'un Événement : paire exacte ``(source, contenu)``."""
+        return (event.source, event.content)
+
+    @staticmethod
+    def _collapse(
+        events: list[EventReceived],
+    ) -> tuple[list[EventReceived], list[EventReceived]]:
+        """Sépare une liste en ``(uniques conservés, doublons écartés)``.
+
+        Le premier Événement de chaque paire ``(source, contenu)`` est conservé,
+        dans l'ordre d'arrivée ; toute occurrence suivante est un doublon.
+        """
+        seen: set[tuple[str, str]] = set()
+        kept: list[EventReceived] = []
+        dropped: list[EventReceived] = []
+        for event in events:
+            key = Coordinator._event_key(event)
+            if key in seen:
+                dropped.append(event)
+                continue
+            seen.add(key)
+            kept.append(event)
+        return kept, dropped
+
     def _is_duplicate(self, event: EventReceived) -> bool:
         """Doublon exact ``(source, contenu)`` déjà collecté dans la fenêtre."""
-        key = (event.source, event.content)
-        return any(
-            (queued.source, queued.content) == key for queued in self._event_queue
-        )
+        _, dropped = self._collapse([*self._event_queue, event])
+        return bool(dropped)
 
     def _collapse_window_duplicates(self) -> list[Command]:
         """Écarte les doublons entrés en fenêtre, en gardant le plus ancien.
@@ -252,18 +296,12 @@ class Coordinator:
         paire exacte ``(source, contenu)`` est conservée, dans l'ordre d'arrivée
         ; chaque occurrence écartée est tracée (raison ``duplicate``).
         """
-        commands: list[Command] = []
-        seen: set[tuple[str, str]] = set()
-        kept: list[EventReceived] = []
-        for queued in self._event_queue:
-            key = (queued.source, queued.content)
-            if key in seen:
-                commands.append(self._event_drop_trace(queued, "duplicate"))
-                continue
-            seen.add(key)
-            kept.append(queued)
+        kept, dropped = self._collapse(self._event_queue)
         self._event_queue = kept
-        return commands
+        return [
+            self._event_drop_trace(event, EventDropReason.DUPLICATE)
+            for event in dropped
+        ]
 
     def _open_window_if_needed(self) -> list[Command]:
         """Ouvre la fenêtre de regroupement au Repos, une seule fois par lot.
@@ -361,9 +399,14 @@ class Coordinator:
         ]
 
     @staticmethod
-    def _render_batch(batch: list[EventReceived]) -> str:
+    def _format_fact(event: EventReceived) -> str:
+        """Étiquette un fait par sa Source, forme ``[source] contenu``."""
+        return f"[{event.source}] {event.content}"
+
+    @classmethod
+    def _render_batch(cls, batch: list[EventReceived]) -> str:
         """Un fait par ligne, étiqueté par Source (ordre d'arrivée, FIFO)."""
-        lines = [f"- [{event.source}] {event.content}" for event in batch]
+        lines = [f"- {cls._format_fact(event)}" for event in batch]
         return "\n".join([_EVENT_HEADER, *lines])
 
     async def _on_session_requested(
@@ -382,13 +425,19 @@ class Coordinator:
         if self._window_open:
             commands.extend(self._cancel_window())
         if self._judging:
+            # Le lot préempté est sorti **avant** la fin : il ne doit pas être
+            # tracé comme perdu, il est remis en File juste après.
             preempted = self._judged_batch
+            self._judged_batch = []
         if original_state is not SessionState.IDLE:
             commands.extend(self._teardown(SessionEndReason.REPLACED, "Replaced"))
         if preempted:
             # Les faits préemptés repassent devant tout ce qui a été mis en File
-            # pendant le jugement, dans leur ordre d'origine.
+            # pendant le jugement, dans leur ordre d'origine ; le plafond de la
+            # File reste tenu (les plus anciens — ici les préemptés — sont jetés
+            # et tracés, comme à l'arrivée).
             self._event_queue = [*preempted, *self._event_queue]
+            commands.extend(self._enforce_ceiling())
 
         self._session_counter += 1
         self._connection_id = f"s{self._session_counter}"
@@ -570,7 +619,7 @@ class Coordinator:
         batch = self._judged_batch
         self._judged_batch = []
         for fact in batch:
-            await self._journal(RECENT_EVENT_ROLE, f"[{fact.source}] {fact.content}")
+            await self._journal(RECENT_EVENT_ROLE, self._format_fact(fact))
 
     async def _recall(self, utterance: str) -> tuple[str | None, Trace]:
         window = self._recent_utterances[-self._recall_window_turns :]
@@ -684,7 +733,7 @@ class Coordinator:
         # La File d'attente d'Événements est éphémère : à l'arrêt, les faits non
         # jugés sont perdus et tracés un par un, jamais jugés (ADR-0007).
         for queued in self._event_queue:
-            commands.append(self._event_drop_trace(queued, "shutdown"))
+            commands.append(self._event_drop_trace(queued, EventDropReason.SHUTDOWN))
         self._event_queue = []
         self._window_open = False
         return commands
@@ -802,6 +851,13 @@ class Coordinator:
             )
         )
         self._state = SessionState.IDLE
+        # Un lot de jugement en vol n'a pas été Annoncé : sa perte est comptée
+        # un fait par une trace, sans quoi elle serait silencieuse (#40/#41).
+        # Le chemin d'annonce et la préemption l'ont déjà vidé.
+        for fact in self._judged_batch:
+            commands.append(
+                self._event_drop_trace(fact, EventDropReason.JUDGMENT_ABORTED)
+            )
         self._reset()
         return commands
 

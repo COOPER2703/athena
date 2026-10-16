@@ -7,6 +7,7 @@ import pytest
 
 from protocol import SessionEndReason
 
+from conftest import drive, effects
 from server.core import (
     IDLE_TIMEOUT,
     AnnounceSessionEnded,
@@ -50,20 +51,6 @@ from server.core import (
     Trace,
     TraceSink,
 )
-
-
-def drive(coordinator: Coordinator, events):
-    async def run():
-        commands = []
-        for event in events:
-            commands.extend(await coordinator.handle(event))
-        return commands
-
-    return asyncio.run(run())
-
-
-def effects(commands):
-    return [command for command in commands if not isinstance(command, Trace)]
 
 
 def test_tap_then_athena_speaks_makes_session_visible():

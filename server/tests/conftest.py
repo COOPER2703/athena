@@ -8,9 +8,19 @@ from websockets.asyncio.client import ClientConnection
 
 from protocol import Register, Registered, ToolDeclaration, decode, encode
 from server.adapters.transport import WebSocketTransport
+from server.core import (
+    EVENT_WINDOW_TIMER_ID,
+    Coordinator,
+    LlmAudio,
+    LlmOpened,
+    OpenLiveConnection,
+    SendJudgeBatchToLlm,
+    SessionRequested,
+    TimerFired,
+    Trace,
+)
 from server.core.events import ClientRegistered
 from server.core.ports import TraceEntry
-
 
 class RecordingTraceSink:
     def __init__(self) -> None:
@@ -86,3 +96,55 @@ async def register(
         assert isinstance(event, ClientRegistered)
         assert event.client_id == response.client_id
     return response
+
+
+# ---------------------------------------------------------------------------
+# Aides partagées de la couture ``Coordinator.handle`` : une liste d'Événements
+# en entrée, une liste de Commandes en sortie. Elles ne portent que sur le
+# comportement externe, jamais sur l'état interne du noyau.
+# ---------------------------------------------------------------------------
+
+
+def handle(coordinator: Coordinator, event) -> list:
+    return asyncio.run(coordinator.handle(event))
+
+
+def drive(coordinator: Coordinator, events) -> list:
+    commands: list = []
+    for event in events:
+        commands.extend(handle(coordinator, event))
+    return commands
+
+
+def effects(commands) -> list:
+    return [command for command in commands if not isinstance(command, Trace)]
+
+
+def traces(commands) -> list[Trace]:
+    return [command for command in commands if isinstance(command, Trace)]
+
+
+def window_timer() -> TimerFired:
+    """L'échéance de la fenêtre, telle que l'horloge la livre."""
+    return TimerFired(connection_id=EVENT_WINDOW_TIMER_ID)
+
+
+def close_window(coordinator: Coordinator) -> list:
+    return handle(coordinator, window_timer())
+
+
+def opened(commands) -> OpenLiveConnection:
+    return next(c for c in commands if isinstance(c, OpenLiveConnection))
+
+
+def batch(commands) -> SendJudgeBatchToLlm:
+    return next(c for c in commands if isinstance(c, SendJudgeBatchToLlm))
+
+
+def visible_session(client_id: str = "c1") -> list:
+    """Suite d'Événements amenant une Session visible (l'utilisateur parle)."""
+    return [
+        SessionRequested(client_id=client_id),
+        LlmOpened(),
+        LlmAudio(data=b"hi"),
+    ]

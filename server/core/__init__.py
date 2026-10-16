@@ -28,6 +28,7 @@ from server.core.coordinator import (
     IDLE_TIMEOUT,
     JUDGE_TIMEOUT,
     Coordinator,
+    EventDropReason,
 )
 from server.core.events import (
     ClientAudio,
@@ -87,6 +88,7 @@ __all__ = [
     "Embedder",
     "Event",
     "EventReceived",
+    "EventDropReason",
     "EVENT_MAX_CHARS",
     "EVENT_QUEUE_MAX",
     "EVENT_WINDOW_TIMER_ID",
