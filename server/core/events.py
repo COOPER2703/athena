@@ -94,6 +94,18 @@ class TimerFired:
     connection_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class EventReceived:
+    """Un Événement externe poussé par une Source (ADR-0007/0010).
+
+    Le mot « Événement » reste réservé au fait externe ; il n'est jamais
+    injecté dans une Session active, seulement jugé au Repos.
+    """
+
+    source: str
+    content: str
+
+
 Event = Union[
     ClientRegistered,
     SessionRequested,
@@ -109,4 +121,5 @@ Event = Union[
     ClientDisconnected,
     ShutdownRequested,
     TimerFired,
+    EventReceived,
 ]

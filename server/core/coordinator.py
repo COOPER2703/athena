@@ -13,6 +13,7 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
+    SendJudgeBatchToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
     StartIdleTimer,
@@ -25,6 +26,7 @@ from server.core.events import (
     ClientRegistered,
     ClientToolResult,
     Event,
+    EventReceived,
     LlmAudio,
     LlmClosed,
     LlmFailed,
@@ -42,7 +44,11 @@ from server.core.tools import ToolRegistry
 
 _TRACE_SOURCE = "core"
 IDLE_TIMEOUT = 30.0
+# Verdict de jugement par timeout seul (ADR-0007) : plus court que l'inactivité
+# d'une Session, pour libérer vite l'unique Connexion Live quand le LLM se tait.
+JUDGE_TIMEOUT = 5.0
 _MEMORY_HEADER = "[MÉMOIRE]"
+_EVENT_HEADER = "[ÉVÉNEMENTS]"
 
 
 class Coordinator:
@@ -59,6 +65,7 @@ class Coordinator:
         memory: MemoryStore | None = None,
         user_id: str = "owner",
         system_prompt: str = "",
+        judge_prompt: str = "",
         tools: ToolRegistry | None = None,
         recall_k: int = 5,
         recall_window_turns: int = 3,
@@ -67,6 +74,7 @@ class Coordinator:
         self._memory = memory
         self._user_id = user_id
         self._system_prompt = system_prompt
+        self._judge_prompt = judge_prompt
         self._tools = tools  # Tool registry seam (issue #28).
         self._recall_k = recall_k
         self._recall_window_turns = recall_window_turns
@@ -77,10 +85,15 @@ class Coordinator:
         self._session_id = ""
         self._visible = False
         self._auto = False
+        self._judging = False
         self._session_counter = 0
         self._audio_buffer: list[bytes] = []
         self._recent_utterances: list[str] = []
         self._injected_memories: set[str] = set()
+        # Identité du Client de référence (Annonce proactive) et File d'attente
+        # d'Événements (état du noyau, pas une seconde file — ADR-0010).
+        self._registered_client_id = ""
+        self._event_queue: list[EventReceived] = []
 
     @property
     def state(self) -> SessionState:
@@ -95,6 +108,14 @@ class Coordinator:
         return self._session_id
 
     async def handle(self, event: Event) -> list[Command]:
+        commands = await self._dispatch(event)
+        # Retour au Repos avec une File d'attente non vide (ex. après la fin
+        # d'une Session) : on ouvre aussitôt la Connexion Live de jugement.
+        if self._state is SessionState.IDLE and self._event_queue:
+            commands.extend(self._start_judgment())
+        return commands
+
+    async def _dispatch(self, event: Event) -> list[Command]:
         if isinstance(event, ClientRegistered):
             return self._on_client_registered(event)
         if isinstance(event, SessionRequested):
@@ -123,10 +144,78 @@ class Coordinator:
             return self._on_shutdown_requested(event)
         if isinstance(event, TimerFired):
             return self._on_timer_fired(event)
+        if isinstance(event, EventReceived):
+            return self._on_event_received(event)
         raise TypeError(f"Unsupported event: {type(event).__name__}")
 
     def _on_client_registered(self, event: ClientRegistered) -> list[Command]:
+        self._registered_client_id = event.client_id
         return self._decision("ClientRegistered", client_id=event.client_id)
+
+    def _on_event_received(self, event: EventReceived) -> list[Command]:
+        """Un Événement n'est jugé qu'au Repos ; sinon il part en File d'attente."""
+        self._event_queue.append(event)
+        if self._state is SessionState.IDLE:
+            return self._start_judgment()
+        return [
+            self._trace(
+                "EventQueued",
+                from_state=self._state,
+                to_state=self._state,
+                client_id=self._registered_client_id,
+                level="debug",
+                extra={"source": event.source, "queued": len(self._event_queue)},
+            )
+        ]
+
+    def _start_judgment(self) -> list[Command]:
+        """Ouvre l'unique Connexion Live de jugement et transmet le lot.
+
+        Instruction de jugement dédiée, **sans Rappel mémoire ni Tools** ; le lot
+        est transmis comme contenu de tour par une commande distincte de
+        l'injection de mémoire (ADR-0007). La Connexion est marquée ``auto`` :
+        si le LLM parle, elle devient une Session automatique annoncée au Client
+        de référence ; s'il se tait, le timeout de jugement dédié la referme.
+        """
+        batch = self._event_queue
+        self._event_queue = []
+        self._session_counter += 1
+        self._connection_id = f"s{self._session_counter}"
+        self._session_id = ""
+        self._visible = False
+        self._client_id = self._registered_client_id
+        self._auto = True
+        self._judging = True
+        self._state = SessionState.LIVE_CONNECTING
+        self._recent_utterances = []
+        self._injected_memories = set()
+        return [
+            OpenLiveConnection(
+                connection_id=self._connection_id,
+                instruction=self._judge_prompt,
+                tools=(),
+            ),
+            StartIdleTimer(
+                connection_id=self._connection_id, timeout=JUDGE_TIMEOUT
+            ),
+            SendJudgeBatchToLlm(
+                connection_id=self._connection_id,
+                text=self._render_batch(batch),
+            ),
+            self._trace(
+                "EventJudge",
+                from_state=SessionState.IDLE,
+                to_state=self._state,
+                client_id=self._client_id,
+                extra={"events": len(batch)},
+            ),
+        ]
+
+    @staticmethod
+    def _render_batch(batch: list[EventReceived]) -> str:
+        """Un fait par ligne, étiqueté par Source (ordre d'arrivée, FIFO)."""
+        lines = [f"- [{event.source}] {event.content}" for event in batch]
+        return "\n".join([_EVENT_HEADER, *lines])
 
     async def _on_session_requested(
         self, event: SessionRequested
@@ -263,7 +352,13 @@ class Coordinator:
         if self._state is not SessionState.IDLE:
             await self._journal("assistant", event.text)
         if event.role is Role.ASSISTANT and self._state is SessionState.LIVE_ACTIVE:
-            return self._become_visible("LlmTranscription")
+            judging = self._judging
+            commands = self._become_visible("LlmTranscription")
+            if judging:
+                # La Connexion de jugement redevient une Session ordinaire : son
+                # timer reprend le réglage d'inactivité de Session.
+                commands.insert(0, self._rearm_timer())
+            return commands
         return self._decision("LlmTranscription")
 
     async def _on_user_utterance(self, event: LlmTranscription) -> list[Command]:
@@ -392,8 +487,23 @@ class Coordinator:
 
     def _on_shutdown_requested(self, event: ShutdownRequested) -> list[Command]:
         if self._state is not SessionState.IDLE:
-            return self._teardown(SessionEndReason.SHUTDOWN, "Shutdown")
-        return self._decision("ShutdownRequested")
+            commands = self._teardown(SessionEndReason.SHUTDOWN, "Shutdown")
+        else:
+            commands = self._decision("ShutdownRequested")
+        # La File d'attente d'Événements est éphémère : à l'arrêt, les faits non
+        # jugés sont perdus et tracés, jamais jugés (ADR-0007).
+        if self._event_queue:
+            commands.append(
+                self._trace(
+                    "EventQueueDropped",
+                    from_state=self._state,
+                    to_state=self._state,
+                    client_id=self._registered_client_id,
+                    extra={"events": len(self._event_queue)},
+                )
+            )
+            self._event_queue = []
+        return commands
 
     def _on_timer_fired(self, event: TimerFired) -> list[Command]:
         if self._owns(event.connection_id) and self._state is not SessionState.IDLE:
@@ -411,6 +521,7 @@ class Coordinator:
         from_state = self._state
         self._state = SessionState.SESSION_VISIBLE
         self._visible = True
+        self._judging = False
         self._session_id = self._connection_id
         commands: list[Command] = [
             AnnounceSessionStarted(client_id=self._client_id, auto=self._auto)
@@ -493,6 +604,7 @@ class Coordinator:
         self._session_id = ""
         self._visible = False
         self._auto = False
+        self._judging = False
         self._audio_buffer.clear()
         self._recent_utterances = []
         self._injected_memories = set()

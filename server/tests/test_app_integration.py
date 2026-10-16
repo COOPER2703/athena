@@ -310,3 +310,62 @@ def test_client_disconnect_then_new_client_restarts_a_working_session() -> None:
         assert client_gone[-1].payload["to_state"] == "Idle"
 
     asyncio.run(scenario())
+
+
+def test_pushed_event_opens_a_proactive_auto_session_for_the_registered_client() -> None:
+    """Trace d'assemblage : un Événement poussé dans le Canal atteint le noyau,
+    ouvre une Connexion Live de jugement, et une Annonce proactive `auto` part
+    vers le Client de référence quand le LLM parle (kernel pur, adaptateur réel).
+    """
+
+    async def scenario() -> None:
+        sink = RecordingTraceSink()
+        transport = WebSocketTransport(host="127.0.0.1", port=0, trace_sink=sink)
+        gemini = GeminiLiveAdapter(
+            api_key="test-key",
+            model="gemini-live",
+            voice="Aoede",
+            live_connect=_TalkingLiveConnect(audio=b"alerte"),
+            trace_sink=sink,
+        )
+        app = App(
+            transport=transport,
+            gemini=gemini,
+            clock=AsyncioClock(),
+            trace_sink=sink,
+            judge_prompt="JUGE",
+        )
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: bool(sink.of_kind("started")))
+
+            async with websockets.connect(_url(transport)) as ws:
+                await register(ws, transport, client_name="desktop", drain=False)
+                # Wait for the kernel to register the client before pushing, so
+                # the Annonce is addressed to a known client id.
+                await wait_until(
+                    lambda: any(
+                        entry.source == "core"
+                        and entry.kind == "ClientRegistered"
+                        for entry in sink.entries
+                    )
+                )
+
+                app.push_event("matrix", "porte ouverte")
+
+                assert decode(await asyncio.wait_for(ws.recv(), 1.0)) == (
+                    SessionStarted(auto=True)
+                )
+                assert decode(await asyncio.wait_for(ws.recv(), 1.0)) == Audio(
+                    data=b"alerte"
+                )
+                await wait_until(lambda: bool(sink.of_kind("EventJudge")))
+        finally:
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+
+        judge = sink.of_kind("EventJudge")[-1]
+        assert judge.source == "core"
+        assert judge.payload["events"] == 1
+
+    asyncio.run(scenario())

@@ -33,6 +33,18 @@ class SendMemoryToLlm:
 
 
 @dataclass(frozen=True, slots=True)
+class SendJudgeBatchToLlm:
+    """Envoie un lot d'Événements à la Connexion Live de jugement.
+
+    Commande distincte de l'injection de mémoire (ADR-0007) : le lot est
+    transmis comme contenu de tour, jamais comme rappel mémoriel.
+    """
+
+    connection_id: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class SendAudioToClient:
     client_id: str
     data: bytes
@@ -82,6 +94,7 @@ Command = Union[
     CloseLiveConnection,
     SendAudioToLlm,
     SendMemoryToLlm,
+    SendJudgeBatchToLlm,
     SendAudioToClient,
     SendToolResultToLlm,
     AnnounceSessionStarted,

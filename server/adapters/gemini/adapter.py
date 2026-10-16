@@ -11,6 +11,7 @@ from server.core.commands import (
     Command,
     OpenLiveConnection,
     SendAudioToLlm,
+    SendJudgeBatchToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
     Trace,
@@ -96,6 +97,9 @@ class GeminiLiveAdapter:
             return
         if isinstance(command, SendMemoryToLlm):
             await self.send_memory(command.connection_id, command.text)
+            return
+        if isinstance(command, SendJudgeBatchToLlm):
+            await self.send_judge_batch(command.connection_id, command.text)
             return
         if isinstance(command, SendToolResultToLlm):
             await self.send_tool_result(
@@ -282,6 +286,44 @@ class GeminiLiveAdapter:
             return
         self._emit(
             "memory_injected",
+            payload={"connection_id": connection_id, "chars": len(text)},
+        )
+
+    async def send_judge_batch(self, connection_id: str, text: str) -> None:
+        """Transmet le lot d'Événements comme contenu de tour au jugement.
+
+        Commande distincte de l'injection de mémoire (ADR-0007) : le lot complète
+        le tour (``turn_complete=True``) pour que le modèle puisse parler s'il
+        juge le fait digne d'une Annonce. Le verdict reste reconnu par timeout,
+        jamais par un signal de fin de tour Gemini.
+        """
+        live = self._live
+        if live is None or self._terminated:
+            self._emit(
+                "send_judge_batch_ignored",
+                payload={"connection_id": connection_id},
+                level="warning",
+            )
+            return
+        try:
+            from google.genai import types
+
+            await live.send_client_content(
+                turns=types.Content(role="user", parts=[types.Part(text=text)]),
+                turn_complete=True,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Le jugement est best effort : un envoi raté ne lève jamais.
+            self._emit(
+                "send_judge_batch_error",
+                payload={"connection_id": connection_id, "error": str(exc)},
+                level="error",
+            )
+            return
+        self._emit(
+            "judge_batch_sent",
             payload={"connection_id": connection_id, "chars": len(text)},
         )
 
