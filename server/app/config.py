@@ -14,7 +14,9 @@ DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-live-preview"
 DEFAULT_GEMINI_VOICE = "Zephyr"
 DEFAULT_JUDGE_MODEL = "gemini-3.8-flash"
 DEFAULT_MEMORY_DB = "athena_memory.db"
-DEFAULT_CONSOLIDATION_MODEL = "gemini-2.0-flash"
+# Modèle de Consolidation : Flash-Lite, disponible sur l'échelle gratuite. Le
+# précédent défaut (`gemini-2.0-flash`) a été retiré et renvoyait 404.
+DEFAULT_CONSOLIDATION_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_WEBHOOK_HOST = "127.0.0.1"
 DEFAULT_WEBHOOK_PORT = 8766
 
