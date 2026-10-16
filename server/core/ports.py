@@ -44,6 +44,8 @@ class LlmSocket(Protocol):
 
     async def send_memory(self, session_id: str, text: str) -> None: ...
 
+    async def send_judge_batch(self, session_id: str, text: str) -> None: ...
+
     async def send_tool_result(
         self,
         session_id: str,

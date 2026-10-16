@@ -7,7 +7,7 @@ from typing import TypeVar
 from conftest import RecordingTraceSink, wait_until
 from protocol import SessionEndReason
 from server.app.config import AppConfig, GeminiConfig
-from server.app.root import App, build_app
+from server.app.root import App, build_app, load_judge_prompt
 from server.core.commands import (
     AnnounceSessionEnded,
     AnnounceSessionStarted,
@@ -17,6 +17,7 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
+    SendJudgeBatchToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
     StartIdleTimer,
@@ -36,6 +37,7 @@ from server.core.events import (
 from server.core.ports import MemoryHit
 from server.core.tools import ToolRegistry
 from server.core.memory_tools import register_memory_tools
+from server.core.coordinator import JUDGE_TIMEOUT
 
 _CommandT = TypeVar("_CommandT", bound=Command)
 
@@ -137,7 +139,7 @@ class FakeMemory:
         return False
 
 
-def _build(memory=None, tools=None) -> tuple[FakeAdapter, FakeAdapter, FakeClock, RecordingTraceSink, App]:
+def _build(memory=None, tools=None, judge_prompt="") -> tuple[FakeAdapter, FakeAdapter, FakeClock, RecordingTraceSink, App]:
     transport = FakeAdapter()
     gemini = FakeAdapter()
     clock = FakeClock()
@@ -150,6 +152,7 @@ def _build(memory=None, tools=None) -> tuple[FakeAdapter, FakeAdapter, FakeClock
         memory=memory,
         user_id="alice",
         tools=tools,
+        judge_prompt=judge_prompt,
     )
     return transport, gemini, clock, sink, app
 
@@ -468,3 +471,42 @@ def test_save_memory_tool_call_reaches_the_store_and_the_model() -> None:
                 await asyncio.gather(runner, return_exceptions=True)
 
     asyncio.run(scenario())
+
+
+def test_pushed_event_at_rest_opens_a_judgment_connection_and_routes_the_batch() -> None:
+    async def scenario() -> None:
+        transport, gemini, clock, sink, app = _build(judge_prompt="JUGE")
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: transport.started)
+            await transport.feed(ClientRegistered(client_id="c1"))
+
+            app.push_event("matrix", "porte ouverte")
+
+            await wait_until(lambda: gemini.of_type(OpenLiveConnection))
+            opened = gemini.of_type(OpenLiveConnection)[0]
+            assert opened.instruction == "JUGE"
+            assert opened.tools == ()
+
+            await wait_until(lambda: gemini.of_type(SendJudgeBatchToLlm))
+            batch = gemini.of_type(SendJudgeBatchToLlm)[0]
+            assert batch.connection_id == opened.connection_id
+            assert batch.text == "[ÉVÉNEMENTS]\n- [matrix] porte ouverte"
+            assert clock.scheduled[0] == (opened.connection_id, JUDGE_TIMEOUT)
+
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+        finally:
+            if not runner.done():
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_load_judge_prompt_reads_the_versioned_file() -> None:
+    prompt = load_judge_prompt()
+
+    assert prompt.strip()
+    assert prompt == load_judge_prompt()
+
