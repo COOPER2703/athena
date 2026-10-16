@@ -48,6 +48,13 @@ IDLE_TIMEOUT = 30.0
 # Verdict de jugement par timeout seul (ADR-0007) : plus court que l'inactivité
 # d'une Session, pour libérer vite l'unique Connexion Live quand le LLM se tait.
 JUDGE_TIMEOUT = 5.0
+# Fenêtre de regroupement **paresseuse et fixe** (ADR-0007) : ouverte au premier
+# Événement reçu au Repos, elle dure 5 s sans être relancée par les arrivées
+# suivantes, puis juge le lot entier en un seul tour.
+EVENT_WINDOW_TIMEOUT = 5.0
+# Clé réservée de la fenêtre : elle réutilise la couture ``Clock`` existante par
+# les commandes de timer, sans changer la forme du port.
+EVENT_WINDOW_TIMER_ID = "event-window"
 _MEMORY_HEADER = "[MÉMOIRE]"
 _EVENT_HEADER = "[ÉVÉNEMENTS]"
 
@@ -95,6 +102,7 @@ class Coordinator:
         # d'Événements (état du noyau, pas une seconde file — ADR-0010).
         self._registered_client_id = ""
         self._event_queue: list[EventReceived] = []
+        self._window_open = False
         # Le lot jugé, gardé jusqu'à l'Annonce pour ne le journaliser qu'au
         # moment où la Connexion de jugement devient visible (ticket #42).
         self._judged_batch: list[EventReceived] = []
@@ -118,10 +126,11 @@ class Coordinator:
 
     async def handle(self, event: Event) -> list[Command]:
         commands = await self._dispatch(event)
-        # Retour au Repos avec une File d'attente non vide (ex. après la fin
-        # d'une Session) : on ouvre aussitôt la Connexion Live de jugement.
-        if self._state is SessionState.IDLE and self._event_queue:
-            commands.extend(self._start_judgment())
+        # Modèle unifié : dès que le noyau est au Repos avec des Événements en
+        # attente et aucune fenêtre ouverte, la fenêtre de regroupement s'ouvre.
+        # Le même chemin couvre le premier Événement reçu au Repos et les
+        # Événements mis en File pendant une Session, jugés au retour au Repos.
+        commands.extend(self._open_window_if_needed())
         return commands
 
     async def _dispatch(self, event: Event) -> list[Command]:
@@ -162,10 +171,13 @@ class Coordinator:
         return self._decision("ClientRegistered", client_id=event.client_id)
 
     def _on_event_received(self, event: EventReceived) -> list[Command]:
-        """Un Événement n'est jugé qu'au Repos ; sinon il part en File d'attente."""
+        """Un Événement reçu est mis en File ; la fenêtre décide du jugement.
+
+        Au Repos, ``handle`` ouvre la fenêtre si elle ne l'est pas déjà (premier
+        Événement) ; les arrivées suivantes rejoignent le lot sans relancer la
+        fenêtre. Hors Repos, l'Événement attend le retour au Repos.
+        """
         self._event_queue.append(event)
-        if self._state is SessionState.IDLE:
-            return self._start_judgment()
         return [
             self._trace(
                 "EventQueued",
@@ -175,6 +187,34 @@ class Coordinator:
                 level="debug",
                 extra={"source": event.source, "queued": len(self._event_queue)},
             )
+        ]
+
+    def _open_window_if_needed(self) -> list[Command]:
+        """Ouvre la fenêtre de regroupement au Repos, une seule fois par lot.
+
+        Paresseuse : armée par le premier Événement en attente, elle émet un
+        ``StartIdleTimer`` sur la **clé réservée** et n'est pas relancée par les
+        arrivées suivantes ; l'échéance juge le lot d'un bloc.
+        """
+        if (
+            self._state is not SessionState.IDLE
+            or self._window_open
+            or not self._event_queue
+        ):
+            return []
+        self._window_open = True
+        return [
+            StartIdleTimer(
+                connection_id=EVENT_WINDOW_TIMER_ID,
+                timeout=EVENT_WINDOW_TIMEOUT,
+            ),
+            self._trace(
+                "EventWindowOpened",
+                from_state=self._state,
+                to_state=self._state,
+                client_id=self._registered_client_id,
+                extra={"events": len(self._event_queue)},
+            ),
         ]
 
     def _start_judgment(self) -> list[Command]:
@@ -539,12 +579,29 @@ class Coordinator:
                 )
             )
             self._event_queue = []
+        self._window_open = False
         return commands
 
     def _on_timer_fired(self, event: TimerFired) -> list[Command]:
+        if event.connection_id == EVENT_WINDOW_TIMER_ID:
+            return self._on_event_window_fired()
         if self._owns(event.connection_id) and self._state is not SessionState.IDLE:
             return self._teardown(SessionEndReason.TIMEOUT, "Timeout")
         return self._decision("TimerFired")
+
+    def _on_event_window_fired(self) -> list[Command]:
+        """Échéance de la fenêtre : juge le lot entier en un seul tour.
+
+        Si le noyau a quitté le Repos entre-temps (l'utilisateur a pris la
+        parole), la fenêtre se referme sans juger et la File reste intacte :
+        elle sera rouverte au prochain Repos.
+        """
+        if not self._window_open:
+            return self._decision("EventWindowFired")
+        self._window_open = False
+        if self._state is not SessionState.IDLE:
+            return self._decision("EventWindowFired")
+        return self._start_judgment()
 
     def _rearm_timer(self) -> StartIdleTimer:
         return StartIdleTimer(connection_id=self._connection_id, timeout=IDLE_TIMEOUT)
