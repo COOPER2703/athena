@@ -440,8 +440,8 @@ class Coordinator:
         """Single deterministic termination path.
 
         Ordering is fixed: cancel the idle timer, close the Live connection,
-        announce the Session end (unless a client that never saw a Session is
-        closed cleanly), then trace both transitions Idle <- Closing <- origin.
+        announce the Session end only when the Session had become visible,
+        then trace both transitions Idle <- Closing <- origin.
         Afterwards the Coordinator is back to Idle with no residual identity,
         so no zombie Session can linger.
         """
@@ -455,7 +455,7 @@ class Coordinator:
             CancelIdleTimer(connection_id=old_connection_id),
             CloseLiveConnection(connection_id=old_connection_id),
         ]
-        if was_visible or reason is not SessionEndReason.NORMAL:
+        if was_visible:
             commands.append(
                 AnnounceSessionEnded(client_id=old_client_id, reason=reason)
             )

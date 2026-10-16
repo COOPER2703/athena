@@ -289,6 +289,8 @@ def test_clock_timeout_tears_the_session_down() -> None:
             await wait_until(lambda: gemini.of_type(OpenLiveConnection))
             connection_id = gemini.of_type(OpenLiveConnection)[0].connection_id
             await gemini.feed(LlmOpened())
+            await gemini.feed(LlmAudio(b"hi"))
+            await wait_until(lambda: transport.of_type(AnnounceSessionStarted))
 
             await clock.fire(connection_id)
             await wait_until(lambda: gemini.of_type(CloseLiveConnection))
