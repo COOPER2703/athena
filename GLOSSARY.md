@@ -31,6 +31,11 @@ finit par se taire. Une Connexion Live peut exister sans Session ; une Session n
 que lorsque de l'audio est effectivement échangé.
 _Avoid_: Session Gemini, session serveur, session interne, session cachée
 
+**Repos**:
+État du noyau où aucune Connexion Live n'est ouverte et aucune Session n'est visible. Seul
+état où un Événement externe est jugé.
+_Avoid_: Idle, inactif, état vide
+
 **Tool**:
 Une fonction que Gemini peut appeler pendant une Session. Peut être côté serveur (Matrix,
 Home Assistant) ou côté client (shell, URL). Chaque Tool appartient à un plugin ou au
@@ -87,8 +92,16 @@ une application externe qui pousse.
 _Avoid_: listener, monitor, poller
 
 **Canal d'événements**:
-Le point d'entrée unique du noyau par lequel toutes les Sources poussent leurs Événements.
+Le transport unique du noyau, par lequel entrent dans l'ordre d'arrivée les entrées des
+adaptateurs (audio, cycle de vie, horloge) et les Événements poussés par les Sources. Le
+noyau le traite un élément à la fois.
 _Avoid_: EventBus, bus, file d'événements
+
+**File d'attente d'Événements**:
+Les Événements reçus hors Repos, conservés dans l'ordre d'arrivée en attendant d'être jugés.
+Plafonnée et éphémère : les plus anciens sont abandonnés quand elle déborde, et elle ne
+survit pas à un redémarrage.
+_Avoid_: file d'événements, buffer, queue
 
 **Webhook**:
 Le transport HTTP par lequel une application externe pousse un Événement dans le Canal
@@ -102,7 +115,8 @@ Connexion Live est refermée sans qu'aucune Session n'apparaisse côté Client.
 _Avoid_: session proactive, session auto, session serveur, session système
 
 **Annonce proactive**:
-La prise de parole non sollicitée d'Athena qui ouvre une Session automatique.
+La prise de parole non sollicitée d'Athena qui ouvre une Session automatique. Le Client la
+reconnaît comme telle et peut se manifester autrement que pour une Session demandée.
 _Avoid_: notification, alerte, interpellation
 
 ### Matrix
@@ -180,7 +194,8 @@ peut pas être désactivée.
 **Journal (mémoire court terme)**:
 Buffer brut des derniers jours mêlant les échanges des Sessions et les Événements
 qu'Athena a annoncés — jamais ceux qu'elle a tus. Recherche sémantique, fenêtre glissante.
-Consolidé régulièrement dans la mémoire long terme, à l'exclusion des Événements annoncés.
+Consolidé régulièrement dans la mémoire long terme, à l'exclusion des Événements annoncés
+et de la parole qui les annonce.
 _Avoid_: Buffer, transcript, mémoire chaude, mémoire temporaire
 
 **Mémoire long terme**:
@@ -307,12 +322,14 @@ _Avoid_: Raison, cause, status
   audio et résultats de Tools, le serveur envoie audio et appels de Tools.
 - **Serveur → Gemini**: Connexion Live ouverte pour juger un Événement ou tenir une Session.
 - **Noyau → Session**: Le noyau gère le cycle de vie des Sessions (start, end, timeout).
+- **Adaptateurs → Noyau (Canal d'événements)**: Les adaptateurs y déposent leurs entrées
+  (audio, cycle de vie, horloge) ; le noyau les traite immédiatement, quel que soit son état.
 - **Source → Noyau (Canal d'événements)**: Les plugins et applications externes poussent des
-  Événements neutres ; le noyau les met en file et les juge hors Session (au repos), puis
+  Événements neutres ; le noyau les met en attente hors Repos et les juge au Repos, puis
   ouvre une Connexion Live : le LLM juge, et une Session automatique n'est ouverte qu'au
   moment de l'Annonce proactive.
 - **Événement → Session**: Un Événement n'est jamais injecté dans une Session active ; il
-  attend la fin de la Session et est jugé au retour au repos.
+  attend la fin de la Session et est jugé au Repos.
 - **Connexion Live → Session**: Une Connexion Live ne devient une Session que si Athena
   parle. Une Connexion Live silencieuse est refermée sans qu'aucun Client passe en `ACTIVE`.
 - **Événement → Journal**: Un Événement qu'Athena annonce est écrit dans le Journal ; un

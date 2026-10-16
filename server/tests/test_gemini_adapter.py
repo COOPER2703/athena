@@ -12,6 +12,7 @@ from server.core.commands import (
     CloseLiveConnection,
     OpenLiveConnection,
     SendAudioToLlm,
+    SendJudgeBatchToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
     StartIdleTimer,
@@ -583,6 +584,66 @@ def test_send_audio_after_terminal_event_is_ignored() -> None:
         await adapter.execute(SendAudioToLlm(connection_id="s1", data=b"\xaa\xbb"))
 
         assert session.sent_realtime == []
+
+    asyncio.run(scenario())
+
+
+def test_send_judge_batch_sends_the_batch_as_a_completed_turn() -> None:
+    async def scenario() -> None:
+        session = FakeSession(block=True)
+        live_connect = FakeLiveConnect(session=session)
+        sink = RecordingTraceSink()
+        adapter = GeminiLiveAdapter(
+            api_key="test-key",
+            model="gemini-live",
+            voice="Aoede",
+            live_connect=live_connect,
+            trace_sink=sink,
+        )
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        await adapter.execute(
+            SendJudgeBatchToLlm(
+                connection_id="s1", text="[ÉVÉNEMENTS]\n- [matrix] porte"
+            )
+        )
+
+        assert len(session.sent_client_content) == 1
+        call = session.sent_client_content[0]
+        assert call["turns"].role == "user"
+        assert call["turns"].parts[0].text == "[ÉVÉNEMENTS]\n- [matrix] porte"
+        # Verdict par timeout seul : le lot complète le tour pour que le modèle
+        # puisse parler ; rien d'autre n'est attendu du signal de fin de tour.
+        assert call["turn_complete"] is True
+        assert sink.of_kind("judge_batch_sent")
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(adapter.recv(), 0.05)
+
+    asyncio.run(scenario())
+
+
+def test_send_judge_batch_without_open_connection_is_ignored() -> None:
+    async def scenario() -> None:
+        live_connect = FakeLiveConnect(session=FakeSession())
+        sink = RecordingTraceSink()
+        adapter = GeminiLiveAdapter(
+            api_key="test-key",
+            model="gemini-live",
+            voice="Aoede",
+            live_connect=live_connect,
+            trace_sink=sink,
+        )
+
+        await adapter.execute(
+            SendJudgeBatchToLlm(connection_id="s1", text="[ÉVÉNEMENTS]\n- [m] x")
+        )
+
+        assert sink.of_kind("send_judge_batch_ignored")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(adapter.recv(), 0.05)
 
     asyncio.run(scenario())
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Mapping
 
 from protocol import SessionEndReason
@@ -13,11 +14,13 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
+    SendJudgeBatchToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
     StartIdleTimer,
     Trace,
 )
+from server.core.consolidation import RECENT_EVENT_ROLE
 from server.core.events import (
     ClientAudio,
     ClientDisconnected,
@@ -25,6 +28,7 @@ from server.core.events import (
     ClientRegistered,
     ClientToolResult,
     Event,
+    EventReceived,
     LlmAudio,
     LlmClosed,
     LlmFailed,
@@ -42,7 +46,42 @@ from server.core.tools import ToolRegistry
 
 _TRACE_SOURCE = "core"
 IDLE_TIMEOUT = 30.0
+# Verdict de jugement par timeout seul (ADR-0007) : plus court que l'inactivité
+# d'une Session, pour libérer vite l'unique Connexion Live quand le LLM se tait.
+JUDGE_TIMEOUT = 5.0
+# Fenêtre de regroupement **paresseuse et fixe** (ADR-0007) : ouverte au premier
+# Événement reçu au Repos, elle dure 5 s sans être relancée par les arrivées
+# suivantes, puis juge le lot entier en un seul tour.
+EVENT_WINDOW_TIMEOUT = 5.0
+# Clé réservée de la fenêtre : elle réutilise la couture ``Clock`` existante par
+# les commandes de timer, sans changer la forme du port.
+EVENT_WINDOW_TIMER_ID = "event-window"
+# Plafond de la File d'attente d'Événements (ADR-0007) : il porte sur la File
+# **seule**, pas de quota par Source. Au-delà, les plus anciens sont jetés à
+# l'arrivée et chaque drop est tracé.
+EVENT_QUEUE_MAX = 120
+# Taille maximale d'un Événement : un contenu plus long est rejeté à l'arrivée
+# (jamais mis en File) et le rejet est tracé.
+EVENT_MAX_CHARS = 4096
 _MEMORY_HEADER = "[MÉMOIRE]"
+_EVENT_HEADER = "[ÉVÉNEMENTS]"
+
+
+class EventDropReason(StrEnum):
+    """Cause d'un rejet d'Événement, portée par une trace ``EventQueueDropped``.
+
+    ``TOO_LARGE`` (contenu au-delà de ``EVENT_MAX_CHARS``), ``DUPLICATE``
+    (répétition exacte ``(source, contenu)``), ``CAPACITY`` (plus ancien jeté
+    au-delà de ``EVENT_QUEUE_MAX``), ``SHUTDOWN`` (File éphémère vidée à
+    l'arrêt) et ``JUDGMENT_ABORTED`` (lot d'un jugement en vol dont la
+    Connexion Live s'est terminée anormalement).
+    """
+
+    TOO_LARGE = "too_large"
+    DUPLICATE = "duplicate"
+    CAPACITY = "capacity"
+    SHUTDOWN = "shutdown"
+    JUDGMENT_ABORTED = "judgment_aborted"
 
 
 class Coordinator:
@@ -59,6 +98,7 @@ class Coordinator:
         memory: MemoryStore | None = None,
         user_id: str = "owner",
         system_prompt: str = "",
+        judge_prompt: str = "",
         tools: ToolRegistry | None = None,
         recall_k: int = 5,
         recall_window_turns: int = 3,
@@ -67,6 +107,7 @@ class Coordinator:
         self._memory = memory
         self._user_id = user_id
         self._system_prompt = system_prompt
+        self._judge_prompt = judge_prompt
         self._tools = tools  # Tool registry seam (issue #28).
         self._recall_k = recall_k
         self._recall_window_turns = recall_window_turns
@@ -77,10 +118,24 @@ class Coordinator:
         self._session_id = ""
         self._visible = False
         self._auto = False
+        self._judging = False
         self._session_counter = 0
         self._audio_buffer: list[bytes] = []
         self._recent_utterances: list[str] = []
         self._injected_memories: set[str] = set()
+        # Identité du Client de référence (Annonce proactive) et File d'attente
+        # d'Événements (état du noyau, pas une seconde file — ADR-0010).
+        self._registered_client_id = ""
+        self._event_queue: list[EventReceived] = []
+        self._window_open = False
+        # Le lot jugé, gardé jusqu'à l'Annonce pour ne le journaliser qu'au
+        # moment où la Connexion de jugement devient visible (ticket #42).
+        self._judged_batch: list[EventReceived] = []
+        # Tour d'annonce en cours : tant qu'il tient, les transcriptions de
+        # l'assistant sont écrites au Journal en rôle ``event`` (la parole qui
+        # annonce), pas en ``assistant``. Il se referme au premier tour
+        # utilisateur, ou avec la Session.
+        self._announcing = False
 
     @property
     def state(self) -> SessionState:
@@ -95,6 +150,15 @@ class Coordinator:
         return self._session_id
 
     async def handle(self, event: Event) -> list[Command]:
+        commands = await self._dispatch(event)
+        # Modèle unifié : dès que le noyau est au Repos avec des Événements en
+        # attente et aucune fenêtre ouverte, la fenêtre de regroupement s'ouvre.
+        # Le même chemin couvre le premier Événement reçu au Repos et les
+        # Événements mis en File pendant une Session, jugés au retour au Repos.
+        commands.extend(self._open_window_if_needed())
+        return commands
+
+    async def _dispatch(self, event: Event) -> list[Command]:
         if isinstance(event, ClientRegistered):
             return self._on_client_registered(event)
         if isinstance(event, SessionRequested):
@@ -110,7 +174,7 @@ class Coordinator:
         if isinstance(event, LlmOpened):
             return self._on_llm_opened(event)
         if isinstance(event, LlmAudio):
-            return self._on_llm_audio(event)
+            return await self._on_llm_audio(event)
         if isinstance(event, LlmTranscription):
             return await self._on_llm_transcription(event)
         if isinstance(event, LlmToolCall):
@@ -123,18 +187,257 @@ class Coordinator:
             return self._on_shutdown_requested(event)
         if isinstance(event, TimerFired):
             return self._on_timer_fired(event)
+        if isinstance(event, EventReceived):
+            return self._on_event_received(event)
         raise TypeError(f"Unsupported event: {type(event).__name__}")
 
     def _on_client_registered(self, event: ClientRegistered) -> list[Command]:
+        self._registered_client_id = event.client_id
         return self._decision("ClientRegistered", client_id=event.client_id)
+
+    def _on_event_received(self, event: EventReceived) -> list[Command]:
+        """Un Événement reçu rejoint la File après les gardes d'assainissement.
+
+        Ordre des gardes à l'arrivée, fixé et épinglé par les tests :
+        **taille** (un contenu trop volumineux est rejeté avant tout état) →
+        **dédup** (un doublon exact ``(source, contenu)`` de la fenêtre courante
+        n'est pas jugé deux fois) → **plafond** (au-delà de ``EVENT_QUEUE_MAX``,
+        les plus anciens sont jetés). Chaque rejet émet une trace
+        ``EventQueueDropped`` portant sa ``reason``.
+
+        Au Repos, ``handle`` ouvre la fenêtre si elle ne l'est pas déjà (premier
+        Événement) ; les arrivées suivantes rejoignent le lot sans relancer la
+        fenêtre. Hors Repos, l'Événement attend le retour au Repos ; les
+        doublons accumulés y sont écrasés à l'ouverture de la fenêtre.
+        """
+        if len(event.content) > EVENT_MAX_CHARS:
+            return [self._event_drop_trace(event, EventDropReason.TOO_LARGE)]
+        if self._window_collects() and self._is_duplicate(event):
+            return [self._event_drop_trace(event, EventDropReason.DUPLICATE)]
+        self._event_queue.append(event)
+        commands: list[Command] = [
+            self._trace(
+                "EventQueued",
+                from_state=self._state,
+                to_state=self._state,
+                client_id=self._registered_client_id,
+                level="debug",
+                extra={"source": event.source, "queued": len(self._event_queue)},
+            )
+        ]
+        commands.extend(self._enforce_ceiling())
+        return commands
+
+    def _enforce_ceiling(self) -> list[Command]:
+        """Jette les plus anciens tant que la File dépasse ``EVENT_QUEUE_MAX``."""
+        commands: list[Command] = []
+        while len(self._event_queue) > EVENT_QUEUE_MAX:
+            dropped = self._event_queue.pop(0)
+            commands.append(self._event_drop_trace(dropped, EventDropReason.CAPACITY))
+        return commands
+
+    def _event_drop_trace(
+        self, event: EventReceived, reason: EventDropReason
+    ) -> Trace:
+        """Trace le rejet d'un Événement avec sa cause (jamais jugé)."""
+        return self._trace(
+            "EventQueueDropped",
+            from_state=self._state,
+            to_state=self._state,
+            client_id=self._registered_client_id,
+            reason=reason.value,
+            extra={"source": event.source},
+        )
+
+    def _window_collects(self) -> bool:
+        """Vrai quand une fenêtre collecte activement des Événements au Repos.
+
+        Hors Repos, la fenêtre perd son sens : les arrivées sont mises en File
+        sans dédup, et les répétitions seront écrasées à la réouverture.
+        """
+        return self._window_open and self._state is SessionState.IDLE
+
+    @staticmethod
+    def _event_key(event: EventReceived) -> tuple[str, str]:
+        """Clé d'identité d'un Événement : paire exacte ``(source, contenu)``."""
+        return (event.source, event.content)
+
+    @staticmethod
+    def _collapse(
+        events: list[EventReceived],
+    ) -> tuple[list[EventReceived], list[EventReceived]]:
+        """Sépare une liste en ``(uniques conservés, doublons écartés)``.
+
+        Le premier Événement de chaque paire ``(source, contenu)`` est conservé,
+        dans l'ordre d'arrivée ; toute occurrence suivante est un doublon.
+        """
+        seen: set[tuple[str, str]] = set()
+        kept: list[EventReceived] = []
+        dropped: list[EventReceived] = []
+        for event in events:
+            key = Coordinator._event_key(event)
+            if key in seen:
+                dropped.append(event)
+                continue
+            seen.add(key)
+            kept.append(event)
+        return kept, dropped
+
+    def _is_duplicate(self, event: EventReceived) -> bool:
+        """Doublon exact ``(source, contenu)`` déjà collecté dans la fenêtre."""
+        _, dropped = self._collapse([*self._event_queue, event])
+        return bool(dropped)
+
+    def _collapse_window_duplicates(self) -> list[Command]:
+        """Écarte les doublons entrés en fenêtre, en gardant le plus ancien.
+
+        Les Événements accumulés hors Repos peuvent contenir des répétitions :
+        à l'ouverture de la fenêtre, seule la première occurrence de chaque
+        paire exacte ``(source, contenu)`` est conservée, dans l'ordre d'arrivée
+        ; chaque occurrence écartée est tracée (raison ``duplicate``).
+        """
+        kept, dropped = self._collapse(self._event_queue)
+        self._event_queue = kept
+        return [
+            self._event_drop_trace(event, EventDropReason.DUPLICATE)
+            for event in dropped
+        ]
+
+    def _open_window_if_needed(self) -> list[Command]:
+        """Ouvre la fenêtre de regroupement au Repos, une seule fois par lot.
+
+        Paresseuse : armée par le premier Événement en attente, elle émet un
+        ``StartIdleTimer`` sur la **clé réservée** et n'est pas relancée par les
+        arrivées suivantes ; l'échéance juge le lot d'un bloc.
+        """
+        if (
+            self._state is not SessionState.IDLE
+            or self._window_open
+            or not self._event_queue
+        ):
+            return []
+        self._window_open = True
+        commands = self._collapse_window_duplicates()
+        commands.append(
+            StartIdleTimer(
+                connection_id=EVENT_WINDOW_TIMER_ID,
+                timeout=EVENT_WINDOW_TIMEOUT,
+            )
+        )
+        commands.append(
+            self._trace(
+                "EventWindowOpened",
+                from_state=self._state,
+                to_state=self._state,
+                client_id=self._registered_client_id,
+                extra={"events": len(self._event_queue)},
+            )
+        )
+        return commands
+
+    def _cancel_window(self) -> list[Command]:
+        """Annule la fenêtre ouverte sans toucher la File d'attente.
+
+        L'utilisateur gagne toujours (ADR-0007) : les Événements restent en File
+        et seront jugés au prochain Repos. L'échéance tardive de l'horloge est
+        ignorée, la fenêtre étant refermée (``_window_open`` est faux).
+        """
+        self._window_open = False
+        return [
+            CancelIdleTimer(connection_id=EVENT_WINDOW_TIMER_ID),
+            self._trace(
+                "EventWindowCanceled",
+                from_state=self._state,
+                to_state=self._state,
+                client_id=self._registered_client_id,
+                extra={"events": len(self._event_queue)},
+            ),
+        ]
+
+    def _start_judgment(self) -> list[Command]:
+        """Ouvre l'unique Connexion Live de jugement et transmet le lot.
+
+        Instruction de jugement dédiée, **sans Rappel mémoire ni Tools** ; le lot
+        est transmis comme contenu de tour par une commande distincte de
+        l'injection de mémoire (ADR-0007). La Connexion est marquée ``auto`` :
+        si le LLM parle, elle devient une Session automatique annoncée au Client
+        de référence ; s'il se tait, le timeout de jugement dédié la referme.
+        """
+        batch = self._event_queue
+        self._event_queue = []
+        self._judged_batch = batch
+        self._session_counter += 1
+        self._connection_id = f"s{self._session_counter}"
+        self._session_id = ""
+        self._visible = False
+        self._client_id = self._registered_client_id
+        self._auto = True
+        self._judging = True
+        self._state = SessionState.LIVE_CONNECTING
+        self._recent_utterances = []
+        self._injected_memories = set()
+        return [
+            OpenLiveConnection(
+                connection_id=self._connection_id,
+                instruction=self._judge_prompt,
+                tools=(),
+            ),
+            StartIdleTimer(
+                connection_id=self._connection_id, timeout=JUDGE_TIMEOUT
+            ),
+            SendJudgeBatchToLlm(
+                connection_id=self._connection_id,
+                text=self._render_batch(batch),
+            ),
+            self._trace(
+                "EventJudge",
+                from_state=SessionState.IDLE,
+                to_state=self._state,
+                client_id=self._client_id,
+                extra={"events": len(batch)},
+            ),
+        ]
+
+    @staticmethod
+    def _format_fact(event: EventReceived) -> str:
+        """Étiquette un fait par sa Source, forme ``[source] contenu``."""
+        return f"[{event.source}] {event.content}"
+
+    @classmethod
+    def _render_batch(cls, batch: list[EventReceived]) -> str:
+        """Un fait par ligne, étiqueté par Source (ordre d'arrivée, FIFO)."""
+        lines = [f"- {cls._format_fact(event)}" for event in batch]
+        return "\n".join([_EVENT_HEADER, *lines])
 
     async def _on_session_requested(
         self, event: SessionRequested
     ) -> list[Command]:
         commands: list[Command] = []
         original_state = self._state
+
+        # « L'utilisateur gagne toujours » (ADR-0007) : un Wake word ou un tap
+        # prime sur les automatismes d'Événement. Pendant une fenêtre ouverte il
+        # l'annule en laissant la File intacte ; pendant un jugement en vol il
+        # préempte la Connexion Live par le chemin de fin existant et remet les
+        # faits du lot en tête de la File, pour un re-jugement ultérieur — sans
+        # perte silencieuse.
+        preempted: list[EventReceived] = []
+        if self._window_open:
+            commands.extend(self._cancel_window())
+        if self._judging:
+            # Le lot préempté est sorti **avant** la fin : il ne doit pas être
+            # tracé comme perdu, il est remis en File juste après.
+            preempted = self._judged_batch
+            self._judged_batch = []
         if original_state is not SessionState.IDLE:
             commands.extend(self._teardown(SessionEndReason.REPLACED, "Replaced"))
+        if preempted:
+            # Les faits préemptés repassent devant tout ce qui a été mis en File
+            # pendant le jugement, dans leur ordre d'origine ; le plafond de la
+            # File reste tenu (les plus anciens — ici les préemptés — sont jetés
+            # et tracés, comme à l'arrivée).
+            self._event_queue = [*preempted, *self._event_queue]
+            commands.extend(self._enforce_ceiling())
 
         self._session_counter += 1
         self._connection_id = f"s{self._session_counter}"
@@ -240,12 +543,12 @@ class Coordinator:
             )
         ]
 
-    def _on_llm_audio(self, event: LlmAudio) -> list[Command]:
+    async def _on_llm_audio(self, event: LlmAudio) -> list[Command]:
         if self._state is SessionState.LIVE_ACTIVE:
             self._audio_buffer.append(event.data)
             return [
                 self._rearm_timer(),
-                *self._become_visible("LlmAudio"),
+                *(await self._become_visible("LlmAudio")),
             ]
         if self._state is SessionState.SESSION_VISIBLE:
             return [
@@ -260,15 +563,25 @@ class Coordinator:
     ) -> list[Command]:
         if event.role is Role.USER:
             return await self._on_user_utterance(event)
-        if self._state is not SessionState.IDLE:
-            await self._journal("assistant", event.text)
         if event.role is Role.ASSISTANT and self._state is SessionState.LIVE_ACTIVE:
-            return self._become_visible("LlmTranscription")
+            judging = self._judging
+            commands = await self._become_visible("LlmTranscription")
+            if judging:
+                # La Connexion de jugement redevient une Session ordinaire : son
+                # timer reprend le réglage d'inactivité de Session.
+                commands.insert(0, self._rearm_timer())
+            await self._journal_speech(event.text)
+            return commands
+        if self._state is not SessionState.IDLE:
+            await self._journal_speech(event.text)
         return self._decision("LlmTranscription")
 
     async def _on_user_utterance(self, event: LlmTranscription) -> list[Command]:
         if self._state is SessionState.IDLE:
             return self._decision("LlmTranscription")
+        # Le premier tour utilisateur referme le tour d'annonce : la parole
+        # suivante d'Athena est une réponse ordinaire, journalisée ``assistant``.
+        self._announcing = False
         commands: list[Command] = [self._rearm_timer()]
         if self._memory is not None:
             await self._journal("user", event.text)
@@ -285,6 +598,28 @@ class Coordinator:
     async def _journal(self, role: str, text: str) -> None:
         if self._memory is not None:
             await self._memory.append_turn(self._user_id, role, text)
+
+    async def _journal_speech(self, text: str) -> None:
+        """Journalise une transcription de l'assistant.
+
+        Pendant le tour d'annonce (Annonce proactive d'un Événement), la parole
+        qui annonce entre au Journal en rôle ``event`` — comme le fait annoncé —
+        pour que la Consolidation l'exclue entièrement (ADR-0007). Hors de ce
+        tour, la parole est une réponse ordinaire (``assistant``).
+        """
+        role = RECENT_EVENT_ROLE if self._announcing else "assistant"
+        await self._journal(role, text)
+
+    async def _journal_judged_facts(self) -> None:
+        """Écrit les faits du lot jugé, en rôle ``event``, à l'Annonce.
+
+        Le lot n'est journalisé qu'au moment où la Connexion de jugement devient
+        visible : un jugement tu ne doit rien écrire au Journal (ticket #42).
+        """
+        batch = self._judged_batch
+        self._judged_batch = []
+        for fact in batch:
+            await self._journal(RECENT_EVENT_ROLE, self._format_fact(fact))
 
     async def _recall(self, utterance: str) -> tuple[str | None, Trace]:
         window = self._recent_utterances[-self._recall_window_turns :]
@@ -392,13 +727,37 @@ class Coordinator:
 
     def _on_shutdown_requested(self, event: ShutdownRequested) -> list[Command]:
         if self._state is not SessionState.IDLE:
-            return self._teardown(SessionEndReason.SHUTDOWN, "Shutdown")
-        return self._decision("ShutdownRequested")
+            commands = self._teardown(SessionEndReason.SHUTDOWN, "Shutdown")
+        else:
+            commands = self._decision("ShutdownRequested")
+        # La File d'attente d'Événements est éphémère : à l'arrêt, les faits non
+        # jugés sont perdus et tracés un par un, jamais jugés (ADR-0007).
+        for queued in self._event_queue:
+            commands.append(self._event_drop_trace(queued, EventDropReason.SHUTDOWN))
+        self._event_queue = []
+        self._window_open = False
+        return commands
 
     def _on_timer_fired(self, event: TimerFired) -> list[Command]:
+        if event.connection_id == EVENT_WINDOW_TIMER_ID:
+            return self._on_event_window_fired()
         if self._owns(event.connection_id) and self._state is not SessionState.IDLE:
             return self._teardown(SessionEndReason.TIMEOUT, "Timeout")
         return self._decision("TimerFired")
+
+    def _on_event_window_fired(self) -> list[Command]:
+        """Échéance de la fenêtre : juge le lot entier en un seul tour.
+
+        Si le noyau a quitté le Repos entre-temps (l'utilisateur a pris la
+        parole), la fenêtre se referme sans juger et la File reste intacte :
+        elle sera rouverte au prochain Repos.
+        """
+        if not self._window_open:
+            return self._decision("EventWindowFired")
+        self._window_open = False
+        if self._state is not SessionState.IDLE:
+            return self._decision("EventWindowFired")
+        return self._start_judgment()
 
     def _rearm_timer(self) -> StartIdleTimer:
         return StartIdleTimer(connection_id=self._connection_id, timeout=IDLE_TIMEOUT)
@@ -407,11 +766,19 @@ class Coordinator:
         """Une identité vide n'est pas un joker : seul l'id courant compte."""
         return connection_id != "" and connection_id == self._connection_id
 
-    def _become_visible(self, kind: str) -> list[Command]:
+    async def _become_visible(self, kind: str) -> list[Command]:
         from_state = self._state
+        announcing = self._judging
         self._state = SessionState.SESSION_VISIBLE
         self._visible = True
+        self._judging = False
         self._session_id = self._connection_id
+        if announcing:
+            # Annonce proactive : le fait annoncé entre au Journal en rôle
+            # ``event`` (le lot jugé n'est journalisé qu'ici, jamais s'il se
+            # tait), et le tour d'annonce reste ouvert pour la parole d'annonce.
+            self._announcing = True
+            await self._journal_judged_facts()
         commands: list[Command] = [
             AnnounceSessionStarted(client_id=self._client_id, auto=self._auto)
         ]
@@ -440,8 +807,8 @@ class Coordinator:
         """Single deterministic termination path.
 
         Ordering is fixed: cancel the idle timer, close the Live connection,
-        announce the Session end (unless a client that never saw a Session is
-        closed cleanly), then trace both transitions Idle <- Closing <- origin.
+        announce the Session end only when the Session had become visible,
+        then trace both transitions Idle <- Closing <- origin.
         Afterwards the Coordinator is back to Idle with no residual identity,
         so no zombie Session can linger.
         """
@@ -455,7 +822,7 @@ class Coordinator:
             CancelIdleTimer(connection_id=old_connection_id),
             CloseLiveConnection(connection_id=old_connection_id),
         ]
-        if was_visible or reason is not SessionEndReason.NORMAL:
+        if was_visible:
             commands.append(
                 AnnounceSessionEnded(client_id=old_client_id, reason=reason)
             )
@@ -484,6 +851,13 @@ class Coordinator:
             )
         )
         self._state = SessionState.IDLE
+        # Un lot de jugement en vol n'a pas été Annoncé : sa perte est comptée
+        # un fait par une trace, sans quoi elle serait silencieuse (#40/#41).
+        # Le chemin d'annonce et la préemption l'ont déjà vidé.
+        for fact in self._judged_batch:
+            commands.append(
+                self._event_drop_trace(fact, EventDropReason.JUDGMENT_ABORTED)
+            )
         self._reset()
         return commands
 
@@ -493,6 +867,9 @@ class Coordinator:
         self._session_id = ""
         self._visible = False
         self._auto = False
+        self._judging = False
+        self._announcing = False
+        self._judged_batch = []
         self._audio_buffer.clear()
         self._recent_utterances = []
         self._injected_memories = set()

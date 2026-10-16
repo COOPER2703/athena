@@ -6,6 +6,7 @@ from pathlib import Path
 
 import google.protobuf
 import pytest
+from google.protobuf import descriptor_pb2
 
 PROTOCOL_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = PROTOCOL_DIR.parent
@@ -28,7 +29,6 @@ FROZEN_MESSAGES = {
     "SessionEnded": {"reason": 1},
     "ToolCall": {"id": 1, "name": 2, "args_json": 3},
     "Text": {"role": 1, "content": 2},
-    "Notification": {"source": 1, "message": 2},
     "Pong": {},
     "Error": {"message": 1},
     "ToolDeclaration": {"name": 1, "description": 2, "parameters_json": 3},
@@ -45,7 +45,6 @@ FROZEN_MESSAGES = {
         "session_ended": 10,
         "tool_call": 11,
         "text": 12,
-        "notification": 13,
         "pong": 14,
         "error": 15,
     },
@@ -132,9 +131,14 @@ def test_wire_is_frozen():
 
     envelope = descriptor.message_types_by_name["Envelope"]
     assert [oneof.name for oneof in envelope.oneofs] == ["payload"]
-    assert [field.number for field in envelope.oneofs[0].fields] == list(
-        range(1, 16)
-    )
+    # Les numéros de champ d'un oneof partagent l'espace du message : le 13
+    # est réservé et ne peut pas être réutilisé.
+    assert [field.number for field in envelope.oneofs[0].fields] == [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15,
+    ]
+    envelope_proto = descriptor_pb2.DescriptorProto()
+    envelope.CopyToProto(envelope_proto)
+    assert [(r.start, r.end) for r in envelope_proto.reserved_range] == [(13, 14)]
 
     reason = descriptor.message_types_by_name["SessionEnded"].enum_types_by_name[
         "Reason"

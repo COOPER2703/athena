@@ -11,6 +11,7 @@ from server.core.commands import (
     Command,
     OpenLiveConnection,
     SendAudioToLlm,
+    SendJudgeBatchToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
     Trace,
@@ -96,6 +97,9 @@ class GeminiLiveAdapter:
             return
         if isinstance(command, SendMemoryToLlm):
             await self.send_memory(command.connection_id, command.text)
+            return
+        if isinstance(command, SendJudgeBatchToLlm):
+            await self.send_judge_batch(command.connection_id, command.text)
             return
         if isinstance(command, SendToolResultToLlm):
             await self.send_tool_result(
@@ -255,10 +259,52 @@ class GeminiLiveAdapter:
         # ``send_client_content`` with ``send_realtime_input`` (the upstream audio
         # path); if that ever fails in a real voice Session, the documented
         # fallback is to recall at Session open only (Activation), never mid-turn.
+        # Recall is best effort: never tear the Session down over it.
+        await self._send_client_content(
+            connection_id,
+            text,
+            turn_complete=False,
+            kind="memory",
+            sent_kind="memory_injected",
+        )
+
+    async def send_judge_batch(self, connection_id: str, text: str) -> None:
+        """Transmet le lot d'Événements comme contenu de tour au jugement.
+
+        Commande distincte de l'injection de mémoire (ADR-0007) : le lot complète
+        le tour (``turn_complete=True``) pour que le modèle puisse parler s'il
+        juge le fait digne d'une Annonce. Le verdict reste reconnu par timeout,
+        jamais par un signal de fin de tour Gemini. Le jugement est best effort :
+        un envoi raté ne lève jamais.
+        """
+        await self._send_client_content(
+            connection_id,
+            text,
+            turn_complete=True,
+            kind="judge_batch",
+            sent_kind="judge_batch_sent",
+        )
+
+    async def _send_client_content(
+        self,
+        connection_id: str,
+        text: str,
+        *,
+        turn_complete: bool,
+        kind: str,
+        sent_kind: str,
+    ) -> None:
+        """Envoie un contenu de tour ``user`` sur la Connexion Live.
+
+        Mutualise l'injection de mémoire (rappel) et la transmission du lot de
+        jugement, qui ne diffèrent que par ``turn_complete`` et par les traces :
+        ``kind`` préfixe les traces d'ignoré/erreur, ``sent_kind`` est la trace
+        de succès. Best effort : un envoi raté ne lève jamais.
+        """
         live = self._live
         if live is None or self._terminated:
             self._emit(
-                "send_memory_ignored",
+                f"send_{kind}_ignored",
                 payload={"connection_id": connection_id},
                 level="warning",
             )
@@ -268,20 +314,19 @@ class GeminiLiveAdapter:
 
             await live.send_client_content(
                 turns=types.Content(role="user", parts=[types.Part(text=text)]),
-                turn_complete=False,
+                turn_complete=turn_complete,
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            # Recall is best effort: never tear the Session down over it.
             self._emit(
-                "send_memory_error",
+                f"send_{kind}_error",
                 payload={"connection_id": connection_id, "error": str(exc)},
                 level="error",
             )
             return
         self._emit(
-            "memory_injected",
+            sent_kind,
             payload={"connection_id": connection_id, "chars": len(text)},
         )
 

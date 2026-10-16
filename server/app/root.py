@@ -31,24 +31,31 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
+    SendJudgeBatchToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
     StartIdleTimer,
     Trace,
 )
 from server.core.coordinator import Coordinator
-from server.core.events import Event, ShutdownRequested
+from server.core.events import Event, EventReceived, ShutdownRequested
 from server.core.memory_tools import register_memory_tools
 from server.core.ports import MemoryStore, TraceSink
 from server.core.tools import ToolRegistry
 
 _TRACE_SOURCE = "app"
 _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent.parent / "system-prompt.txt"
+_JUDGE_PROMPT_PATH = Path(__file__).resolve().parent.parent / "judge-prompt.txt"
 
 
 def load_system_prompt(path: str | Path | None = None) -> str:
     """Read the versioned generic system prompt injected into the kernel."""
     return Path(path or _SYSTEM_PROMPT_PATH).read_text(encoding="utf-8")
+
+
+def load_judge_prompt(path: str | Path | None = None) -> str:
+    """Read the versioned judgment prompt injected into a judgment connection."""
+    return Path(path or _JUDGE_PROMPT_PATH).read_text(encoding="utf-8")
 
 
 def _trace_consolidation(
@@ -97,6 +104,7 @@ class App:
         memory: MemoryStore | None = None,
         user_id: str = "owner",
         system_prompt: str = "",
+        judge_prompt: str = "",
         tools: ToolRegistry | None = None,
         recall_k: int = 5,
         recall_window_turns: int = 3,
@@ -114,6 +122,7 @@ class App:
             memory=memory,
             user_id=user_id,
             system_prompt=system_prompt,
+            judge_prompt=judge_prompt,
             tools=tools,
             recall_k=recall_k,
             recall_window_turns=recall_window_turns,
@@ -162,6 +171,14 @@ class App:
         """Dépose ``ShutdownRequested`` dans le flux, appelable depuis un signal."""
         self._events.put_nowait(ShutdownRequested())
 
+    def push_event(self, source: str, content: str) -> None:
+        """Dépose un Événement dans le Canal d'événements unique du noyau.
+
+        Point d'entrée noyau prêt pour un futur adaptateur Webhook (ADR-0007) :
+        le noyau seul décide où et quand le juger.
+        """
+        self._events.put_nowait(EventReceived(source=source, content=content))
+
     async def _pump(self, recv: Callable[[], Awaitable[Event]]) -> None:
         while True:
             await self._events.put(await recv())
@@ -191,6 +208,7 @@ class App:
                 CloseLiveConnection,
                 SendAudioToLlm,
                 SendMemoryToLlm,
+                SendJudgeBatchToLlm,
                 SendToolResultToLlm,
             ),
         ):
@@ -286,6 +304,7 @@ def build_app(config: AppConfig) -> App:
         memory=memory,
         user_id=config.memory.user_id,
         system_prompt=load_system_prompt(),
+        judge_prompt=load_judge_prompt(),
         tools=tools,
         recall_k=config.memory.recall_k,
         recall_window_turns=config.memory.recall_window_turns,
