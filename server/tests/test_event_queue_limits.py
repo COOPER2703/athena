@@ -8,12 +8,18 @@ intra-fenêtre, et l'**éphémérité** à l'arrêt — chaque rejet étant trac
 
 from __future__ import annotations
 
-import asyncio
-
+from conftest import (
+    batch,
+    close_window,
+    drive,
+    handle,
+    traces,
+    visible_session,
+    window_timer,
+)
 from server.core import (
     EVENT_MAX_CHARS,
     EVENT_QUEUE_MAX,
-    EVENT_WINDOW_TIMER_ID,
     Coordinator,
     EventDropReason,
     EventReceived,
@@ -25,44 +31,7 @@ from server.core import (
     SessionRequested,
     SessionState,
     ShutdownRequested,
-    TimerFired,
-    Trace,
 )
-
-
-def handle(coordinator, event):
-    return asyncio.run(coordinator.handle(event))
-
-
-def drive(coordinator, events):
-    commands = []
-    for event in events:
-        commands.extend(handle(coordinator, event))
-    return commands
-
-
-def effects(commands):
-    return [command for command in commands if not isinstance(command, Trace)]
-
-
-def traces(commands):
-    return [command for command in commands if isinstance(command, Trace)]
-
-
-def window_timer():
-    return TimerFired(connection_id=EVENT_WINDOW_TIMER_ID)
-
-
-def close_window(coordinator):
-    return handle(coordinator, window_timer())
-
-
-def opened(commands):
-    return next(c for c in commands if isinstance(c, OpenLiveConnection))
-
-
-def batch(commands):
-    return next(c for c in commands if isinstance(c, SendJudgeBatchToLlm))
 
 
 def drops(commands, reason):
@@ -70,14 +39,6 @@ def drops(commands, reason):
         t
         for t in traces(commands)
         if t.kind == "EventQueueDropped" and t.payload.get("reason") == reason
-    ]
-
-
-def visible_session(client_id="c1"):
-    return [
-        SessionRequested(client_id=client_id),
-        LlmOpened(),
-        LlmAudio(data=b"hi"),
     ]
 
 

@@ -8,10 +8,19 @@ réservée** que le noyau a armée, exactement ce que fera l'horloge à l'éché
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
+from conftest import (
+    batch,
+    close_window,
+    drive,
+    effects,
+    handle,
+    opened,
+    traces,
+    visible_session,
+    window_timer,
+)
 from server.core import (
     EVENT_WINDOW_TIMER_ID,
     EVENT_WINDOW_TIMEOUT,
@@ -44,44 +53,7 @@ from server.core import (
     ShutdownRequested,
     StartIdleTimer,
     TimerFired,
-    Trace,
 )
-
-
-def handle(coordinator, event):
-    return asyncio.run(coordinator.handle(event))
-
-
-def drive(coordinator, events):
-    commands = []
-    for event in events:
-        commands.extend(handle(coordinator, event))
-    return commands
-
-
-def effects(commands):
-    return [command for command in commands if not isinstance(command, Trace)]
-
-
-def traces(commands):
-    return [command for command in commands if isinstance(command, Trace)]
-
-
-def window_timer():
-    """L'échéance de la fenêtre, telle que l'horloge la livre."""
-    return TimerFired(connection_id=EVENT_WINDOW_TIMER_ID)
-
-
-def close_window(coordinator):
-    return handle(coordinator, window_timer())
-
-
-def opened(commands):
-    return next(c for c in commands if isinstance(c, OpenLiveConnection))
-
-
-def batch(commands):
-    return next(c for c in commands if isinstance(c, SendJudgeBatchToLlm))
 
 
 class FakeMemory:
@@ -102,14 +74,6 @@ class FakeMemory:
 
     async def recall(self, user_id: str, query: str) -> list:
         return []
-
-
-def visible_session(client_id="c1"):
-    return [
-        SessionRequested(client_id=client_id),
-        LlmOpened(),
-        LlmAudio(data=b"hi"),
-    ]
 
 
 def test_first_event_at_repos_arms_the_window_and_opens_no_connection():

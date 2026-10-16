@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
+from conftest import drive, effects, handle, traces
 from protocol import SessionEndReason
 
 from server.core import (
@@ -33,25 +32,6 @@ from server.core import (
     TimerFired,
     Trace,
 )
-
-
-def handle(coordinator, event):
-    return asyncio.run(coordinator.handle(event))
-
-
-def drive(coordinator, events):
-    commands = []
-    for event in events:
-        commands.extend(handle(coordinator, event))
-    return commands
-
-
-def effects(commands):
-    return [command for command in commands if not isinstance(command, Trace)]
-
-
-def traces(commands):
-    return [command for command in commands if isinstance(command, Trace)]
 
 
 def live_session(client_id="c1", speaking=True):
