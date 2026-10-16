@@ -21,6 +21,8 @@ from server.core.consolidation import (
     local_now,
 )
 from server.core.coordinator import (
+    EVENT_MAX_CHARS,
+    EVENT_QUEUE_MAX,
     EVENT_WINDOW_TIMER_ID,
     EVENT_WINDOW_TIMEOUT,
     IDLE_TIMEOUT,
@@ -85,6 +87,8 @@ __all__ = [
     "Embedder",
     "Event",
     "EventReceived",
+    "EVENT_MAX_CHARS",
+    "EVENT_QUEUE_MAX",
     "EVENT_WINDOW_TIMER_ID",
     "EVENT_WINDOW_TIMEOUT",
     "FactExtractor",
