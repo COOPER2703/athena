@@ -15,6 +15,7 @@ from server.core import (
     EVENT_QUEUE_MAX,
     EVENT_WINDOW_TIMER_ID,
     Coordinator,
+    EventDropReason,
     EventReceived,
     LlmAudio,
     LlmClosed,
@@ -90,7 +91,7 @@ def test_the_queue_is_capped_at_120_and_drops_the_oldest_each_time():
         )
 
     # Le plus ancien (fait-0) a été jeté à l'arrivée du 121e, et tracé.
-    assert len(drops(commands, "capacity")) == 1
+    assert len(drops(commands, EventDropReason.CAPACITY)) == 1
     assert coordinator.state is SessionState.IDLE
 
     commands = close_window(coordinator)
@@ -108,7 +109,7 @@ def test_an_exact_duplicate_in_the_current_window_is_not_judged():
     handle(coordinator, EventReceived(source="m", content="porte"))
     commands = handle(coordinator, EventReceived(source="m", content="porte"))
 
-    assert len(drops(commands, "duplicate")) == 1
+    assert len(drops(commands, EventDropReason.DUPLICATE)) == 1
 
     text = batch(close_window(coordinator)).text
     assert text == "[ÉVÉNEMENTS]\n- [m] porte"
@@ -149,7 +150,7 @@ def test_duplicates_queued_hors_repos_are_collapsed_when_the_window_opens():
     # est conservé), en traçant le rejet.
     commands = handle(coordinator, LlmClosed(connection_id="s1"))
 
-    assert len(drops(commands, "duplicate")) == 1
+    assert len(drops(commands, EventDropReason.DUPLICATE)) == 1
 
     text = batch(close_window(coordinator)).text
     assert text == "[ÉVÉNEMENTS]\n- [m] un\n- [m] deux"
@@ -162,7 +163,7 @@ def test_an_oversized_content_is_rejected_on_arrival_and_traced():
         coordinator, EventReceived(source="hook", content="x" * (EVENT_MAX_CHARS + 1))
     )
 
-    assert len(drops(commands, "too_large")) == 1
+    assert len(drops(commands, EventDropReason.TOO_LARGE)) == 1
     assert coordinator.state is SessionState.IDLE
 
 
@@ -193,7 +194,7 @@ def test_shutdown_drops_the_whole_pending_file_and_traces_each_event():
 
     commands = handle(coordinator, ShutdownRequested())
 
-    assert len(drops(commands, "shutdown")) == 2
+    assert len(drops(commands, EventDropReason.SHUTDOWN)) == 2
     assert OpenLiveConnection not in [type(c) for c in commands]
     assert SendJudgeBatchToLlm not in [type(c) for c in commands]
     assert coordinator.state is SessionState.IDLE
@@ -230,5 +231,32 @@ def test_a_legitimate_batch_under_all_limits_is_left_unchanged():
         "- [door] porte d'entrée\n"
         "- [matrix] colis"
     )
+
+
+def test_preemption_requeue_still_honours_the_ceiling_and_traces_each_drop():
+    coordinator = Coordinator(judge_prompt="JUGE")
+    # File pleine (120) puis jugement : le lot sort de la File.
+    for index in range(EVENT_QUEUE_MAX):
+        handle(coordinator, EventReceived(source="m", content=f"lot-{index}"))
+    handle(coordinator, window_timer())
+    # Pendant le jugement, la File se remplit à nouveau jusqu'au plafond.
+    for index in range(EVENT_QUEUE_MAX):
+        handle(coordinator, EventReceived(source="m", content=f"recent-{index}"))
+
+    commands = handle(coordinator, SessionRequested(client_id="c1"))
+
+    # Les faits préemptés repassent devant : le plafond jette les plus anciens
+    # (le lot préempté) et trace chaque rejet.
+    assert len(drops(commands, EventDropReason.CAPACITY)) == EVENT_QUEUE_MAX
+
+    # La Session utilisateur se termine ; le lot rejugé tient le plafond.
+    drive(coordinator, [LlmOpened(), LlmAudio(data=b"hi")])
+    handle(coordinator, LlmClosed(connection_id="s2"))
+    text = batch(close_window(coordinator)).text
+    lines = text.splitlines()[1:]
+    assert len(lines) == EVENT_QUEUE_MAX
+    assert lines[0] == "- [m] recent-0"
+    assert lines[-1] == f"- [m] recent-{EVENT_QUEUE_MAX - 1}"
+    assert "lot-0" not in text
 
 

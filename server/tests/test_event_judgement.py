@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from server.core import (
     EVENT_WINDOW_TIMER_ID,
     EVENT_WINDOW_TIMEOUT,
@@ -19,12 +21,16 @@ from server.core import (
     AnnounceSessionStarted,
     CancelIdleTimer,
     ClientAudio,
+    ClientDisconnected,
     ClientRegistered,
     CloseLiveConnection,
     Coordinator,
+    EventDropReason,
     EventReceived,
     LlmAudio,
     LlmClosed,
+    LlmFailed,
+    LlmFailureCause,
     LlmOpened,
     LlmTranscription,
     OpenLiveConnection,
@@ -475,6 +481,83 @@ def test_stale_judgment_timer_after_preemption_does_not_touch_the_user_session()
 
     assert effects(commands) == []
     assert coordinator.state is SessionState.LIVE_CONNECTING
+
+
+# ---------------------------------------------------------------------------
+# Échec d'un jugement en vol (#40/#41) : le lot est sorti de la File, donc sa
+# perte n'est visible que par la trace. Toute fin anormale le compte un fait par
+# ``EventQueueDropped`` (``judgment_aborted``). La préemption (#41) fait
+# exception : le lot est remis en File avant la fin, il n'est donc jamais tracé
+# comme perdu.
+# ---------------------------------------------------------------------------
+
+
+def judging_connection(source="matrix", content="porte"):
+    """Connexion de jugement en vol : le lot a quitté la File, pas encore Annoncé."""
+    coordinator = Coordinator(judge_prompt="JUGE")
+    drive(
+        coordinator,
+        [
+            ClientRegistered(client_id="c9"),
+            EventReceived(source=source, content=content),
+            window_timer(),
+            LlmOpened(),
+        ],
+    )
+    return coordinator
+
+
+def judgment_drops(commands):
+    return [t for t in traces(commands) if t.kind == "EventQueueDropped"]
+
+
+@pytest.mark.parametrize(
+    "abort",
+    [
+        LlmFailed(cause=LlmFailureCause.ERROR, connection_id="s1"),
+        LlmClosed(connection_id="s1"),
+        ClientDisconnected(client_id="c9"),
+        ShutdownRequested(),
+    ],
+    ids=["llm_failed", "llm_closed", "client_disconnected", "shutdown"],
+)
+def test_an_aborted_judgment_traces_each_in_flight_fact_as_dropped(abort):
+    coordinator = judging_connection()
+
+    commands = handle(coordinator, abort)
+
+    dropped = judgment_drops(commands)
+    assert len(dropped) == 1
+    assert dropped[0].payload["reason"] == EventDropReason.JUDGMENT_ABORTED
+    assert dropped[0].payload["source"] == "matrix"
+    assert coordinator.state is SessionState.IDLE
+
+
+def test_an_aborted_judgment_traces_every_fact_of_the_batch():
+    coordinator = Coordinator(judge_prompt="JUGE")
+    drive(
+        coordinator,
+        [
+            EventReceived(source="matrix", content="porte"),
+            EventReceived(source="door", content="colis"),
+            window_timer(),
+            LlmOpened(),
+        ],
+    )
+
+    commands = handle(coordinator, LlmClosed(connection_id="s1"))
+
+    dropped = judgment_drops(commands)
+    assert len(dropped) == 2
+    assert {t.payload["source"] for t in dropped} == {"matrix", "door"}
+
+
+def test_a_preempted_judgment_traces_no_drop_for_the_requeued_facts():
+    coordinator = judging_connection()
+
+    commands = handle(coordinator, SessionRequested(client_id="c1"))
+
+    assert judgment_drops(commands) == []
 
 
 # ---------------------------------------------------------------------------
