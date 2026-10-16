@@ -651,7 +651,7 @@ def test_send_memory_after_terminal_event_is_ignored() -> None:
         await adapter.execute(OpenLiveConnection(connection_id="s1"))
         assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
         assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmFailed(
-            cause=LlmFailureCause.GO_AWAY
+            cause=LlmFailureCause.GO_AWAY, connection_id="s1"
         )
 
         await adapter.execute(SendMemoryToLlm(connection_id="s1", text="x"))
