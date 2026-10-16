@@ -68,11 +68,6 @@ message Text {
   string content = 2;
 }
 
-message Notification {
-  string source = 1;
-  string message = 2;
-}
-
 message Pong {}
 
 message Error {
@@ -90,6 +85,9 @@ message ToolDeclaration {
 // ─── Envelope ───────────────────────────────────────────────────────────────
 
 message Envelope {
+  // Le numéro 13 (feu `notification`) reste réservé : jamais réutilisé.
+  reserved 13;
+
   oneof payload {
     // Client → Server
     Register register = 1;
@@ -106,7 +104,6 @@ message Envelope {
     SessionEnded session_ended = 10;
     ToolCall tool_call = 11;
     Text text = 12;
-    Notification notification = 13;
     Pong pong = 14;
     Error error = 15;
   }
