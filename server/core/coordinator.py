@@ -217,6 +217,25 @@ class Coordinator:
             ),
         ]
 
+    def _cancel_window(self) -> list[Command]:
+        """Annule la fenêtre ouverte sans toucher la File d'attente.
+
+        L'utilisateur gagne toujours (ADR-0007) : les Événements restent en File
+        et seront jugés au prochain Repos. L'échéance tardive de l'horloge est
+        ignorée, la fenêtre étant refermée (``_window_open`` est faux).
+        """
+        self._window_open = False
+        return [
+            CancelIdleTimer(connection_id=EVENT_WINDOW_TIMER_ID),
+            self._trace(
+                "EventWindowCanceled",
+                from_state=self._state,
+                to_state=self._state,
+                client_id=self._registered_client_id,
+                extra={"events": len(self._event_queue)},
+            ),
+        ]
+
     def _start_judgment(self) -> list[Command]:
         """Ouvre l'unique Connexion Live de jugement et transmet le lot.
 
@@ -272,8 +291,24 @@ class Coordinator:
     ) -> list[Command]:
         commands: list[Command] = []
         original_state = self._state
+
+        # « L'utilisateur gagne toujours » (ADR-0007) : un Wake word ou un tap
+        # prime sur les automatismes d'Événement. Pendant une fenêtre ouverte il
+        # l'annule en laissant la File intacte ; pendant un jugement en vol il
+        # préempte la Connexion Live par le chemin de fin existant et remet les
+        # faits du lot en tête de la File, pour un re-jugement ultérieur — sans
+        # perte silencieuse.
+        preempted: list[EventReceived] = []
+        if self._window_open:
+            commands.extend(self._cancel_window())
+        if self._judging:
+            preempted = self._judged_batch
         if original_state is not SessionState.IDLE:
             commands.extend(self._teardown(SessionEndReason.REPLACED, "Replaced"))
+        if preempted:
+            # Les faits préemptés repassent devant tout ce qui a été mis en File
+            # pendant le jugement, dans leur ordre d'origine.
+            self._event_queue = [*preempted, *self._event_queue]
 
         self._session_counter += 1
         self._connection_id = f"s{self._session_counter}"
