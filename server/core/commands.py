@@ -5,10 +5,14 @@ from typing import Mapping, Union
 
 from protocol import SessionEndReason
 
+from server.core.ports import ToolSpec
+
 
 @dataclass(frozen=True, slots=True)
 class OpenLiveConnection:
     connection_id: str
+    instruction: str = ""
+    tools: tuple[ToolSpec, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,9 +27,23 @@ class SendAudioToLlm:
 
 
 @dataclass(frozen=True, slots=True)
+class SendMemoryToLlm:
+    connection_id: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class SendAudioToClient:
     client_id: str
     data: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class SendToolResultToLlm:
+    connection_id: str
+    tool_id: str
+    name: str
+    result: Mapping[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +81,9 @@ Command = Union[
     OpenLiveConnection,
     CloseLiveConnection,
     SendAudioToLlm,
+    SendMemoryToLlm,
     SendAudioToClient,
+    SendToolResultToLlm,
     AnnounceSessionStarted,
     AnnounceSessionEnded,
     StartIdleTimer,

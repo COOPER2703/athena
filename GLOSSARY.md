@@ -37,6 +37,12 @@ Home Assistant) ou côté client (shell, URL). Chaque Tool appartient à un plug
 noyau.
 _Avoid_: Function, capability, skill
 
+**Tool du noyau**:
+Un Tool exécuté par le serveur lui-même, indépendant de tout plugin (ex. mémoire, fin de
+Session). Gemini l'appelle comme un autre Tool, mais son exécution ne sort jamais du
+serveur et ne touche pas le protocole client.
+_Avoid_: tool interne, tool intégré, tool système
+
 **Wake word**:
 Le mot déclencheur ("athena") qui active une Session, détecté localement par le Client.
 _Avoid_: Trigger word, hotword, activation word
@@ -174,7 +180,7 @@ peut pas être désactivée.
 **Journal (mémoire court terme)**:
 Buffer brut des derniers jours mêlant les échanges des Sessions et les Événements
 qu'Athena a annoncés — jamais ceux qu'elle a tus. Recherche sémantique, fenêtre glissante.
-Consolidé chaque nuit dans la mémoire long terme, à l'exclusion des Événements annoncés.
+Consolidé régulièrement dans la mémoire long terme, à l'exclusion des Événements annoncés.
 _Avoid_: Buffer, transcript, mémoire chaude, mémoire temporaire
 
 **Mémoire long terme**:

@@ -49,12 +49,15 @@ def test_cli_reports_invalid_configuration_early(
     assert "port" in capsys.readouterr().err.lower()
 
 
-def test_python_m_server_starts_and_shuts_down_cleanly_on_sigint() -> None:
+def test_python_m_server_starts_and_shuts_down_cleanly_on_sigint(
+    tmp_path: Path,
+) -> None:
     env = {
         **os.environ,
         "GEMINI_API_KEY": "test-key",
         "WS_HOST": "127.0.0.1",
         "WS_PORT": str(_free_port()),
+        "ATHENA_MEMORY_DB": str(tmp_path / "memory.db"),
     }
     process = subprocess.Popen(
         [sys.executable, "-m", "server"],
@@ -74,7 +77,9 @@ def test_python_m_server_starts_and_shuts_down_cleanly_on_sigint() -> None:
     reader = threading.Thread(target=_drain, daemon=True)
     reader.start()
     try:
-        deadline = time.monotonic() + 5.0
+        # Startup now warms the local embedding model before announcing
+        # "started" (T2 memory), so allow a generous readiness budget.
+        deadline = time.monotonic() + 30.0
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 break

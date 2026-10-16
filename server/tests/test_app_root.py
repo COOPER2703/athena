@@ -17,6 +17,8 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
+    SendMemoryToLlm,
+    SendToolResultToLlm,
     StartIdleTimer,
 )
 from server.core.events import (
@@ -25,9 +27,15 @@ from server.core.events import (
     Event,
     LlmAudio,
     LlmOpened,
+    LlmToolCall,
+    LlmTranscription,
+    Role,
     SessionRequested,
     TimerFired,
 )
+from server.core.ports import MemoryHit
+from server.core.tools import ToolRegistry
+from server.core.memory_tools import register_memory_tools
 
 _CommandT = TypeVar("_CommandT", bound=Command)
 
@@ -38,6 +46,7 @@ class FakeAdapter:
     def __init__(self) -> None:
         self.events: asyncio.Queue[Event] = asyncio.Queue()
         self.commands: list[Command] = []
+        self.tool_results: list[tuple[str, str, str, object]] = []
         self.started = False
         self.stopped = False
 
@@ -52,6 +61,15 @@ class FakeAdapter:
 
     async def execute(self, command: Command) -> None:
         self.commands.append(command)
+        if isinstance(command, SendToolResultToLlm):
+            self.tool_results.append(
+                (command.connection_id, command.tool_id, command.name, command.result)
+            )
+
+    async def send_tool_result(
+        self, connection_id: str, tool_id: str, name: str, result: object
+    ) -> None:
+        self.tool_results.append((connection_id, tool_id, name, result))
 
     async def feed(self, event: Event) -> None:
         await self.events.put(event)
@@ -83,13 +101,55 @@ class FakeClock:
         self.closed = True
 
 
-def _build() -> tuple[FakeAdapter, FakeAdapter, FakeClock, RecordingTraceSink, App]:
+class FakeMemory:
+    def __init__(self, hits: list[MemoryHit] | None = None) -> None:
+        self._hits = list(hits or [])
+        self.turns: list[tuple[str, str]] = []
+        self.queries: list[str] = []
+        self.saved: list[tuple[str, str, bool]] = []
+        self.forgotten: list[str] = []
+        self._pinned: list[str] = []
+
+    async def session_context(self, user_id: str) -> str:
+        return "\n".join(self._pinned)
+
+    async def pinned_facts(self, user_id: str) -> list[str]:
+        return list(self._pinned)
+
+    async def append_turn(self, user_id: str, role: str, text: str) -> None:
+        self.turns.append((role, text))
+
+    async def recall(self, user_id: str, query: str) -> list[MemoryHit]:
+        self.queries.append(query)
+        return list(self._hits)
+
+    async def save(self, user_id: str, content: str, *, pinned: bool) -> None:
+        self.saved.append((user_id, content, pinned))
+        if pinned:
+            self._pinned.append(content)
+
+    async def forget(self, user_id: str, query: str, max_distance: float) -> bool:
+        self.forgotten.append(query)
+        for index, content in enumerate(self._pinned):
+            if query in content:
+                del self._pinned[index]
+                return True
+        return False
+
+
+def _build(memory=None, tools=None) -> tuple[FakeAdapter, FakeAdapter, FakeClock, RecordingTraceSink, App]:
     transport = FakeAdapter()
     gemini = FakeAdapter()
     clock = FakeClock()
     sink = RecordingTraceSink()
     app = App(
-        transport=transport, gemini=gemini, clock=clock, trace_sink=sink
+        transport=transport,
+        gemini=gemini,
+        clock=clock,
+        trace_sink=sink,
+        memory=memory,
+        user_id="alice",
+        tools=tools,
     )
     return transport, gemini, clock, sink, app
 
@@ -147,6 +207,66 @@ def test_client_audio_during_a_live_session_goes_to_the_llm() -> None:
             await transport.feed(ClientAudio(data=b"mic"))
             await wait_until(lambda: gemini.of_type(SendAudioToLlm))
             assert gemini.of_type(SendAudioToLlm)[0].data == b"mic"
+
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+        finally:
+            if not runner.done():
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_user_utterance_routes_recall_injection_to_the_llm() -> None:
+    async def scenario() -> None:
+        memory = FakeMemory(hits=[MemoryHit("bleu", 0.2, "journal")])
+        transport, gemini, clock, sink, app = _build(memory)
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: transport.started)
+            await transport.feed(SessionRequested(client_id="c1"))
+            await gemini.feed(LlmOpened())
+
+            await gemini.feed(LlmTranscription(role=Role.USER, text="salut"))
+
+            await wait_until(lambda: gemini.of_type(SendMemoryToLlm))
+            command = gemini.of_type(SendMemoryToLlm)[0]
+            assert command.text == "[MÉMOIRE]\n- bleu"
+            assert memory.turns == [("user", "salut")]
+            assert memory.queries == ["salut"]
+
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+        finally:
+            if not runner.done():
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_tool_result_is_routed_to_gemini_send_tool_result() -> None:
+    async def scenario() -> None:
+        transport, gemini, clock, sink, app = _build()
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: transport.started)
+            await transport.feed(ClientRegistered(client_id="c1"))
+            await transport.feed(SessionRequested(client_id="c1"))
+            await wait_until(lambda: gemini.of_type(OpenLiveConnection))
+            connection_id = gemini.of_type(OpenLiveConnection)[0].connection_id
+            await gemini.feed(LlmOpened())
+
+            await gemini.feed(
+                LlmToolCall(tool_id="t1", name="echo", arguments={"value": "x"})
+            )
+            await wait_until(lambda: gemini.tool_results)
+
+            routed_connection, tool_id, name, _ = gemini.tool_results[0]
+            assert routed_connection == connection_id
+            assert tool_id == "t1"
+            assert name == "echo"
 
             app.request_shutdown()
             await asyncio.wait_for(runner, 1.0)
@@ -297,3 +417,52 @@ def test_build_app_installs_logging_bridge_debug_only_when_flag_on() -> None:
     finally:
         root.handlers[:] = original_handlers
         root.setLevel(original_level)
+
+
+def test_build_app_wires_the_kernel_memory_tools() -> None:
+    app = build_app(AppConfig(gemini=GeminiConfig(api_key="test-key")))
+
+    assert app.tools is not None
+    assert {spec.name for spec in app.tools.specs()} == {"save_memory", "forget_memory"}
+
+
+def test_save_memory_tool_call_reaches_the_store_and_the_model() -> None:
+    async def scenario() -> None:
+        memory = FakeMemory()
+        registry = ToolRegistry()
+        register_memory_tools(registry, memory, "alice")
+        transport, gemini, clock, sink, app = _build(memory, tools=registry)
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: transport.started)
+            await transport.feed(SessionRequested(client_id="c1"))
+            await wait_until(lambda: gemini.of_type(OpenLiveConnection))
+            opened = gemini.of_type(OpenLiveConnection)[0]
+            assert {spec.name for spec in opened.tools} == {
+                "save_memory",
+                "forget_memory",
+            }
+            await gemini.feed(LlmOpened())
+
+            await gemini.feed(
+                LlmToolCall(
+                    tool_id="t1",
+                    name="save_memory",
+                    arguments={"content": "aime le bleu", "kind": "profile"},
+                )
+            )
+            await wait_until(lambda: gemini.tool_results)
+
+            assert memory.saved == [("alice", "aime le bleu", True)]
+            _, tool_id, name, result = gemini.tool_results[0]
+            assert (tool_id, name) == ("t1", "save_memory")
+            assert result["status"] == "ok"
+
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+        finally:
+            if not runner.done():
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(scenario())

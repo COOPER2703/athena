@@ -7,8 +7,17 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
+    SendMemoryToLlm,
+    SendToolResultToLlm,
     StartIdleTimer,
     Trace,
+)
+from server.core.consolidation import (
+    Consolidation,
+    ConsolidationPolicy,
+    ConsolidationReport,
+    ConsolidationScheduler,
+    local_now,
 )
 from server.core.coordinator import Coordinator, IDLE_TIMEOUT
 from server.core.events import (
@@ -23,14 +32,29 @@ from server.core.events import (
     LlmFailed,
     LlmFailureCause,
     LlmOpened,
+    LlmToolCall,
     LlmTranscription,
     Role,
     SessionRequested,
     ShutdownRequested,
     TimerFired,
 )
-from server.core.ports import ClientLink, Clock, LlmSocket, TraceEntry, TraceSink
+from server.core.memory_tools import register_memory_tools
+from server.core.ports import (
+    ClientLink,
+    Clock,
+    Embedder,
+    FactExtractor,
+    JournalEntry,
+    LlmSocket,
+    MemoryHit,
+    MemoryStore,
+    ToolSpec,
+    TraceEntry,
+    TraceSink,
+)
 from server.core.state import SessionState
+from server.core.tools import ToolHandler, ToolRegistry
 
 __all__ = [
     "AnnounceSessionEnded",
@@ -45,26 +69,43 @@ __all__ = [
     "Clock",
     "CloseLiveConnection",
     "Command",
+    "Consolidation",
+    "ConsolidationPolicy",
+    "ConsolidationReport",
+    "ConsolidationScheduler",
     "Coordinator",
+    "Embedder",
     "Event",
+    "FactExtractor",
     "IDLE_TIMEOUT",
+    "JournalEntry",
     "LlmAudio",
     "LlmClosed",
     "LlmFailed",
     "LlmFailureCause",
     "LlmOpened",
     "LlmSocket",
+    "LlmToolCall",
     "LlmTranscription",
+    "MemoryHit",
+    "MemoryStore",
     "OpenLiveConnection",
     "Role",
     "SendAudioToClient",
     "SendAudioToLlm",
+    "SendMemoryToLlm",
+    "SendToolResultToLlm",
     "SessionRequested",
     "SessionState",
     "ShutdownRequested",
     "StartIdleTimer",
     "TimerFired",
+    "ToolHandler",
+    "ToolRegistry",
+    "ToolSpec",
     "Trace",
     "TraceEntry",
     "TraceSink",
+    "local_now",
+    "register_memory_tools",
 ]

@@ -12,6 +12,8 @@ from server.core.commands import (
     CloseLiveConnection,
     OpenLiveConnection,
     SendAudioToLlm,
+    SendMemoryToLlm,
+    SendToolResultToLlm,
     StartIdleTimer,
     Trace,
 )
@@ -21,9 +23,11 @@ from server.core.events import (
     LlmFailed,
     LlmFailureCause,
     LlmOpened,
+    LlmToolCall,
     LlmTranscription,
     Role,
 )
+from server.core.ports import ToolSpec
 
 
 class FakeSession:
@@ -37,9 +41,17 @@ class FakeSession:
         self._receive_error = receive_error
         self._block = block
         self.sent_realtime: list[Any] = []
+        self.sent_client_content: list[Any] = []
+        self.sent_tool_responses: list[Any] = []
 
     async def send_realtime_input(self, **kwargs: Any) -> None:
         self.sent_realtime.append(kwargs)
+
+    async def send_client_content(self, **kwargs: Any) -> None:
+        self.sent_client_content.append(kwargs)
+
+    async def send_tool_response(self, **kwargs: Any) -> None:
+        self.sent_tool_responses.append(kwargs)
 
     async def receive(self) -> Any:
         if self._block:
@@ -61,9 +73,17 @@ class PerTurnSession:
     def __init__(self, turns: list[list[Any]]) -> None:
         self._turns = list(turns)
         self.sent_realtime: list[Any] = []
+        self.sent_client_content: list[Any] = []
+        self.sent_tool_responses: list[Any] = []
 
     async def send_realtime_input(self, **kwargs: Any) -> None:
         self.sent_realtime.append(kwargs)
+
+    async def send_client_content(self, **kwargs: Any) -> None:
+        self.sent_client_content.append(kwargs)
+
+    async def send_tool_response(self, **kwargs: Any) -> None:
+        self.sent_tool_responses.append(kwargs)
 
     async def receive(self) -> Any:
         if not self._turns:
@@ -149,7 +169,160 @@ def test_open_emits_opened_and_hands_config_to_the_live_connect() -> None:
     asyncio.run(scenario())
 
 
-def test_maps_audio_transcriptions_and_ignores_tool_call() -> None:
+def test_open_forwards_the_system_instruction_to_the_live_config() -> None:
+    async def scenario() -> None:
+        live_connect = FakeLiveConnect(session=FakeSession())
+        adapter = _adapter(live_connect)
+
+        await adapter.open("s1", "RÈGLES DU NOYAU")
+
+        _, config = live_connect.calls[0]
+        assert config.system_instruction.parts[0].text == "RÈGLES DU NOYAU"
+
+    asyncio.run(scenario())
+
+
+def test_open_without_instruction_leaves_the_system_instruction_empty() -> None:
+    async def scenario() -> None:
+        live_connect = FakeLiveConnect(session=FakeSession())
+        adapter = _adapter(live_connect)
+
+        await adapter.open("s1")
+
+        _, config = live_connect.calls[0]
+        assert config.system_instruction is None
+
+    asyncio.run(scenario())
+
+
+def test_open_puts_tool_declarations_into_the_live_config() -> None:
+    async def scenario() -> None:
+        live_connect = FakeLiveConnect(session=FakeSession(block=True))
+        adapter = _adapter(live_connect)
+        spec = ToolSpec(
+            name="save_memory",
+            description="mémorise un fait",
+            parameters={
+                "type": "object",
+                "properties": {"content": {"type": "string"}},
+            },
+        )
+
+        await adapter.open("s1", tools=(spec,))
+
+        _, config = live_connect.calls[0]
+        declarations = config.tools[0].function_declarations
+        assert declarations[0].name == "save_memory"
+        assert declarations[0].description == "mémorise un fait"
+        assert declarations[0].parameters_json_schema == {
+            "type": "object",
+            "properties": {"content": {"type": "string"}},
+        }
+
+    asyncio.run(scenario())
+
+
+def test_open_without_tools_omits_the_declaration_list() -> None:
+    async def scenario() -> None:
+        live_connect = FakeLiveConnect(session=FakeSession())
+        adapter = _adapter(live_connect)
+
+        await adapter.open("s1")
+
+        _, config = live_connect.calls[0]
+        assert not config.tools
+
+    asyncio.run(scenario())
+
+
+def test_tool_call_response_is_translated_into_an_llm_tool_call() -> None:
+    async def scenario() -> None:
+        function_call = SimpleNamespace(
+            id="1", name="save_memory", args={"content": "x", "kind": "profile"}
+        )
+        responses = [
+            SimpleNamespace(tool_call=SimpleNamespace(function_calls=[function_call]))
+        ]
+        live_connect = FakeLiveConnect(session=FakeSession(responses=responses))
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmToolCall(
+            tool_id="1",
+            name="save_memory",
+            arguments={"content": "x", "kind": "profile"},
+        )
+
+    asyncio.run(scenario())
+
+
+def test_send_tool_result_forwards_a_function_response_with_the_echoed_id() -> None:
+    async def scenario() -> None:
+        session = FakeSession(block=True)
+        live_connect = FakeLiveConnect(session=session)
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        await adapter.send_tool_result("s1", "1", "save_memory", {"status": "ok"})
+
+        assert len(session.sent_tool_responses) == 1
+        response = session.sent_tool_responses[0]["function_responses"]
+        assert response.id == "1"
+        assert response.name == "save_memory"
+        assert response.response == {"status": "ok"}
+
+        await adapter.execute(CloseLiveConnection(connection_id="s1"))
+
+    asyncio.run(scenario())
+
+
+def test_execute_routes_send_tool_result_through_the_uniform_seam() -> None:
+    async def scenario() -> None:
+        session = FakeSession(block=True)
+        live_connect = FakeLiveConnect(session=session)
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        await adapter.execute(
+            SendToolResultToLlm(
+                connection_id="s1",
+                tool_id="1",
+                name="save_memory",
+                result={"status": "ok"},
+            )
+        )
+
+        assert len(session.sent_tool_responses) == 1
+        response = session.sent_tool_responses[0]["function_responses"]
+        assert response.id == "1"
+        assert response.name == "save_memory"
+        assert response.response == {"status": "ok"}
+
+        await adapter.execute(CloseLiveConnection(connection_id="s1"))
+
+    asyncio.run(scenario())
+
+
+def test_send_tool_result_without_open_connection_is_ignored() -> None:
+    async def scenario() -> None:
+        live_connect = FakeLiveConnect(session=FakeSession())
+        adapter = _adapter(live_connect)
+
+        await adapter.send_tool_result("s1", "1", "echo", {})
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(adapter.recv(), 0.05)
+
+    asyncio.run(scenario())
+
+
+def test_maps_audio_transcriptions_and_traces_tool_calls() -> None:
     async def scenario() -> None:
         responses = [
             SimpleNamespace(data=b"\x10\x20"),
@@ -187,7 +360,7 @@ def test_maps_audio_transcriptions_and_ignores_tool_call() -> None:
         assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmTranscription(
             text="salut", role=Role.ASSISTANT
         )
-        assert sink.of_kind("tool_call_ignored")
+        assert sink.of_kind("tool_call")
 
     asyncio.run(scenario())
 
@@ -410,6 +583,80 @@ def test_send_audio_after_terminal_event_is_ignored() -> None:
         await adapter.execute(SendAudioToLlm(connection_id="s1", data=b"\xaa\xbb"))
 
         assert session.sent_realtime == []
+
+    asyncio.run(scenario())
+
+
+def test_send_memory_injects_the_memoire_block_without_completing_the_turn() -> None:
+    async def scenario() -> None:
+        session = FakeSession(block=True)
+        live_connect = FakeLiveConnect(session=session)
+        sink = RecordingTraceSink()
+        adapter = GeminiLiveAdapter(
+            api_key="test-key",
+            model="gemini-live",
+            voice="Aoede",
+            live_connect=live_connect,
+            trace_sink=sink,
+        )
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        await adapter.execute(
+            SendMemoryToLlm(connection_id="s1", text="[MÉMOIRE]\n- bleu")
+        )
+
+        assert len(session.sent_client_content) == 1
+        call = session.sent_client_content[0]
+        assert call["turns"].role == "user"
+        assert call["turns"].parts[0].text == "[MÉMOIRE]\n- bleu"
+        assert call["turn_complete"] is False
+        assert sink.of_kind("memory_injected")
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(adapter.recv(), 0.05)
+
+    asyncio.run(scenario())
+
+
+def test_send_memory_without_open_connection_is_ignored() -> None:
+    async def scenario() -> None:
+        live_connect = FakeLiveConnect(session=FakeSession())
+        sink = RecordingTraceSink()
+        adapter = GeminiLiveAdapter(
+            api_key="test-key",
+            model="gemini-live",
+            voice="Aoede",
+            live_connect=live_connect,
+            trace_sink=sink,
+        )
+
+        await adapter.execute(SendMemoryToLlm(connection_id="s1", text="x"))
+
+        assert sink.of_kind("send_memory_ignored")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(adapter.recv(), 0.05)
+
+    asyncio.run(scenario())
+
+
+def test_send_memory_after_terminal_event_is_ignored() -> None:
+    async def scenario() -> None:
+        responses = [SimpleNamespace(go_away=SimpleNamespace(time_left="1s"))]
+        session = FakeSession(responses=responses)
+        live_connect = FakeLiveConnect(session=session)
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmFailed(
+            cause=LlmFailureCause.GO_AWAY, connection_id="s1"
+        )
+
+        await adapter.execute(SendMemoryToLlm(connection_id="s1", text="x"))
+
+        assert session.sent_client_content == []
 
     asyncio.run(scenario())
 

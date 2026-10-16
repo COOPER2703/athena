@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import io
 import logging
 from pathlib import Path
@@ -98,7 +99,9 @@ def test_debug_decisions_gates_a_real_decision_entry_end_to_end() -> None:
 
     decision = next(
         command
-        for command in Coordinator().handle(ClientRegistered(client_id="c1"))
+        for command in asyncio.run(
+            Coordinator().handle(ClientRegistered(client_id="c1"))
+        )
         if isinstance(command, Trace)
     )
     for sink in (off_sink, on_sink):
@@ -156,7 +159,7 @@ def test_session_transition_is_traced_in_order_with_core_source() -> None:
         ShutdownRequested(),
     ]
     for event in events:
-        for command in coordinator.handle(event):
+        for command in asyncio.run(coordinator.handle(event)):
             if isinstance(command, Trace):
                 emit(
                     sink,
@@ -168,6 +171,7 @@ def test_session_transition_is_traced_in_order_with_core_source() -> None:
 
     assert [entry.kind for entry in sink.entries] == [
         "SessionRequested",
+        "Activation",
         "LlmOpened",
         "LlmTranscription",
         "Shutdown",

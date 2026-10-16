@@ -7,10 +7,13 @@ from typing import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from server.adapters.memory.embedder import DEFAULT_EMBED_MODEL
 from server.app.secrets import EnvSecretResolver, SecretResolver
 
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-live-preview"
 DEFAULT_GEMINI_VOICE = "Zephyr"
+DEFAULT_MEMORY_DB = "athena_memory.db"
+DEFAULT_CONSOLIDATION_MODEL = "gemini-2.0-flash"
 
 
 class LogLevel(StrEnum):
@@ -42,6 +45,61 @@ class GeminiConfig(BaseModel):
     voice: str = DEFAULT_GEMINI_VOICE
 
 
+class MemoryConfig(BaseModel):
+    """Paramètres de la mémoire (Journal, mémoire long terme, embeddings).
+
+    #26 définit le modèle figé complet pour que les tickets suivants
+    (#27 Rappel, #29 Mémorisation explicite, #30 Consolidation) n'aient plus à
+    le modifier.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    user_id: str = Field(default="owner", min_length=1)
+    db_path: str = Field(default=DEFAULT_MEMORY_DB, min_length=1)
+    short_term_window: int = Field(default=20, ge=1)
+    recent_events_window: int = Field(default=20, ge=1)
+    recall_k: int = Field(default=5, ge=1)
+    recall_window_turns: int = Field(default=3, ge=1)
+    recall_max_distance: float = Field(default=0.6, ge=0.0, le=2.0)
+    dedup_threshold: float = Field(default=0.15, ge=0.0, le=2.0)
+    journal_retention_days: int = Field(default=3, ge=1)
+    embed_model: str = Field(default=DEFAULT_EMBED_MODEL, min_length=1)
+    consolidation_model: str = Field(
+        default=DEFAULT_CONSOLIDATION_MODEL, min_length=1
+    )
+    consolidation_hours: tuple[int, ...] = (0, 12)
+
+    @field_validator(
+        "user_id", "db_path", "embed_model", "consolidation_model", mode="before"
+    )
+    @classmethod
+    def _strip_non_empty(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("consolidation_hours", mode="before")
+    @classmethod
+    def _parse_hours(cls, value: object) -> object:
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.split(",") if part.strip()]
+            return [int(part) for part in parts]
+        return value
+
+    @field_validator("consolidation_hours")
+    @classmethod
+    def _check_hours(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        if not value:
+            raise ValueError("ATHENA_CONSOLIDATION_HOURS must list at least one hour")
+        for hour in value:
+            if not 0 <= hour <= 23:
+                raise ValueError(
+                    f"ATHENA_CONSOLIDATION_HOURS hours must be in [0, 23], got {hour}"
+                )
+        return value
+
+
 class AppConfig(BaseModel):
     """Configuration validée au démarrage, injectée par constructeur."""
 
@@ -49,6 +107,7 @@ class AppConfig(BaseModel):
 
     server: ServerConfig = Field(default_factory=ServerConfig)
     gemini: GeminiConfig
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     log_level: LogLevel = LogLevel.INFO
     debug_decisions: bool = False
 
@@ -127,6 +186,22 @@ def load_config(
             api_key=api_key,
             model=merged.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
             voice=merged.get("GEMINI_VOICE", DEFAULT_GEMINI_VOICE),
+        ),
+        memory=MemoryConfig(
+            user_id=merged.get("ATHENA_USER_ID", "owner"),
+            db_path=merged.get("ATHENA_MEMORY_DB", DEFAULT_MEMORY_DB),
+            short_term_window=merged.get("ATHENA_SHORT_TERM_WINDOW", "20"),
+            recent_events_window=merged.get("ATHENA_RECENT_EVENTS_WINDOW", "20"),
+            recall_k=merged.get("ATHENA_RECALL_K", "5"),
+            recall_window_turns=merged.get("ATHENA_RECALL_WINDOW_TURNS", "3"),
+            recall_max_distance=merged.get("ATHENA_RECALL_MAX_DISTANCE", "0.6"),
+            dedup_threshold=merged.get("ATHENA_DEDUP_THRESHOLD", "0.15"),
+            journal_retention_days=merged.get("ATHENA_JOURNAL_RETENTION_DAYS", "3"),
+            embed_model=merged.get("ATHENA_EMBED_MODEL", DEFAULT_EMBED_MODEL),
+            consolidation_model=merged.get(
+                "ATHENA_CONSOLIDATION_MODEL", DEFAULT_CONSOLIDATION_MODEL
+            ),
+            consolidation_hours=merged.get("ATHENA_CONSOLIDATION_HOURS", "0,12"),
         ),
         log_level=merged.get("LOG_LEVEL", "INFO"),
         debug_decisions=merged.get("ATHENA_DEBUG_DECISIONS", "0"),

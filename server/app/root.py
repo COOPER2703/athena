@@ -1,14 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Awaitable, Callable, Mapping
 
 from server.adapters.gemini import GeminiLiveAdapter
+from server.adapters.memory import (
+    GeminiFactExtractor,
+    SentenceTransformerEmbedder,
+    SqliteMemoryStore,
+)
 from server.adapters.trace import emit
 from server.adapters.transport import WebSocketTransport
 from server.app.clock import AsyncioClock
 from server.app.config import AppConfig
 from server.app.trace import build_trace_sink, install_logging_bridge
+from server.core.consolidation import (
+    Consolidation,
+    ConsolidationPolicy,
+    ConsolidationReport,
+    ConsolidationScheduler,
+    local_now,
+)
 from server.core.commands import (
     AnnounceSessionEnded,
     AnnounceSessionStarted,
@@ -18,14 +31,51 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
+    SendMemoryToLlm,
+    SendToolResultToLlm,
     StartIdleTimer,
     Trace,
 )
 from server.core.coordinator import Coordinator
 from server.core.events import Event, ShutdownRequested
-from server.core.ports import TraceSink
+from server.core.memory_tools import register_memory_tools
+from server.core.ports import MemoryStore, TraceSink
+from server.core.tools import ToolRegistry
 
 _TRACE_SOURCE = "app"
+_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent.parent / "system-prompt.txt"
+
+
+def load_system_prompt(path: str | Path | None = None) -> str:
+    """Read the versioned generic system prompt injected into the kernel."""
+    return Path(path or _SYSTEM_PROMPT_PATH).read_text(encoding="utf-8")
+
+
+def _trace_consolidation(
+    trace_sink: TraceSink, report: ConsolidationReport
+) -> None:
+    """Émet la décision de Consolidation dans le flux unique (ADR-0004)."""
+    emit(
+        trace_sink,
+        "consolidation",
+        "Consolidation",
+        payload={
+            "facts_extracted": report.facts_extracted,
+            "facts_stored": report.facts_stored,
+            "duplicates": report.duplicates,
+        },
+    )
+    emit(
+        trace_sink,
+        "consolidation",
+        "ConsolidationDetail",
+        payload={
+            "since": report.since.isoformat() if report.since else None,
+            "purged": report.purged,
+            "transcript_chars": report.transcript_chars,
+        },
+        level="debug",
+    )
 
 
 class App:
@@ -44,16 +94,44 @@ class App:
         gemini: GeminiLiveAdapter,
         clock: AsyncioClock,
         trace_sink: TraceSink,
+        memory: MemoryStore | None = None,
+        user_id: str = "owner",
+        system_prompt: str = "",
+        tools: ToolRegistry | None = None,
+        recall_k: int = 5,
+        recall_window_turns: int = 3,
+        recall_max_distance: float = 0.6,
+        scheduler: ConsolidationScheduler | None = None,
     ) -> None:
         self._transport = transport
         self._gemini = gemini
         self._clock = clock
         self._trace_sink = trace_sink
-        self._coordinator = Coordinator()
+        self._memory = memory
+        self._scheduler = scheduler
+        self._tools = tools
+        self._coordinator = Coordinator(
+            memory=memory,
+            user_id=user_id,
+            system_prompt=system_prompt,
+            tools=tools,
+            recall_k=recall_k,
+            recall_window_turns=recall_window_turns,
+            recall_max_distance=recall_max_distance,
+        )
         self._events: asyncio.Queue[Event] = asyncio.Queue()
+
+    @property
+    def scheduler(self) -> ConsolidationScheduler | None:
+        return self._scheduler
+
+    @property
+    def tools(self) -> ToolRegistry | None:
+        return self._tools
 
     async def run(self) -> None:
         """Démarre les adaptateurs puis traite les Événements jusqu'à l'arrêt."""
+        await self._warmup_memory()
         await self._transport.start()
         self._emit("started", payload={"state": self._coordinator.state.value})
 
@@ -62,6 +140,9 @@ class App:
             asyncio.create_task(self._pump(self._gemini.recv)),
             asyncio.create_task(self._pump(self._clock.recv)),
         ]
+        if self._scheduler is not None:
+            # Background task: never on the event-handling path (ADR-0009).
+            pumps.append(asyncio.create_task(self._scheduler.run()))
         try:
             await self._core_loop()
         finally:
@@ -71,6 +152,11 @@ class App:
             await self._transport.stop()
             self._clock.close()
             self._emit("stopped")
+
+    async def _warmup_memory(self) -> None:
+        warmup = getattr(self._memory, "warmup", None)
+        if warmup is not None:
+            await warmup()
 
     def request_shutdown(self) -> None:
         """Dépose ``ShutdownRequested`` dans le flux, appelable depuis un signal."""
@@ -83,7 +169,7 @@ class App:
     async def _core_loop(self) -> None:
         while True:
             event = await self._events.get()
-            for command in self._coordinator.handle(event):
+            for command in await self._coordinator.handle(event):
                 await self._dispatch(command)
             if isinstance(event, ShutdownRequested):
                 return
@@ -99,7 +185,14 @@ class App:
             )
             return
         if isinstance(
-            command, (OpenLiveConnection, CloseLiveConnection, SendAudioToLlm)
+            command,
+            (
+                OpenLiveConnection,
+                CloseLiveConnection,
+                SendAudioToLlm,
+                SendMemoryToLlm,
+                SendToolResultToLlm,
+            ),
         ):
             await self._gemini.execute(command)
             return
@@ -146,9 +239,56 @@ def build_app(config: AppConfig) -> App:
     )
     clock = AsyncioClock()
 
+    embedder = SentenceTransformerEmbedder(config.memory.embed_model)
+    memory = SqliteMemoryStore(
+        db_path=config.memory.db_path,
+        embedder=embedder,
+        short_term_window=config.memory.short_term_window,
+        recent_events_window=config.memory.recent_events_window,
+        journal_retention_days=config.memory.journal_retention_days,
+    )
+
+    extractor = GeminiFactExtractor(
+        api_key=config.gemini.api_key,
+        model=config.memory.consolidation_model,
+        trace_sink=trace_sink,
+    )
+    policy = ConsolidationPolicy(config.memory.consolidation_hours)
+    consolidation = Consolidation(
+        memory=memory,
+        extractor=extractor,
+        policy=policy,
+        user_id=config.memory.user_id,
+        dedup_threshold=config.memory.dedup_threshold,
+        journal_retention_days=config.memory.journal_retention_days,
+    )
+    scheduler = ConsolidationScheduler(
+        consolidation=consolidation,
+        policy=policy,
+        now=local_now,
+        sleep=asyncio.sleep,
+        on_run=lambda report: _trace_consolidation(trace_sink, report),
+    )
+
+    tools = ToolRegistry()
+    register_memory_tools(
+        tools,
+        memory,
+        config.memory.user_id,
+        forget_max_distance=config.memory.recall_max_distance,
+    )
+
     return App(
         transport=transport,
         gemini=gemini,
         clock=clock,
         trace_sink=trace_sink,
+        memory=memory,
+        user_id=config.memory.user_id,
+        system_prompt=load_system_prompt(),
+        tools=tools,
+        recall_k=config.memory.recall_k,
+        recall_window_turns=config.memory.recall_window_turns,
+        recall_max_distance=config.memory.recall_max_distance,
+        scheduler=scheduler,
     )
