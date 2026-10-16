@@ -11,7 +11,7 @@ from server.core.commands import (
     Command,
     OpenLiveConnection,
     SendAudioToLlm,
-    SendJudgeBatchToLlm,
+    SendAnnouncementToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
     Trace,
@@ -98,8 +98,8 @@ class GeminiLiveAdapter:
         if isinstance(command, SendMemoryToLlm):
             await self.send_memory(command.connection_id, command.text)
             return
-        if isinstance(command, SendJudgeBatchToLlm):
-            await self.send_judge_batch(command.connection_id, command.text)
+        if isinstance(command, SendAnnouncementToLlm):
+            await self.send_announcement(command.connection_id, command.text)
             return
         if isinstance(command, SendToolResultToLlm):
             await self.send_tool_result(
@@ -268,21 +268,21 @@ class GeminiLiveAdapter:
             sent_kind="memory_injected",
         )
 
-    async def send_judge_batch(self, connection_id: str, text: str) -> None:
-        """Transmet le lot d'Événements comme contenu de tour au jugement.
+    async def send_announcement(self, connection_id: str, text: str) -> None:
+        """Fait prononcer au modèle Live une Annonce proactive.
 
-        Commande distincte de l'injection de mémoire (ADR-0007) : le lot complète
-        le tour (``turn_complete=True``) pour que le modèle puisse parler s'il
-        juge le fait digne d'une Annonce. Le verdict reste reconnu par timeout,
-        jamais par un signal de fin de tour Gemini. Le jugement est best effort :
-        un envoi raté ne lève jamais.
+        Commande distincte de l'injection de mémoire (ADR-0007, amendé) : le
+        verdict (parler ou se taire) vient du jugement **texte**, cette commande
+        ne fait que donner la parole à l'Annonce. Le tour est complété
+        (``turn_complete=True``) pour que le modèle parle. Best effort : un envoi
+        raté ne lève jamais.
         """
         await self._send_client_content(
             connection_id,
             text,
             turn_complete=True,
-            kind="judge_batch",
-            sent_kind="judge_batch_sent",
+            kind="announcement",
+            sent_kind="announcement_sent",
         )
 
     async def _send_client_content(

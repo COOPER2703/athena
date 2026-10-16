@@ -33,11 +33,12 @@ class SendMemoryToLlm:
 
 
 @dataclass(frozen=True, slots=True)
-class SendJudgeBatchToLlm:
-    """Envoie un lot d'Événements à la Connexion Live de jugement.
+class SendAnnouncementToLlm:
+    """Fait prononcer au modèle Live une Annonce proactive (ADR-0007, amendé).
 
-    Commande distincte de l'injection de mémoire (ADR-0007) : le lot est
-    transmis comme contenu de tour, jamais comme rappel mémoriel.
+    Le verdict (parler ou se taire) vient du jugement **texte** ; cette commande
+    ne sert qu'à faire parler la Connexion Live ouverte pour l'Annonce, jamais à
+    juger. Distincte de l'injection de mémoire.
     """
 
     connection_id: str
@@ -94,7 +95,7 @@ Command = Union[
     CloseLiveConnection,
     SendAudioToLlm,
     SendMemoryToLlm,
-    SendJudgeBatchToLlm,
+    SendAnnouncementToLlm,
     SendAudioToClient,
     SendToolResultToLlm,
     AnnounceSessionStarted,

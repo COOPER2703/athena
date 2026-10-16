@@ -12,8 +12,11 @@ from server.app.secrets import EnvSecretResolver, SecretResolver
 
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-live-preview"
 DEFAULT_GEMINI_VOICE = "Zephyr"
+DEFAULT_JUDGE_MODEL = "gemini-3.8-flash"
 DEFAULT_MEMORY_DB = "athena_memory.db"
-DEFAULT_CONSOLIDATION_MODEL = "gemini-2.0-flash"
+# Modèle de Consolidation : Flash-Lite, disponible sur l'échelle gratuite. Le
+# précédent défaut (`gemini-2.0-flash`) a été retiré et renvoyait 404.
+DEFAULT_CONSOLIDATION_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_WEBHOOK_HOST = "127.0.0.1"
 DEFAULT_WEBHOOK_PORT = 8766
 
@@ -63,6 +66,7 @@ class GeminiConfig(BaseModel):
     api_key: str
     model: str = DEFAULT_GEMINI_MODEL
     voice: str = DEFAULT_GEMINI_VOICE
+    judge_model: str = Field(default=DEFAULT_JUDGE_MODEL, min_length=1)
 
 
 class MemoryConfig(BaseModel):
@@ -222,6 +226,7 @@ def load_config(
             api_key=api_key,
             model=merged.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
             voice=merged.get("GEMINI_VOICE", DEFAULT_GEMINI_VOICE),
+            judge_model=merged.get("GEMINI_JUDGE_MODEL", DEFAULT_JUDGE_MODEL),
         ),
         memory=MemoryConfig(
             user_id=merged.get("ATHENA_USER_ID", "owner"),

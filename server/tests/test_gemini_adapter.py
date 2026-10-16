@@ -12,7 +12,7 @@ from server.core.commands import (
     CloseLiveConnection,
     OpenLiveConnection,
     SendAudioToLlm,
-    SendJudgeBatchToLlm,
+    SendAnnouncementToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
     StartIdleTimer,
@@ -588,7 +588,7 @@ def test_send_audio_after_terminal_event_is_ignored() -> None:
     asyncio.run(scenario())
 
 
-def test_send_judge_batch_sends_the_batch_as_a_completed_turn() -> None:
+def test_send_announcement_sends_the_message_as_a_completed_turn() -> None:
     async def scenario() -> None:
         session = FakeSession(block=True)
         live_connect = FakeLiveConnect(session=session)
@@ -605,19 +605,19 @@ def test_send_judge_batch_sends_the_batch_as_a_completed_turn() -> None:
         assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
 
         await adapter.execute(
-            SendJudgeBatchToLlm(
-                connection_id="s1", text="[ÉVÉNEMENTS]\n- [matrix] porte"
+            SendAnnouncementToLlm(
+                connection_id="s1", text="La porte d'entrée vient de s'ouvrir."
             )
         )
 
         assert len(session.sent_client_content) == 1
         call = session.sent_client_content[0]
         assert call["turns"].role == "user"
-        assert call["turns"].parts[0].text == "[ÉVÉNEMENTS]\n- [matrix] porte"
-        # Verdict par timeout seul : le lot complète le tour pour que le modèle
-        # puisse parler ; rien d'autre n'est attendu du signal de fin de tour.
+        assert call["turns"].parts[0].text == "La porte d'entrée vient de s'ouvrir."
+        # Le tour est complété pour que le modèle prononce l'Annonce ; le verdict
+        # (parler ou se taire) vient du jugement texte, pas du signal de fin.
         assert call["turn_complete"] is True
-        assert sink.of_kind("judge_batch_sent")
+        assert sink.of_kind("announcement_sent")
 
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(adapter.recv(), 0.05)
@@ -625,7 +625,7 @@ def test_send_judge_batch_sends_the_batch_as_a_completed_turn() -> None:
     asyncio.run(scenario())
 
 
-def test_send_judge_batch_without_open_connection_is_ignored() -> None:
+def test_send_announcement_without_open_connection_is_ignored() -> None:
     async def scenario() -> None:
         live_connect = FakeLiveConnect(session=FakeSession())
         sink = RecordingTraceSink()
@@ -638,10 +638,10 @@ def test_send_judge_batch_without_open_connection_is_ignored() -> None:
         )
 
         await adapter.execute(
-            SendJudgeBatchToLlm(connection_id="s1", text="[ÉVÉNEMENTS]\n- [m] x")
+            SendAnnouncementToLlm(connection_id="s1", text="La porte s'ouvre.")
         )
 
-        assert sink.of_kind("send_judge_batch_ignored")
+        assert sink.of_kind("send_announcement_ignored")
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(adapter.recv(), 0.05)
 

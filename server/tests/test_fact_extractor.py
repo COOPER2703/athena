@@ -9,7 +9,7 @@ from server.adapters.memory import GeminiFactExtractor
 def _extractor(generate, **kwargs) -> GeminiFactExtractor:
     return GeminiFactExtractor(
         api_key="test-key",
-        model="gemini-2.0-flash",
+        model="gemini-3.1-flash-lite",
         generate=generate,
         **kwargs,
     )
@@ -34,7 +34,7 @@ def test_passes_the_configured_model_and_transcript_to_the_generator() -> None:
     _run(_extractor(generate), "[user] j'habite à Lyon")
 
     model, prompt = calls[0]
-    assert model == "gemini-2.0-flash"
+    assert model == "gemini-3.1-flash-lite"
     assert "j'habite à Lyon" in prompt
 
 

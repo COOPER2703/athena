@@ -78,13 +78,16 @@ Dans le terminal du serveur, cherchez (l'ordre est celui du Canal unique) :
 - `[webhook] event_received` — `source`, `chars` : le fait est entré ;
 - `[core] EventQueued` (debug) — mis en File ; `queued` = taille courante ;
 - `[core] EventWindowOpened` — **fenêtre paresseuse de 5 s** armée par ce premier fait ;
-- après l'échéance : `[core] EventJudge` (`events` = taille du lot), `[gemini] connected` —
-  **une seule** Connexion Live de jugement, sans Rappel ni Tools ;
+- après l'échéance : `[core] EventJudge` (`events` = taille du lot) puis
+  `[judge] judgment_done` (`announce`) — le verdict vient d'un **modèle texte** ;
+- si le verdict annonce (`announce=true`) : une **seule** Connexion Live d'Annonce
+  (sans Rappel ni Tools), `[gemini] connected` puis `announcement_sent` ; l'instruction
+  est celle de l'Annonce (`announce-prompt.txt`) et le message est celui du juge ;
 - si le LLM parle : `[core] LlmTranscription` puis `[core] AnnounceSessionStarted` avec
   `auto=true` — le Client reçoit une **Annonce proactive** et le fait entre au Journal en
   rôle `event` ;
-- s'il se tait : la Connexion Live est refermée au bout du **timeout de jugement** (plus court
-  que l'inactivité de Session) sans qu'aucune Session n'apparaisse.
+- si le verdict est `announce=false` : **aucune Connexion Live n'est ouverte** et le fait
+  tu n'entre pas au Journal (faute fermée si le jugement échoue).
 
 ## 5. Cas d'erreur
 
@@ -164,14 +167,25 @@ serveur réel `WS_PORT=8791 ATHENA_WEBHOOK_PORT=8792`, base mémoire temporaire,
 3. **Cas d'erreur** — tous les codes attendus, en conditions réelles :
    `400` (contenu vide), `415` (Content-Type), `404` (chemin `/nope`), `405` (`GET /events`).
 
-4. **Jugement réel au bout des 5 s** — une **seule** Connexion Live, instruction de jugement
-   dédiée, lot transmis, puis le LLM **parle** (il juge le fait digne d'une Annonce) :
+4. **Jugement réel au bout des 5 s** — le verdict vient du **modèle texte** ; un fait
+   important ouvre alors **une seule** Connexion Live d'Annonce, sans Rappel ni Tools :
 
    ```
-   INFO [gemini] connected {"connection_id": "s1", "model": "gemini-3.1-flash-live-preview", "voice": "Zephyr"}
-   INFO [gemini] judge_batch_sent {"chars": 57, "connection_id": "s1"}
-   INFO [core] EventJudge {"client_id": "", "connection_id": "s1", "events": 1, "from_state": "Idle", "to_state": "LiveConnecting"}
-   INFO [core] LlmAudio  {"connection_id": "s1", "from_state": "LiveActive", "to_state": "SessionVisible", ...}
+   INFO     [core] EventWindowOpened {"events": 1, ...}
+   DEBUG    [judge] judgment_done {"announce": true, "facts": 1}
+   INFO     [gemini] connected {"connection_id": "s1", "model": "gemini-3.1-flash-live-preview", "voice": "Zephyr"}
+   INFO     [gemini] announcement_sent {"chars": 36, "connection_id": "s1"}
+   INFO     [core] EventJudge {"announce": true, "connection_id": "s1", "events": 1, "from_state": "Idle", "to_state": "LiveConnecting"}
+   INFO     [core] LlmAudio  {"connection_id": "s1", "from_state": "LiveActive", "to_state": "SessionVisible", ...}
+   ```
+
+   Et un fait **banal** ne déclenche **rien** : le jugement texte le tait, aucune Connexion
+   Live n'est ouverte et le fait n'entre pas au Journal.
+
+   ```
+   INFO     [core] EventWindowOpened {"events": 1, ...}
+   DEBUG    [judge] judgment_done {"announce": false, "facts": 1}
+   INFO     [core] EventJudged {"announce": false, "events": 1, "from_state": "Idle", "to_state": "Idle"}
    ```
 
 5. **Aucun Client enregistré** — l'Annonce proactive est bien émise, mais sans cible : la
@@ -204,6 +218,6 @@ volume d'événements élevé rend le flux bavard.
 **Vérification automatisée** :
 
 ```
-$ PYTHONPATH=. .venv/bin/python -m pytest protocol/tests server/tests client/tests -q
-470 passed
+$ PYTHONPATH=. python -m pytest protocol/tests server/tests client/tests -q
+481 passed
 ```

@@ -6,7 +6,7 @@ from typing import Any
 
 import websockets
 
-from conftest import RecordingTraceSink, _url, register, wait_until
+from conftest import FakeJudge, RecordingTraceSink, _url, register, wait_until
 from protocol import Audio, SessionStart, SessionStarted, decode, encode
 from server.adapters.gemini import GeminiLiveAdapter
 from server.adapters.transport import WebSocketTransport
@@ -333,7 +333,8 @@ def test_pushed_event_opens_a_proactive_auto_session_for_the_registered_client()
             gemini=gemini,
             clock=AsyncioClock(),
             trace_sink=sink,
-            judge_prompt="JUGE",
+            announce_prompt="JUGE",
+            judge=FakeJudge(message="La porte est ouverte"),
         )
         runner = asyncio.create_task(app.run())
         try:

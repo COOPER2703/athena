@@ -23,6 +23,7 @@ from server.core import (
     CloseLiveConnection,
     Coordinator,
     Embedder,
+    EventJudge,
     EventReceived,
     LlmAudio,
     LlmClosed,
@@ -37,7 +38,7 @@ from server.core import (
     Role,
     SendAudioToClient,
     SendAudioToLlm,
-    SendJudgeBatchToLlm,
+    SendAnnouncementToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
     SessionRequested,
@@ -244,7 +245,7 @@ def test_events_and_commands_are_frozen_slots_dataclasses():
         CloseLiveConnection,
         SendAudioToLlm,
         SendMemoryToLlm,
-        SendJudgeBatchToLlm,
+        SendAnnouncementToLlm,
         SendAudioToClient,
         SendToolResultToLlm,
         AnnounceSessionStarted,
@@ -266,7 +267,7 @@ def test_frozen_dataclasses_reject_mutation():
 
 
 def test_ports_exist():
-    for port in (ClientLink, LlmSocket, Clock, TraceSink, MemoryStore, Embedder):
+    for port in (ClientLink, LlmSocket, Clock, TraceSink, MemoryStore, Embedder, EventJudge):
         assert isinstance(port, type)
 
 

@@ -14,7 +14,7 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
-    SendJudgeBatchToLlm,
+    SendAnnouncementToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
     StartIdleTimer,
@@ -40,15 +40,17 @@ from server.core.events import (
     ShutdownRequested,
     TimerFired,
 )
-from server.core.ports import MemoryStore, ToolSpec
+from server.core.ports import EventJudge, Judgment, MemoryStore, ToolSpec
 from server.core.state import SessionState
 from server.core.tools import ToolRegistry
 
 _TRACE_SOURCE = "core"
 IDLE_TIMEOUT = 30.0
-# Verdict de jugement par timeout seul (ADR-0007) : plus court que l'inactivité
-# d'une Session, pour libérer vite l'unique Connexion Live quand le LLM se tait.
-JUDGE_TIMEOUT = 5.0
+# Filet de sécurité de l'Annonce (ADR-0007, amendé) : une Connexion Live n'est
+# ouverte que si le jugement **texte** a décidé d'annoncer, mais si le modèle ne
+# produit aucun son, elle est refermée vite — plus court que l'inactivité d'une
+# Session — sans qu'aucune Session n'apparaisse.
+ANNOUNCE_TIMEOUT = 5.0
 # Fenêtre de regroupement **paresseuse et fixe** (ADR-0007) : ouverte au premier
 # Événement reçu au Repos, elle dure 5 s sans être relancée par les arrivées
 # suivantes, puis juge le lot entier en un seul tour.
@@ -98,7 +100,8 @@ class Coordinator:
         memory: MemoryStore | None = None,
         user_id: str = "owner",
         system_prompt: str = "",
-        judge_prompt: str = "",
+        announce_prompt: str = "",
+        judge: EventJudge | None = None,
         tools: ToolRegistry | None = None,
         recall_k: int = 5,
         recall_window_turns: int = 3,
@@ -107,7 +110,8 @@ class Coordinator:
         self._memory = memory
         self._user_id = user_id
         self._system_prompt = system_prompt
-        self._judge_prompt = judge_prompt
+        self._announce_prompt = announce_prompt
+        self._judge = judge
         self._tools = tools  # Tool registry seam (issue #28).
         self._recall_k = recall_k
         self._recall_window_turns = recall_window_turns
@@ -186,7 +190,7 @@ class Coordinator:
         if isinstance(event, ShutdownRequested):
             return self._on_shutdown_requested(event)
         if isinstance(event, TimerFired):
-            return self._on_timer_fired(event)
+            return await self._on_timer_fired(event)
         if isinstance(event, EventReceived):
             return self._on_event_received(event)
         raise TypeError(f"Unsupported event: {type(event).__name__}")
@@ -354,17 +358,49 @@ class Coordinator:
             ),
         ]
 
-    def _start_judgment(self) -> list[Command]:
-        """Ouvre l'unique Connexion Live de jugement et transmet le lot.
+    async def _judge_batch(self) -> list[Command]:
+        """Juge le lot hors Session (modèle **texte**), puis décide d'annoncer.
 
-        Instruction de jugement dédiée, **sans Rappel mémoire ni Tools** ; le lot
-        est transmis comme contenu de tour par une commande distincte de
-        l'injection de mémoire (ADR-0007). La Connexion est marquée ``auto`` :
-        si le LLM parle, elle devient une Session automatique annoncée au Client
-        de référence ; s'il se tait, le timeout de jugement dédié la referme.
+        Le verdict ne vient jamais du modèle Live : un modèle Live vocal répond
+        toujours à un tour utilisateur, il ne sait pas « se taire ». Un modèle
+        texte rend ``announce``/``message`` ; la Connexion Live n'est ouverte que
+        pour faire parler l'Annonce. Un lot tu est simplement consommé : il
+        n'entre pas au Journal (ADR-0007). Sans juge injecté, on se tait (faute
+        fermée : dans le doute, ne pas déranger).
         """
         batch = self._event_queue
         self._event_queue = []
+        if not batch:
+            return self._decision("EventJudge")
+        facts = [self._format_fact(event) for event in batch]
+        verdict = (
+            await self._judge.judge(facts)
+            if self._judge is not None
+            else Judgment(announce=False)
+        )
+        if not verdict.announce:
+            return [
+                self._trace(
+                    "EventJudged",
+                    from_state=SessionState.IDLE,
+                    to_state=SessionState.IDLE,
+                    client_id=self._registered_client_id,
+                    extra={"events": len(batch), "announce": False},
+                )
+            ]
+        return self._start_announcement(batch, verdict.message)
+
+    def _start_announcement(
+        self, batch: list[EventReceived], message: str
+    ) -> list[Command]:
+        """Ouvre l'unique Connexion Live et lui fait prononcer l'Annonce.
+
+        Instruction d'annonce dédiée, **sans Rappel mémoire ni Tools** ; le
+        message du jugement texte est transmis comme contenu de tour par une
+        commande distincte de l'injection de mémoire. La Connexion est marquée
+        ``auto`` : son premier son devient une Session automatique annoncée au
+        Client de référence.
+        """
         self._judged_batch = batch
         self._session_counter += 1
         self._connection_id = f"s{self._session_counter}"
@@ -376,25 +412,26 @@ class Coordinator:
         self._state = SessionState.LIVE_CONNECTING
         self._recent_utterances = []
         self._injected_memories = set()
+        text = message.strip() or self._render_batch(batch)
         return [
             OpenLiveConnection(
                 connection_id=self._connection_id,
-                instruction=self._judge_prompt,
+                instruction=self._announce_prompt,
                 tools=(),
             ),
             StartIdleTimer(
-                connection_id=self._connection_id, timeout=JUDGE_TIMEOUT
+                connection_id=self._connection_id, timeout=ANNOUNCE_TIMEOUT
             ),
-            SendJudgeBatchToLlm(
+            SendAnnouncementToLlm(
                 connection_id=self._connection_id,
-                text=self._render_batch(batch),
+                text=text,
             ),
             self._trace(
                 "EventJudge",
                 from_state=SessionState.IDLE,
                 to_state=self._state,
                 client_id=self._client_id,
-                extra={"events": len(batch)},
+                extra={"events": len(batch), "announce": True},
             ),
         ]
 
@@ -738,15 +775,15 @@ class Coordinator:
         self._window_open = False
         return commands
 
-    def _on_timer_fired(self, event: TimerFired) -> list[Command]:
+    async def _on_timer_fired(self, event: TimerFired) -> list[Command]:
         if event.connection_id == EVENT_WINDOW_TIMER_ID:
-            return self._on_event_window_fired()
+            return await self._on_event_window_fired()
         if self._owns(event.connection_id) and self._state is not SessionState.IDLE:
             return self._teardown(SessionEndReason.TIMEOUT, "Timeout")
         return self._decision("TimerFired")
 
-    def _on_event_window_fired(self) -> list[Command]:
-        """Échéance de la fenêtre : juge le lot entier en un seul tour.
+    async def _on_event_window_fired(self) -> list[Command]:
+        """Échéance de la fenêtre : juge le lot entier, puis annonce si retenu.
 
         Si le noyau a quitté le Repos entre-temps (l'utilisateur a pris la
         parole), la fenêtre se referme sans juger et la File reste intacte :
@@ -757,7 +794,7 @@ class Coordinator:
         self._window_open = False
         if self._state is not SessionState.IDLE:
             return self._decision("EventWindowFired")
-        return self._start_judgment()
+        return await self._judge_batch()
 
     def _rearm_timer(self) -> StartIdleTimer:
         return StartIdleTimer(connection_id=self._connection_id, timeout=IDLE_TIMEOUT)

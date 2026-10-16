@@ -4,10 +4,10 @@ import asyncio
 import logging
 from typing import Callable, TypeVar
 
-from conftest import RecordingTraceSink, wait_until
+from conftest import FakeJudge, RecordingTraceSink, wait_until
 from protocol import SessionEndReason
 from server.app.config import AppConfig, GeminiConfig
-from server.app.root import App, build_app, load_judge_prompt
+from server.app.root import App, build_app, load_announce_prompt, load_judge_prompt
 from server.core.commands import (
     AnnounceSessionEnded,
     AnnounceSessionStarted,
@@ -17,7 +17,7 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
-    SendJudgeBatchToLlm,
+    SendAnnouncementToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
     StartIdleTimer,
@@ -40,7 +40,7 @@ from server.core.memory_tools import register_memory_tools
 from server.core.coordinator import (
     EVENT_WINDOW_TIMER_ID,
     EVENT_WINDOW_TIMEOUT,
-    JUDGE_TIMEOUT,
+    ANNOUNCE_TIMEOUT,
 )
 
 _CommandT = TypeVar("_CommandT", bound=Command)
@@ -160,7 +160,7 @@ class FakeMemory:
 
 
 def _build(
-    memory=None, tools=None, judge_prompt="", webhook=None
+    memory=None, tools=None, announce_prompt="", judge=None, webhook=None
 ) -> tuple[FakeAdapter, FakeAdapter, FakeClock, RecordingTraceSink, App]:
     transport = FakeAdapter()
     gemini = FakeAdapter()
@@ -174,7 +174,8 @@ def _build(
         memory=memory,
         user_id="alice",
         tools=tools,
-        judge_prompt=judge_prompt,
+        announce_prompt=announce_prompt,
+        judge=judge,
         webhook=webhook,
     )
     return transport, gemini, clock, sink, app
@@ -496,9 +497,12 @@ def test_save_memory_tool_call_reaches_the_store_and_the_model() -> None:
     asyncio.run(scenario())
 
 
-def test_pushed_event_at_rest_opens_a_judgment_connection_and_routes_the_batch() -> None:
+def test_pushed_event_at_rest_judges_then_opens_an_announcement_connection() -> None:
     async def scenario() -> None:
-        transport, gemini, clock, sink, app = _build(judge_prompt="JUGE")
+        judge = FakeJudge(message="La porte est ouverte")
+        transport, gemini, clock, sink, app = _build(
+            announce_prompt="JUGE", judge=judge
+        )
         runner = asyncio.create_task(app.run())
         try:
             await wait_until(lambda: transport.started)
@@ -520,12 +524,15 @@ def test_pushed_event_at_rest_opens_a_judgment_connection_and_routes_the_batch()
             opened = gemini.of_type(OpenLiveConnection)[0]
             assert opened.instruction == "JUGE"
             assert opened.tools == ()
+            # Le jugement est **texte** : les faits étiquetés arrivent au juge,
+            # et seule la Connexion d'Annonce ouvre pour faire parler le verdict.
+            assert judge.calls[-1] == ["[matrix] porte ouverte"]
 
-            await wait_until(lambda: gemini.of_type(SendJudgeBatchToLlm))
-            batch = gemini.of_type(SendJudgeBatchToLlm)[0]
-            assert batch.connection_id == opened.connection_id
-            assert batch.text == "[ÉVÉNEMENTS]\n- [matrix] porte ouverte"
-            assert clock.scheduled[-1] == (opened.connection_id, JUDGE_TIMEOUT)
+            await wait_until(lambda: gemini.of_type(SendAnnouncementToLlm))
+            announcement = gemini.of_type(SendAnnouncementToLlm)[0]
+            assert announcement.connection_id == opened.connection_id
+            assert announcement.text == "La porte est ouverte"
+            assert clock.scheduled[-1] == (opened.connection_id, ANNOUNCE_TIMEOUT)
 
             app.request_shutdown()
             await asyncio.wait_for(runner, 1.0)
@@ -542,6 +549,13 @@ def test_load_judge_prompt_reads_the_versioned_file() -> None:
 
     assert prompt.strip()
     assert prompt == load_judge_prompt()
+
+
+def test_load_announce_prompt_reads_the_versioned_file() -> None:
+    prompt = load_announce_prompt()
+
+    assert prompt.strip()
+    assert prompt == load_announce_prompt()
 
 
 def test_run_serves_the_webhook_and_binds_push_event() -> None:
