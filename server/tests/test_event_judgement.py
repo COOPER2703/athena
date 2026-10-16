@@ -369,6 +369,115 @@ def test_shutdown_drops_the_queued_events_without_opening_a_judgment():
 
 
 # ---------------------------------------------------------------------------
+# Priorité : l'utilisateur gagne toujours (ticket #41, ADR-0007). Un
+# ``SessionRequested`` (Wake word ou tap) prime sur les automatismes : pendant
+# une fenêtre ouverte il l'annule en laissant la File intacte ; pendant un
+# jugement en vol il préempte la Connexion Live et remet les faits du lot en
+# tête de la File, pour qu'ils soient re-jugés plus tard — aucune perte.
+# ---------------------------------------------------------------------------
+
+
+def test_session_requested_during_the_window_cancels_it_and_keeps_the_events():
+    coordinator = Coordinator(judge_prompt="JUGE")
+    handle(coordinator, EventReceived(source="matrix", content="porte"))
+
+    commands = handle(coordinator, SessionRequested(client_id="c1"))
+
+    eff = effects(commands)
+    # La fenêtre est annulée sur sa clé réservée...
+    assert CancelIdleTimer(connection_id=EVENT_WINDOW_TIMER_ID) in eff
+    # ...et aucune Connexion de jugement ne s'ouvre : la seule ouverte est la
+    # Session utilisateur (instruction de conversation vide ici, pas le prompt
+    # de jugement).
+    assert SendJudgeBatchToLlm not in [type(c) for c in commands]
+    assert [c.instruction for c in eff if isinstance(c, OpenLiveConnection)] == [""]
+    assert any(t.kind == "EventWindowCanceled" for t in traces(commands))
+    assert coordinator.state is SessionState.LIVE_CONNECTING
+
+    # La Session utilisateur se déroule puis se termine ; au Repos l'Événement
+    # toujours en File est jugé, jamais perdu.
+    drive(coordinator, [LlmOpened(), LlmAudio(data=b"hi")])
+    commands = handle(coordinator, LlmClosed(connection_id="s1"))
+
+    assert (
+        StartIdleTimer(
+            connection_id=EVENT_WINDOW_TIMER_ID, timeout=EVENT_WINDOW_TIMEOUT
+        )
+        in effects(commands)
+    )
+
+    commands = close_window(coordinator)
+
+    assert batch(commands).text == "[ÉVÉNEMENTS]\n- [matrix] porte"
+
+
+def test_stale_window_timer_after_cancellation_is_a_no_op():
+    coordinator = Coordinator(judge_prompt="JUGE")
+    handle(coordinator, EventReceived(source="matrix", content="porte"))
+    handle(coordinator, SessionRequested(client_id="c1"))
+
+    commands = handle(coordinator, window_timer())
+
+    assert effects(commands) == []
+    assert SendJudgeBatchToLlm not in [type(c) for c in commands]
+    assert coordinator.state is SessionState.LIVE_CONNECTING
+
+
+def test_session_requested_during_a_judgment_preempts_and_requeues_the_facts():
+    coordinator = Coordinator(judge_prompt="JUGE")
+    drive(
+        coordinator,
+        [
+            EventReceived(source="matrix", content="porte"),
+            window_timer(),
+            LlmOpened(),
+        ],
+    )
+    # Un Événement arrive pendant le jugement : il rejoint la File.
+    handle(coordinator, EventReceived(source="door", content="colis"))
+
+    commands = handle(coordinator, SessionRequested(client_id="c1"))
+
+    eff = effects(commands)
+    # Même chemin de fin que le remplacement existant.
+    assert CancelIdleTimer(connection_id="s1") in eff
+    assert CloseLiveConnection(connection_id="s1") in eff
+    assert [c.connection_id for c in eff if isinstance(c, OpenLiveConnection)] == [
+        "s2"
+    ]
+    assert coordinator.state is SessionState.LIVE_CONNECTING
+
+    # La Session utilisateur se déroule puis se termine.
+    drive(coordinator, [LlmOpened(), LlmAudio(data=b"hi")])
+    commands = handle(coordinator, LlmClosed(connection_id="s2"))
+    commands = close_window(coordinator)
+
+    # Les faits préemptés sont re-jugés, en tête et dans leur ordre d'origine,
+    # avant l'Événement arrivé pendant le jugement.
+    assert batch(commands).text == (
+        "[ÉVÉNEMENTS]\n- [matrix] porte\n- [door] colis"
+    )
+
+
+def test_stale_judgment_timer_after_preemption_does_not_touch_the_user_session():
+    coordinator = Coordinator(judge_prompt="JUGE")
+    drive(
+        coordinator,
+        [
+            EventReceived(source="matrix", content="porte"),
+            window_timer(),
+            LlmOpened(),
+        ],
+    )
+    handle(coordinator, SessionRequested(client_id="c1"))
+
+    commands = handle(coordinator, TimerFired(connection_id="s1"))
+
+    assert effects(commands) == []
+    assert coordinator.state is SessionState.LIVE_CONNECTING
+
+
+# ---------------------------------------------------------------------------
 # Journal du fait annoncé (ticket #42, ADR-0007) : un Événement annoncé entre
 # au Journal en rôle ``event`` — le fait et la parole d'annonce — tandis qu'un
 # Événement tu n'écrit rien.
