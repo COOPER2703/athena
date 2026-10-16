@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TypeVar
+from typing import Callable, TypeVar
 
 from conftest import RecordingTraceSink, wait_until
 from protocol import SessionEndReason
@@ -107,6 +107,22 @@ class FakeClock:
         self.closed = True
 
 
+class FakeWebhook:
+    """Adaptateur Webhook factice : retient le push et son cycle de vie."""
+
+    def __init__(self) -> None:
+        self.push: Callable[[str, str], None] | None = None
+        self.started = False
+        self.stopped = False
+
+    async def start(self, push: Callable[[str, str], None]) -> None:
+        self.push = push
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
 class FakeMemory:
     def __init__(self, hits: list[MemoryHit] | None = None) -> None:
         self._hits = list(hits or [])
@@ -143,7 +159,9 @@ class FakeMemory:
         return False
 
 
-def _build(memory=None, tools=None, judge_prompt="") -> tuple[FakeAdapter, FakeAdapter, FakeClock, RecordingTraceSink, App]:
+def _build(
+    memory=None, tools=None, judge_prompt="", webhook=None
+) -> tuple[FakeAdapter, FakeAdapter, FakeClock, RecordingTraceSink, App]:
     transport = FakeAdapter()
     gemini = FakeAdapter()
     clock = FakeClock()
@@ -157,6 +175,7 @@ def _build(memory=None, tools=None, judge_prompt="") -> tuple[FakeAdapter, FakeA
         user_id="alice",
         tools=tools,
         judge_prompt=judge_prompt,
+        webhook=webhook,
     )
     return transport, gemini, clock, sink, app
 
@@ -523,4 +542,28 @@ def test_load_judge_prompt_reads_the_versioned_file() -> None:
 
     assert prompt.strip()
     assert prompt == load_judge_prompt()
+
+
+def test_run_serves_the_webhook_and_binds_push_event() -> None:
+    async def scenario() -> None:
+        hook = FakeWebhook()
+        transport, gemini, clock, sink, app = _build(webhook=hook)
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: hook.started)
+            await transport.feed(ClientRegistered(client_id="c1"))
+
+            assert hook.push is not None
+            hook.push("matrix", "porte ouverte")
+            await wait_until(lambda: any(e.kind == "EventQueued" for e in sink.entries))
+
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+            assert hook.stopped
+        finally:
+            if not runner.done():
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(scenario())
 

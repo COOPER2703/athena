@@ -11,10 +11,13 @@ from server.app.config import (
     DEFAULT_GEMINI_MODEL,
     DEFAULT_GEMINI_VOICE,
     DEFAULT_MEMORY_DB,
+    DEFAULT_WEBHOOK_HOST,
+    DEFAULT_WEBHOOK_PORT,
     AppConfig,
     LogLevel,
     MemoryConfig,
     ServerConfig,
+    WebhookConfig,
     load_config,
 )
 from server.app.secrets import MissingSecretError
@@ -205,3 +208,41 @@ def test_memory_config_is_immutable() -> None:
     cfg = load_config(env={"GEMINI_API_KEY": "k"}, env_file=None)
     with pytest.raises(ValidationError):
         cfg.memory.user_id = "other"  # type: ignore[misc]
+
+
+def test_webhook_defaults_are_local_and_enabled() -> None:
+    cfg = load_config(env={"GEMINI_API_KEY": "k"}, env_file=None)
+    assert cfg.webhook == WebhookConfig()
+    assert cfg.webhook.enabled is True
+    assert cfg.webhook.host == DEFAULT_WEBHOOK_HOST
+    assert cfg.webhook.port == DEFAULT_WEBHOOK_PORT
+
+
+def test_webhook_reads_and_coerces_environment() -> None:
+    cfg = load_config(
+        env={
+            "GEMINI_API_KEY": "k",
+            "ATHENA_WEBHOOK_ENABLED": "0",
+            "ATHENA_WEBHOOK_HOST": "0.0.0.0",
+            "ATHENA_WEBHOOK_PORT": "9000",
+        },
+        env_file=None,
+    )
+    assert cfg.webhook.enabled is False
+    assert cfg.webhook.host == "0.0.0.0"
+    assert cfg.webhook.port == 9000
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"ATHENA_WEBHOOK_PORT": "0"},
+        {"ATHENA_WEBHOOK_PORT": "70000"},
+        {"ATHENA_WEBHOOK_PORT": "not-a-port"},
+        {"ATHENA_WEBHOOK_ENABLED": "maybe"},
+        {"ATHENA_WEBHOOK_HOST": "   "},
+    ],
+)
+def test_invalid_webhook_config_raises_clear_validation_error(overrides) -> None:
+    with pytest.raises(ValidationError):
+        load_config(env={"GEMINI_API_KEY": "k", **overrides}, env_file=None)

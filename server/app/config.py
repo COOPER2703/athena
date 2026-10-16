@@ -14,6 +14,26 @@ DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-live-preview"
 DEFAULT_GEMINI_VOICE = "Zephyr"
 DEFAULT_MEMORY_DB = "athena_memory.db"
 DEFAULT_CONSOLIDATION_MODEL = "gemini-2.0-flash"
+DEFAULT_WEBHOOK_HOST = "127.0.0.1"
+DEFAULT_WEBHOOK_PORT = 8766
+
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"", "0", "false", "no", "off"}
+
+
+def _coerce_bool(value: object, *, variable: str) -> bool:
+    """Coerce une valeur d'environnement en booléen, avec un message explicite."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_VALUES:
+            return True
+        if normalized in _FALSE_VALUES:
+            return False
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    raise ValueError(f"Expected a boolean for {variable}, got {value!r}")
 
 
 class LogLevel(StrEnum):
@@ -100,6 +120,31 @@ class MemoryConfig(BaseModel):
         return value
 
 
+class WebhookConfig(BaseModel):
+    """Paramètres de l'adaptateur Webhook HTTP (ADR-0011).
+
+    Lié à ``127.0.0.1`` par défaut : la surface n'est ouverte qu'à la machine
+    locale, sans authentification. L'exposition au LAN (jeton partagé) est hors
+    périmètre de ce lot.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = True
+    host: str = Field(default=DEFAULT_WEBHOOK_HOST, min_length=1)
+    port: int = Field(default=DEFAULT_WEBHOOK_PORT, ge=1, le=65535)
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _enabled(cls, value: object) -> object:
+        return _coerce_bool(value, variable="ATHENA_WEBHOOK_ENABLED")
+
+    @field_validator("host", mode="before")
+    @classmethod
+    def _strip_host(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
 class AppConfig(BaseModel):
     """Configuration validée au démarrage, injectée par constructeur."""
 
@@ -108,6 +153,7 @@ class AppConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     gemini: GeminiConfig
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    webhook: WebhookConfig = Field(default_factory=WebhookConfig)
     log_level: LogLevel = LogLevel.INFO
     debug_decisions: bool = False
 
@@ -120,18 +166,8 @@ class AppConfig(BaseModel):
 
     @field_validator("debug_decisions", mode="before")
     @classmethod
-    def _coerce_bool(cls, value: object) -> object:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"1", "true", "yes", "on"}:
-                return True
-            if normalized in {"", "0", "false", "no", "off"}:
-                return False
-        if isinstance(value, int) and value in (0, 1):
-            return bool(value)
-        raise ValueError(f"Expected a boolean for ATHENA_DEBUG_DECISIONS, got {value!r}")
+    def _debug_decisions(cls, value: object) -> object:
+        return _coerce_bool(value, variable="ATHENA_DEBUG_DECISIONS")
 
 
 def parse_dotenv(path: str | Path) -> dict[str, str]:
@@ -202,6 +238,11 @@ def load_config(
                 "ATHENA_CONSOLIDATION_MODEL", DEFAULT_CONSOLIDATION_MODEL
             ),
             consolidation_hours=merged.get("ATHENA_CONSOLIDATION_HOURS", "0,12"),
+        ),
+        webhook=WebhookConfig(
+            enabled=merged.get("ATHENA_WEBHOOK_ENABLED", "1"),
+            host=merged.get("ATHENA_WEBHOOK_HOST", DEFAULT_WEBHOOK_HOST),
+            port=merged.get("ATHENA_WEBHOOK_PORT", str(DEFAULT_WEBHOOK_PORT)),
         ),
         log_level=merged.get("LOG_LEVEL", "INFO"),
         debug_decisions=merged.get("ATHENA_DEBUG_DECISIONS", "0"),

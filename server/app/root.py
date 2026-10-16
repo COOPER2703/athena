@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Awaitable, Callable, Mapping
+from typing import Awaitable, Callable, Mapping, Protocol
 
 from server.adapters.gemini import GeminiLiveAdapter
 from server.adapters.memory import (
@@ -12,6 +12,7 @@ from server.adapters.memory import (
 )
 from server.adapters.trace import emit
 from server.adapters.transport import WebSocketTransport
+from server.adapters.webhook import WebhookAdapter
 from server.app.clock import AsyncioClock
 from server.app.config import AppConfig
 from server.app.trace import build_trace_sink, install_logging_bridge
@@ -85,6 +86,19 @@ def _trace_consolidation(
     )
 
 
+class WebhookServer(Protocol):
+    """Couture de l'adaptateur Webhook : sert la surface HTTP et pousse dans le Canal.
+
+    ``push`` est le ``App.push_event`` injecté à ``start`` : de la sorte la racine
+    de composition n'a pas à connaître aiohttp, et l'adaptateur n'a aucune file
+    propre (ADR-0010).
+    """
+
+    async def start(self, push: Callable[[str, str], None]) -> None: ...
+
+    async def stop(self) -> None: ...
+
+
 class App:
     """Racine de composition : possède les adaptateurs et la boucle de propriété.
 
@@ -110,6 +124,7 @@ class App:
         recall_window_turns: int = 3,
         recall_max_distance: float = 0.6,
         scheduler: ConsolidationScheduler | None = None,
+        webhook: WebhookServer | None = None,
     ) -> None:
         self._transport = transport
         self._gemini = gemini
@@ -117,6 +132,7 @@ class App:
         self._trace_sink = trace_sink
         self._memory = memory
         self._scheduler = scheduler
+        self._webhook = webhook
         self._tools = tools
         self._coordinator = Coordinator(
             memory=memory,
@@ -142,6 +158,8 @@ class App:
         """Démarre les adaptateurs puis traite les Événements jusqu'à l'arrêt."""
         await self._warmup_memory()
         await self._transport.start()
+        if self._webhook is not None:
+            await self._webhook.start(self.push_event)
         self._emit("started", payload={"state": self._coordinator.state.value})
 
         pumps = [
@@ -159,6 +177,8 @@ class App:
                 pump.cancel()
             await asyncio.gather(*pumps, return_exceptions=True)
             await self._transport.stop()
+            if self._webhook is not None:
+                await self._webhook.stop()
             self._clock.close()
             self._emit("stopped")
 
@@ -296,6 +316,14 @@ def build_app(config: AppConfig) -> App:
         forget_max_distance=config.memory.recall_max_distance,
     )
 
+    webhook: WebhookAdapter | None = None
+    if config.webhook.enabled:
+        webhook = WebhookAdapter(
+            host=config.webhook.host,
+            port=config.webhook.port,
+            trace_sink=trace_sink,
+        )
+
     return App(
         transport=transport,
         gemini=gemini,
@@ -310,4 +338,5 @@ def build_app(config: AppConfig) -> App:
         recall_window_turns=config.memory.recall_window_turns,
         recall_max_distance=config.memory.recall_max_distance,
         scheduler=scheduler,
+        webhook=webhook,
     )
