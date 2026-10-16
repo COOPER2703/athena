@@ -55,6 +55,13 @@ EVENT_WINDOW_TIMEOUT = 5.0
 # Clé réservée de la fenêtre : elle réutilise la couture ``Clock`` existante par
 # les commandes de timer, sans changer la forme du port.
 EVENT_WINDOW_TIMER_ID = "event-window"
+# Plafond de la File d'attente d'Événements (ADR-0007) : il porte sur la File
+# **seule**, pas de quota par Source. Au-delà, les plus anciens sont jetés à
+# l'arrivée et chaque drop est tracé.
+EVENT_QUEUE_MAX = 120
+# Taille maximale d'un Événement : un contenu plus long est rejeté à l'arrivée
+# (jamais mis en File) et le rejet est tracé.
+EVENT_MAX_CHARS = 4096
 _MEMORY_HEADER = "[MÉMOIRE]"
 _EVENT_HEADER = "[ÉVÉNEMENTS]"
 
@@ -171,14 +178,26 @@ class Coordinator:
         return self._decision("ClientRegistered", client_id=event.client_id)
 
     def _on_event_received(self, event: EventReceived) -> list[Command]:
-        """Un Événement reçu est mis en File ; la fenêtre décide du jugement.
+        """Un Événement reçu rejoint la File après les gardes d'assainissement.
+
+        Ordre des gardes à l'arrivée, fixé et épinglé par les tests :
+        **taille** (un contenu trop volumineux est rejeté avant tout état) →
+        **dédup** (un doublon exact ``(source, contenu)`` de la fenêtre courante
+        n'est pas jugé deux fois) → **plafond** (au-delà de ``EVENT_QUEUE_MAX``,
+        les plus anciens sont jetés). Chaque rejet émet une trace
+        ``EventQueueDropped`` portant sa ``reason``.
 
         Au Repos, ``handle`` ouvre la fenêtre si elle ne l'est pas déjà (premier
         Événement) ; les arrivées suivantes rejoignent le lot sans relancer la
-        fenêtre. Hors Repos, l'Événement attend le retour au Repos.
+        fenêtre. Hors Repos, l'Événement attend le retour au Repos ; les
+        doublons accumulés y sont écrasés à l'ouverture de la fenêtre.
         """
+        if len(event.content) > EVENT_MAX_CHARS:
+            return [self._event_drop_trace(event, "too_large")]
+        if self._window_collects() and self._is_duplicate(event):
+            return [self._event_drop_trace(event, "duplicate")]
         self._event_queue.append(event)
-        return [
+        commands: list[Command] = [
             self._trace(
                 "EventQueued",
                 from_state=self._state,
@@ -188,6 +207,63 @@ class Coordinator:
                 extra={"source": event.source, "queued": len(self._event_queue)},
             )
         ]
+        commands.extend(self._enforce_ceiling())
+        return commands
+
+    def _enforce_ceiling(self) -> list[Command]:
+        """Jette les plus anciens tant que la File dépasse ``EVENT_QUEUE_MAX``."""
+        commands: list[Command] = []
+        while len(self._event_queue) > EVENT_QUEUE_MAX:
+            dropped = self._event_queue.pop(0)
+            commands.append(self._event_drop_trace(dropped, "capacity"))
+        return commands
+
+    def _event_drop_trace(self, event: EventReceived, reason: str) -> Trace:
+        """Trace le rejet d'un Événement avec sa cause (jamais jugé)."""
+        return self._trace(
+            "EventQueueDropped",
+            from_state=self._state,
+            to_state=self._state,
+            client_id=self._registered_client_id,
+            reason=reason,
+            extra={"source": event.source},
+        )
+
+    def _window_collects(self) -> bool:
+        """Vrai quand une fenêtre collecte activement des Événements au Repos.
+
+        Hors Repos, la fenêtre perd son sens : les arrivées sont mises en File
+        sans dédup, et les répétitions seront écrasées à la réouverture.
+        """
+        return self._window_open and self._state is SessionState.IDLE
+
+    def _is_duplicate(self, event: EventReceived) -> bool:
+        """Doublon exact ``(source, contenu)`` déjà collecté dans la fenêtre."""
+        key = (event.source, event.content)
+        return any(
+            (queued.source, queued.content) == key for queued in self._event_queue
+        )
+
+    def _collapse_window_duplicates(self) -> list[Command]:
+        """Écarte les doublons entrés en fenêtre, en gardant le plus ancien.
+
+        Les Événements accumulés hors Repos peuvent contenir des répétitions :
+        à l'ouverture de la fenêtre, seule la première occurrence de chaque
+        paire exacte ``(source, contenu)`` est conservée, dans l'ordre d'arrivée
+        ; chaque occurrence écartée est tracée (raison ``duplicate``).
+        """
+        commands: list[Command] = []
+        seen: set[tuple[str, str]] = set()
+        kept: list[EventReceived] = []
+        for queued in self._event_queue:
+            key = (queued.source, queued.content)
+            if key in seen:
+                commands.append(self._event_drop_trace(queued, "duplicate"))
+                continue
+            seen.add(key)
+            kept.append(queued)
+        self._event_queue = kept
+        return commands
 
     def _open_window_if_needed(self) -> list[Command]:
         """Ouvre la fenêtre de regroupement au Repos, une seule fois par lot.
@@ -203,19 +279,23 @@ class Coordinator:
         ):
             return []
         self._window_open = True
-        return [
+        commands = self._collapse_window_duplicates()
+        commands.append(
             StartIdleTimer(
                 connection_id=EVENT_WINDOW_TIMER_ID,
                 timeout=EVENT_WINDOW_TIMEOUT,
-            ),
+            )
+        )
+        commands.append(
             self._trace(
                 "EventWindowOpened",
                 from_state=self._state,
                 to_state=self._state,
                 client_id=self._registered_client_id,
                 extra={"events": len(self._event_queue)},
-            ),
-        ]
+            )
+        )
+        return commands
 
     def _cancel_window(self) -> list[Command]:
         """Annule la fenêtre ouverte sans toucher la File d'attente.
@@ -602,18 +682,10 @@ class Coordinator:
         else:
             commands = self._decision("ShutdownRequested")
         # La File d'attente d'Événements est éphémère : à l'arrêt, les faits non
-        # jugés sont perdus et tracés, jamais jugés (ADR-0007).
-        if self._event_queue:
-            commands.append(
-                self._trace(
-                    "EventQueueDropped",
-                    from_state=self._state,
-                    to_state=self._state,
-                    client_id=self._registered_client_id,
-                    extra={"events": len(self._event_queue)},
-                )
-            )
-            self._event_queue = []
+        # jugés sont perdus et tracés un par un, jamais jugés (ADR-0007).
+        for queued in self._event_queue:
+            commands.append(self._event_drop_trace(queued, "shutdown"))
+        self._event_queue = []
         self._window_open = False
         return commands
 
