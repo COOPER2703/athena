@@ -6,7 +6,6 @@ from protocol import (
     Error,
     Interrupt,
     Message,
-    Notification,
     Ping,
     Pong,
     ProtocolError,
@@ -50,7 +49,6 @@ MESSAGE_SAMPLES = {
     "session_ended": SessionEnded(reason=SessionEndReason.TIMEOUT),
     "tool_call": ToolCall(id="t2", name="open", args_json=b'{"url": "https://a.b"}'),
     "text": Text(role="assistant", content="hello"),
-    "notification": Notification(source="matrix", message="new message"),
     "pong": Pong(),
     "error": Error(message="boom"),
 }
@@ -120,7 +118,6 @@ def test_unions_cover_the_wire():
         SessionEnded,
         ToolCall,
         Text,
-        Notification,
         Pong,
         Error,
     }

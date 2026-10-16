@@ -107,12 +107,6 @@ class Text:
 
 
 @dataclass(frozen=True, slots=True)
-class Notification:
-    source: str = ""
-    message: str = ""
-
-
-@dataclass(frozen=True, slots=True)
 class Pong:
     pass
 
@@ -139,7 +133,6 @@ ServerToClient = Union[
     SessionEnded,
     ToolCall,
     Text,
-    Notification,
     Pong,
     Error,
 ]
@@ -286,7 +279,6 @@ _register_flat(
     (_Field("id"), _Field("name"), _Field("args_json", is_bytes=True)),
 )
 _register_flat(Text, "text", (_Field("role"), _Field("content")))
-_register_flat(Notification, "notification", (_Field("source"), _Field("message")))
 _register(Pong, "pong", _to_empty("pong"), _from_empty(Pong))
 _register_flat(Error, "error", (_Field("message"),))
 
