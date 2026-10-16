@@ -70,12 +70,18 @@ class LlmToolCall:
 
 @dataclass(frozen=True, slots=True)
 class LlmClosed:
-    pass
+    connection_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class LlmFailed:
     cause: LlmFailureCause
+    connection_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ClientDisconnected:
+    client_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +106,7 @@ Event = Union[
     LlmToolCall,
     LlmClosed,
     LlmFailed,
+    ClientDisconnected,
     ShutdownRequested,
     TimerFired,
 ]

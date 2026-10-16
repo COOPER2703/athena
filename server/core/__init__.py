@@ -22,6 +22,7 @@ from server.core.consolidation import (
 from server.core.coordinator import Coordinator, IDLE_TIMEOUT
 from server.core.events import (
     ClientAudio,
+    ClientDisconnected,
     ClientInterrupt,
     ClientRegistered,
     ClientToolResult,
@@ -60,6 +61,7 @@ __all__ = [
     "AnnounceSessionStarted",
     "CancelIdleTimer",
     "ClientAudio",
+    "ClientDisconnected",
     "ClientInterrupt",
     "ClientLink",
     "ClientRegistered",

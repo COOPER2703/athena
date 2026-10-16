@@ -387,7 +387,9 @@ def test_audio_and_transcription_in_one_message_are_both_emitted() -> None:
         assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmTranscription(
             text="salut", role=Role.ASSISTANT
         )
-        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed()
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
 
     asyncio.run(scenario())
 
@@ -405,7 +407,9 @@ def test_downstream_pcm16_mono_24khz_audio_is_passed_through_chunk_by_chunk() ->
         for chunk in chunks:
             assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmAudio(data=chunk)
 
-        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed()
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
 
     asyncio.run(scenario())
 
@@ -418,7 +422,7 @@ def test_open_failure_reports_error_without_raising() -> None:
         await adapter.execute(OpenLiveConnection(connection_id="s1"))
 
         assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmFailed(
-            cause=LlmFailureCause.ERROR
+            cause=LlmFailureCause.ERROR, connection_id="s1"
         )
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(adapter.recv(), 0.05)
@@ -445,7 +449,9 @@ def test_open_tears_down_a_previous_live_connection() -> None:
             await asyncio.wait_for(adapter.recv(), 0.05)
 
         await adapter.execute(CloseLiveConnection(connection_id="s2"))
-        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed()
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s2"
+        )
 
     asyncio.run(scenario())
 
@@ -459,7 +465,7 @@ def test_go_away_reports_failure_once() -> None:
         await adapter.execute(OpenLiveConnection(connection_id="s1"))
         assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
         assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmFailed(
-            cause=LlmFailureCause.GO_AWAY
+            cause=LlmFailureCause.GO_AWAY, connection_id="s1"
         )
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(adapter.recv(), 0.05)
@@ -476,7 +482,9 @@ def test_close_emits_closed_once_and_exits_the_context() -> None:
         assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
 
         await adapter.execute(CloseLiveConnection(connection_id="s1"))
-        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed()
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
         assert live_connect.exited
 
         await adapter.execute(CloseLiveConnection(connection_id="s1"))
@@ -502,7 +510,9 @@ def test_consecutive_turns_do_not_close_the_live_connection() -> None:
         assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmAudio(data=b"\x22")
 
         await adapter.execute(CloseLiveConnection(connection_id="s1"))
-        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed()
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
 
     asyncio.run(scenario())
 
@@ -514,7 +524,9 @@ def test_end_of_stream_emits_closed() -> None:
 
         await adapter.execute(OpenLiveConnection(connection_id="s1"))
         assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
-        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed()
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(adapter.recv(), 0.05)
 
@@ -565,7 +577,7 @@ def test_send_audio_after_terminal_event_is_ignored() -> None:
         await adapter.execute(OpenLiveConnection(connection_id="s1"))
         assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
         assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmFailed(
-            cause=LlmFailureCause.GO_AWAY
+            cause=LlmFailureCause.GO_AWAY, connection_id="s1"
         )
 
         await adapter.execute(SendAudioToLlm(connection_id="s1", data=b"\xaa\xbb"))
@@ -658,7 +670,7 @@ def test_receive_exception_reports_error_failure() -> None:
         await adapter.execute(OpenLiveConnection(connection_id="s1"))
         assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
         assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmFailed(
-            cause=LlmFailureCause.ERROR
+            cause=LlmFailureCause.ERROR, connection_id="s1"
         )
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(adapter.recv(), 0.05)
@@ -683,7 +695,9 @@ def test_connect_and_disconnect_are_traced_and_trace_command_forwarded() -> None
         assert sink.of_kind("connected")
 
         await adapter.execute(CloseLiveConnection(connection_id="s1"))
-        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed()
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
         assert sink.of_kind("disconnected")
 
         await adapter.execute(
@@ -706,5 +720,72 @@ def test_unknown_command_is_ignored_without_crashing() -> None:
 
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(adapter.recv(), 0.05)
+
+    asyncio.run(scenario())
+
+
+def test_close_stamps_the_current_connection_id() -> None:
+    async def scenario() -> None:
+        live_connect = FakeLiveConnect(session=FakeSession(block=True))
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        await adapter.execute(CloseLiveConnection(connection_id="s1"))
+
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_end_of_stream_stamps_the_current_connection_id() -> None:
+    async def scenario() -> None:
+        adapter = _adapter(FakeLiveConnect(session=FakeSession()))
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_open_failure_stamps_the_attempted_connection_id() -> None:
+    async def scenario() -> None:
+        live_connect = FakeLiveConnect(error=RuntimeError("refused"))
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s2"))
+
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmFailed(
+            cause=LlmFailureCause.ERROR, connection_id="s2"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_reopening_stamps_each_terminal_with_its_own_connection_id() -> None:
+    async def scenario() -> None:
+        live_connect = FakeLiveConnect(session=FakeSession(block=True))
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+        await adapter.execute(CloseLiveConnection(connection_id="s1"))
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
+
+        await adapter.execute(OpenLiveConnection(connection_id="s2"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+        await adapter.execute(CloseLiveConnection(connection_id="s2"))
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s2"
+        )
 
     asyncio.run(scenario())

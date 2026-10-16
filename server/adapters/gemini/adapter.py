@@ -189,7 +189,9 @@ class GeminiLiveAdapter:
         if self._terminated:
             return
         self._terminated = True
-        await self._events.put(LlmFailed(cause=cause))
+        await self._events.put(
+            LlmFailed(cause=cause, connection_id=self._connection_id)
+        )
 
     async def close(self, connection_id: str) -> None:
         await self._shutdown()
@@ -220,7 +222,7 @@ class GeminiLiveAdapter:
         if self._terminated:
             return
         self._terminated = True
-        await self._events.put(LlmClosed())
+        await self._events.put(LlmClosed(connection_id=self._connection_id))
 
     async def send_audio(self, connection_id: str, data: bytes) -> None:
         live = self._live

@@ -127,7 +127,9 @@ def test_session_start_drives_real_core_and_wire_sequence() -> None:
                         await asyncio.wait_for(ws.recv(), 0.05)
 
                     # The Live connection closes -> the Session is announced ended.
-                    await _deliver(transport, coordinator, LlmClosed(), seen)
+                    await _deliver(
+                        transport, coordinator, LlmClosed(connection_id="s1"), seen
+                    )
                     assert (
                         decode(await asyncio.wait_for(ws.recv(), 1.0))
                         == SessionEnded(reason=SessionEndReason.NORMAL)

@@ -13,6 +13,7 @@ from server.core import (
     AnnounceSessionStarted,
     CancelIdleTimer,
     ClientAudio,
+    ClientDisconnected,
     ClientInterrupt,
     ClientLink,
     ClientRegistered,
@@ -73,7 +74,7 @@ def test_tap_then_athena_speaks_makes_session_visible():
             LlmOpened(),
             ClientAudio(data=b"mic"),
             LlmAudio(data=b"hello"),
-            LlmClosed(),
+            LlmClosed(connection_id="s1"),
         ],
     )
 
@@ -134,7 +135,7 @@ def test_silent_live_connection_never_announces_a_session():
         [
             SessionRequested(client_id="c1"),
             LlmOpened(),
-            LlmClosed(),
+            LlmClosed(connection_id="s1"),
         ],
     )
 
@@ -156,7 +157,7 @@ def test_each_handle_emits_at_least_one_trace():
         LlmOpened(),
         ClientAudio(data=b"mic"),
         LlmAudio(data=b"hello"),
-        LlmClosed(),
+        LlmClosed(connection_id="s1"),
     ]
 
     for event in events:
@@ -211,7 +212,7 @@ def test_connection_ids_are_monotonic_and_deterministic():
         first,
         [
             SessionRequested(client_id="c1"),
-            LlmClosed(),
+            LlmClosed(connection_id="s1"),
             SessionRequested(client_id="c1"),
         ],
     )
@@ -246,6 +247,7 @@ def test_events_and_commands_are_frozen_slots_dataclasses():
         LlmToolCall,
         LlmClosed,
         LlmFailed,
+        ClientDisconnected,
         ShutdownRequested,
         TimerFired,
         OpenLiveConnection,
