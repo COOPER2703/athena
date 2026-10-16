@@ -353,7 +353,10 @@ def test_pushed_event_opens_a_proactive_auto_session_for_the_registered_client()
 
                 app.push_event("matrix", "porte ouverte")
 
-                assert decode(await asyncio.wait_for(ws.recv(), 1.0)) == (
+                # La fenêtre de regroupement dure 5 s (ADR-0007) avant que le
+                # noyau n'ouvre la Connexion Live de jugement : on la laisse
+                # s'écouler.
+                assert decode(await asyncio.wait_for(ws.recv(), 7.0)) == (
                     SessionStarted(auto=True)
                 )
                 assert decode(await asyncio.wait_for(ws.recv(), 1.0)) == Audio(

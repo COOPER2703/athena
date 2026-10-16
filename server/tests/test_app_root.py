@@ -37,7 +37,11 @@ from server.core.events import (
 from server.core.ports import MemoryHit
 from server.core.tools import ToolRegistry
 from server.core.memory_tools import register_memory_tools
-from server.core.coordinator import JUDGE_TIMEOUT
+from server.core.coordinator import (
+    EVENT_WINDOW_TIMER_ID,
+    EVENT_WINDOW_TIMEOUT,
+    JUDGE_TIMEOUT,
+)
 
 _CommandT = TypeVar("_CommandT", bound=Command)
 
@@ -483,6 +487,16 @@ def test_pushed_event_at_rest_opens_a_judgment_connection_and_routes_the_batch()
 
             app.push_event("matrix", "porte ouverte")
 
+            # La fenêtre de regroupement s'arme d'abord : aucune Connexion Live
+            # n'est ouverte avant l'échéance du timer réservé.
+            await wait_until(
+                lambda: (EVENT_WINDOW_TIMER_ID, EVENT_WINDOW_TIMEOUT)
+                in clock.scheduled
+            )
+            assert not gemini.of_type(OpenLiveConnection)
+
+            await clock.fire(EVENT_WINDOW_TIMER_ID)
+
             await wait_until(lambda: gemini.of_type(OpenLiveConnection))
             opened = gemini.of_type(OpenLiveConnection)[0]
             assert opened.instruction == "JUGE"
@@ -492,7 +506,7 @@ def test_pushed_event_at_rest_opens_a_judgment_connection_and_routes_the_batch()
             batch = gemini.of_type(SendJudgeBatchToLlm)[0]
             assert batch.connection_id == opened.connection_id
             assert batch.text == "[ÉVÉNEMENTS]\n- [matrix] porte ouverte"
-            assert clock.scheduled[0] == (opened.connection_id, JUDGE_TIMEOUT)
+            assert clock.scheduled[-1] == (opened.connection_id, JUDGE_TIMEOUT)
 
             app.request_shutdown()
             await asyncio.wait_for(runner, 1.0)

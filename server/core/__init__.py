@@ -20,7 +20,13 @@ from server.core.consolidation import (
     ConsolidationScheduler,
     local_now,
 )
-from server.core.coordinator import JUDGE_TIMEOUT, Coordinator, IDLE_TIMEOUT
+from server.core.coordinator import (
+    EVENT_WINDOW_TIMER_ID,
+    EVENT_WINDOW_TIMEOUT,
+    IDLE_TIMEOUT,
+    JUDGE_TIMEOUT,
+    Coordinator,
+)
 from server.core.events import (
     ClientAudio,
     ClientDisconnected,
@@ -79,6 +85,8 @@ __all__ = [
     "Embedder",
     "Event",
     "EventReceived",
+    "EVENT_WINDOW_TIMER_ID",
+    "EVENT_WINDOW_TIMEOUT",
     "FactExtractor",
     "IDLE_TIMEOUT",
     "JUDGE_TIMEOUT",
