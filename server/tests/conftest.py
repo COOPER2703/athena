@@ -11,16 +11,37 @@ from server.adapters.transport import WebSocketTransport
 from server.core import (
     EVENT_WINDOW_TIMER_ID,
     Coordinator,
+    Judgment,
     LlmAudio,
     LlmOpened,
     OpenLiveConnection,
-    SendJudgeBatchToLlm,
+    SendAnnouncementToLlm,
     SessionRequested,
     TimerFired,
     Trace,
 )
 from server.core.events import ClientRegistered
 from server.core.ports import TraceEntry
+
+
+class FakeJudge:
+    """``EventJudge`` de test : verdict fixé, faits reçus conservés.
+
+    Par défaut il annonce, pour que les tests du noyau qui atteignent l'échéance
+    de fenêtre exercent le chemin d'Annonce sans dépendre d'un modèle. Les tests
+    du filtre lui passent ``announce=False``.
+    """
+
+    def __init__(self, *, announce: bool = True, message: str = "Annonce") -> None:
+        self._announce = announce
+        self._message = message
+        self.calls: list[list[str]] = []
+
+    async def judge(self, facts: list[str]) -> Judgment:
+        self.calls.append(list(facts))
+        if not self._announce:
+            return Judgment(announce=False)
+        return Judgment(announce=True, message=self._message)
 
 class RecordingTraceSink:
     def __init__(self) -> None:
@@ -137,8 +158,8 @@ def opened(commands) -> OpenLiveConnection:
     return next(c for c in commands if isinstance(c, OpenLiveConnection))
 
 
-def batch(commands) -> SendJudgeBatchToLlm:
-    return next(c for c in commands if isinstance(c, SendJudgeBatchToLlm))
+def announcement(commands) -> SendAnnouncementToLlm:
+    return next(c for c in commands if isinstance(c, SendAnnouncementToLlm))
 
 
 def visible_session(client_id: str = "c1") -> list:

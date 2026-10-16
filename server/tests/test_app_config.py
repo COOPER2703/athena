@@ -10,6 +10,7 @@ from server.app.config import (
     DEFAULT_EMBED_MODEL,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_GEMINI_VOICE,
+    DEFAULT_JUDGE_MODEL,
     DEFAULT_MEMORY_DB,
     DEFAULT_WEBHOOK_HOST,
     DEFAULT_WEBHOOK_PORT,
@@ -32,6 +33,7 @@ def test_defaults_with_only_required_secret() -> None:
     assert cfg.gemini.api_key == "k"
     assert cfg.gemini.model == DEFAULT_GEMINI_MODEL
     assert cfg.gemini.voice == DEFAULT_GEMINI_VOICE
+    assert cfg.gemini.judge_model == DEFAULT_JUDGE_MODEL
 
 
 def test_reads_and_coerces_environment() -> None:
@@ -44,6 +46,7 @@ def test_reads_and_coerces_environment() -> None:
             "ATHENA_DEBUG_DECISIONS": "true",
             "GEMINI_MODEL": "custom-model",
             "GEMINI_VOICE": "Puck",
+            "GEMINI_JUDGE_MODEL": "custom-judge",
         },
         env_file=None,
     )
@@ -53,6 +56,7 @@ def test_reads_and_coerces_environment() -> None:
     assert cfg.debug_decisions is True
     assert cfg.gemini.model == "custom-model"
     assert cfg.gemini.voice == "Puck"
+    assert cfg.gemini.judge_model == "custom-judge"
 
 
 def test_missing_api_key_raises_clear_startup_error() -> None:

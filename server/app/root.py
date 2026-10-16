@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping, Protocol
 
-from server.adapters.gemini import GeminiLiveAdapter
+from server.adapters.gemini import GeminiEventJudge, GeminiLiveAdapter
 from server.adapters.memory import (
     GeminiFactExtractor,
     SentenceTransformerEmbedder,
@@ -32,7 +32,7 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
-    SendJudgeBatchToLlm,
+    SendAnnouncementToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
     StartIdleTimer,
@@ -41,12 +41,13 @@ from server.core.commands import (
 from server.core.coordinator import Coordinator
 from server.core.events import Event, EventReceived, ShutdownRequested
 from server.core.memory_tools import register_memory_tools
-from server.core.ports import MemoryStore, TraceSink
+from server.core.ports import EventJudge, MemoryStore, TraceSink
 from server.core.tools import ToolRegistry
 
 _TRACE_SOURCE = "app"
 _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent.parent / "system-prompt.txt"
 _JUDGE_PROMPT_PATH = Path(__file__).resolve().parent.parent / "judge-prompt.txt"
+_ANNOUNCE_PROMPT_PATH = Path(__file__).resolve().parent.parent / "announce-prompt.txt"
 
 
 def load_system_prompt(path: str | Path | None = None) -> str:
@@ -55,8 +56,13 @@ def load_system_prompt(path: str | Path | None = None) -> str:
 
 
 def load_judge_prompt(path: str | Path | None = None) -> str:
-    """Read the versioned judgment prompt injected into a judgment connection."""
+    """Read the versioned judgment prompt used by the text Event judge."""
     return Path(path or _JUDGE_PROMPT_PATH).read_text(encoding="utf-8")
+
+
+def load_announce_prompt(path: str | Path | None = None) -> str:
+    """Read the versioned announcement instruction of the Announce connection."""
+    return Path(path or _ANNOUNCE_PROMPT_PATH).read_text(encoding="utf-8")
 
 
 def _trace_consolidation(
@@ -118,7 +124,8 @@ class App:
         memory: MemoryStore | None = None,
         user_id: str = "owner",
         system_prompt: str = "",
-        judge_prompt: str = "",
+        announce_prompt: str = "",
+        judge: EventJudge | None = None,
         tools: ToolRegistry | None = None,
         recall_k: int = 5,
         recall_window_turns: int = 3,
@@ -138,7 +145,8 @@ class App:
             memory=memory,
             user_id=user_id,
             system_prompt=system_prompt,
-            judge_prompt=judge_prompt,
+            announce_prompt=announce_prompt,
+            judge=judge,
             tools=tools,
             recall_k=recall_k,
             recall_window_turns=recall_window_turns,
@@ -228,7 +236,7 @@ class App:
                 CloseLiveConnection,
                 SendAudioToLlm,
                 SendMemoryToLlm,
-                SendJudgeBatchToLlm,
+                SendAnnouncementToLlm,
                 SendToolResultToLlm,
             ),
         ):
@@ -291,6 +299,12 @@ def build_app(config: AppConfig) -> App:
         model=config.memory.consolidation_model,
         trace_sink=trace_sink,
     )
+    judge = GeminiEventJudge(
+        api_key=config.gemini.api_key,
+        model=config.gemini.judge_model,
+        prompt=load_judge_prompt(),
+        trace_sink=trace_sink,
+    )
     policy = ConsolidationPolicy(config.memory.consolidation_hours)
     consolidation = Consolidation(
         memory=memory,
@@ -332,7 +346,8 @@ def build_app(config: AppConfig) -> App:
         memory=memory,
         user_id=config.memory.user_id,
         system_prompt=load_system_prompt(),
-        judge_prompt=load_judge_prompt(),
+        announce_prompt=load_announce_prompt(),
+        judge=judge,
         tools=tools,
         recall_k=config.memory.recall_k,
         recall_window_turns=config.memory.recall_window_turns,
