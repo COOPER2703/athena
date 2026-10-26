@@ -294,6 +294,7 @@ def test_console_reads_and_coerces_environment() -> None:
         {"ATHENA_CONSOLE_PORT": "not-a-port"},
         {"ATHENA_CONSOLE_ENABLED": "maybe"},
         {"ATHENA_CONSOLE_HOST": "   "},
+        {"ATHENA_CONSOLE_STATIC_DIR": "   "},
     ],
 )
 def test_invalid_console_config_raises_clear_validation_error(overrides) -> None:
