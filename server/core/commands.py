@@ -33,15 +33,19 @@ class SendMemoryToLlm:
 
 
 @dataclass(frozen=True, slots=True)
-class SendJudgeBatchToLlm:
-    """Envoie un lot d'Événements à la Connexion Live de jugement.
+class SendAnnouncementToLlm:
+    """Fait prononcer au modèle Live une Annonce proactive (ADR-0007, amendé).
 
-    Commande distincte de l'injection de mémoire (ADR-0007) : le lot est
-    transmis comme contenu de tour, jamais comme rappel mémoriel.
+    Le verdict (parler ou se taire) vient du jugement **texte** ; cette commande
+    porte à la fois la phrase à prononcer (``text``, le message du juge) et les
+    faits bruts de l'Événement (``facts``). Les faits entrent dans le contexte du
+    Live, sans être prononcés, pour qu'Athena puisse détailler l'Événement quand
+    l'utilisateur le lui demande (ADR-0013). Distincte de l'injection de mémoire.
     """
 
     connection_id: str
     text: str
+    facts: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +98,7 @@ Command = Union[
     CloseLiveConnection,
     SendAudioToLlm,
     SendMemoryToLlm,
-    SendJudgeBatchToLlm,
+    SendAnnouncementToLlm,
     SendAudioToClient,
     SendToolResultToLlm,
     AnnounceSessionStarted,

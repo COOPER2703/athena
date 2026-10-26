@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from conftest import RecordingTraceSink, wait_until
@@ -296,8 +297,10 @@ def test_run_leaves_no_orphan_task_with_a_scheduler() -> None:
     asyncio.run(scenario())
 
 
-def test_build_app_wires_a_consolidation_scheduler() -> None:
-    app = build_app(AppConfig(gemini=GeminiConfig(api_key="test-key")))
+def test_build_app_wires_a_consolidation_scheduler(tmp_path: Path) -> None:
+    app = build_app(
+        AppConfig(gemini=GeminiConfig(api_key="test-key"), log_dir=str(tmp_path))
+    )
     assert app.scheduler is not None
 
 

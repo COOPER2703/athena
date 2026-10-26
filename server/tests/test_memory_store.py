@@ -8,7 +8,15 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from server.adapters.memory import SqliteMemoryStore
-from server.core import Coordinator, OpenLiveConnection, SessionRequested
+from server.core import (
+    Coordinator,
+    LlmOpened,
+    LlmTranscription,
+    OpenLiveConnection,
+    Role,
+    SendMemoryToLlm,
+    SessionRequested,
+)
 
 _DIM = 384
 
@@ -90,6 +98,51 @@ def test_empty_journal_yields_empty_context(store) -> None:
     asyncio.run(scenario())
 
 
+def test_recent_announced_events_reach_the_next_session_context(store) -> None:
+    async def scenario() -> None:
+        await store.append_turn("alice", "user", "Oui, je veux bien que tu me le lises.")
+        await store.append_turn(
+            "alice",
+            "event",
+            "[matrix - Andy] Yo mec ca va ? J avais un truc a te demander",
+        )
+
+        context = await store.session_context("alice")
+
+        assert "[matrix - Andy] Yo mec ca va ? J avais un truc a te demander" in context
+        assert "Derniers Événements reçus" in context
+
+    asyncio.run(scenario())
+
+
+def test_recent_events_window_is_limited_and_chronological(tmp_path) -> None:
+    store = SqliteMemoryStore(
+        db_path=str(tmp_path / "memory.db"),
+        embedder=FakeEmbedder(),
+        recent_events_window=2,
+    )
+
+    async def scenario() -> None:
+        for i in range(3):
+            await store.append_turn("alice", "event", f"[matrix] fait {i}")
+
+        context = await store.session_context("alice")
+
+        assert "fait 0" not in context
+        assert context.index("fait 1") < context.index("fait 2")
+
+    asyncio.run(scenario())
+
+
+def test_recent_events_are_user_scoped(store) -> None:
+    async def scenario() -> None:
+        await store.append_turn("bob", "event", "[matrix] fait de bob")
+
+        assert "fait de bob" not in await store.session_context("alice")
+
+    asyncio.run(scenario())
+
+
 def test_profile_is_empty_for_now_but_the_seam_is_present(store) -> None:
     async def scenario() -> None:
         await store.append_turn("alice", "user", "salut")
@@ -154,6 +207,43 @@ def test_recent_turns_reach_the_next_session_instruction(store) -> None:
         opened = next(c for c in commands if isinstance(c, OpenLiveConnection))
         assert opened.instruction.startswith("SYSTÈME")
         assert "ma couleur préférée est le bleu" in opened.instruction
+
+    asyncio.run(scenario())
+
+
+def test_a_recent_announced_event_reaches_the_next_session_instruction(tmp_path) -> None:
+    """Régression : le Rappel sémantique peut rater un Événement récent (distance
+    au-dessus du seuil), mais l'Activation doit quand même le fournir pour que
+    l'utilisateur puisse demander ce qui a été reçu, mot pour mot."""
+    store = _store(tmp_path, BagOfWordsEmbedder())
+
+    async def scenario() -> None:
+        await store.append_turn(
+            "alice",
+            "event",
+            "[matrix - Andy] Yo mec ca va ? J avais un truc a te demander",
+        )
+        coordinator = Coordinator(
+            memory=store, user_id="alice", system_prompt="SYSTÈME"
+        )
+
+        commands = await coordinator.handle(SessionRequested(client_id="c1"))
+        commands += await coordinator.handle(LlmOpened())
+        question = "Est-ce que tu peux me dire le dernier message qu'Andy m'a envoyé ?"
+        commands += await coordinator.handle(
+            LlmTranscription(role=Role.USER, text=question)
+        )
+
+        opened = next(c for c in commands if isinstance(c, OpenLiveConnection))
+        assert (
+            "[matrix - Andy] Yo mec ca va ? J avais un truc a te demander"
+            in opened.instruction
+        )
+        assert [
+            c
+            for c in commands
+            if isinstance(c, SendMemoryToLlm) and "Yo mec" in c.text
+        ] == []
 
     asyncio.run(scenario())
 

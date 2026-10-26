@@ -26,9 +26,9 @@ signal de fin ou un timeout. La gestion des Sessions est une responsabilité du 
 _Avoid_: Conversation, call, chat
 
 **Connexion Live**:
-Le lien serveur ↔ Gemini Live, ouvert par le noyau pour juger un Événement même si Athena
-finit par se taire. Une Connexion Live peut exister sans Session ; une Session n'existe
-que lorsque de l'audio est effectivement échangé.
+Le lien serveur ↔ Gemini Live, ouvert par le noyau pour tenir une Session ou faire prononcer
+une Annonce. Une Connexion Live peut exister sans Session ; une Session n'existe que lorsque
+de l'audio est effectivement échangé.
 _Avoid_: Session Gemini, session serveur, session interne, session cachée
 
 **Repos**:
@@ -109,9 +109,9 @@ d'événements. N'est pas un concept du noyau, seulement un moyen d'accès.
 _Avoid_: endpoint, callback, hook
 
 **Session automatique**:
-Une Session ouverte par le noyau sans Wake word, lorsque le LLM décide d'annoncer un
-Événement. Le noyau ouvre d'abord une Connexion Live pour juger ; si le LLM se tait, la
-Connexion Live est refermée sans qu'aucune Session n'apparaisse côté Client.
+Une Session ouverte par le noyau sans Wake word, lorsqu'un Événement est jugé digne d'être
+annoncé. Le jugement se fait en texte, hors Session ; la Connexion Live n'est ouverte que
+pour faire prononcer l'Annonce, et aucune Session n'apparaît si Athena ne parle pas.
 _Avoid_: session proactive, session auto, session serveur, session système
 
 **Annonce proactive**:
@@ -320,14 +320,15 @@ _Avoid_: Raison, cause, status
 
 - **Client ↔ Serveur**: Communication WebSocket via le Protocole partagé. Le client envoie
   audio et résultats de Tools, le serveur envoie audio et appels de Tools.
-- **Serveur → Gemini**: Connexion Live ouverte pour juger un Événement ou tenir une Session.
+- **Serveur → Gemini**: Connexion Live ouverte pour tenir une Session ou faire prononcer une
+  Annonce ; le jugement d'un Événement, lui, se fait via un modèle texte hors Session.
 - **Noyau → Session**: Le noyau gère le cycle de vie des Sessions (start, end, timeout).
 - **Adaptateurs → Noyau (Canal d'événements)**: Les adaptateurs y déposent leurs entrées
   (audio, cycle de vie, horloge) ; le noyau les traite immédiatement, quel que soit son état.
 - **Source → Noyau (Canal d'événements)**: Les plugins et applications externes poussent des
-  Événements neutres ; le noyau les met en attente hors Repos et les juge au Repos, puis
-  ouvre une Connexion Live : le LLM juge, et une Session automatique n'est ouverte qu'au
-  moment de l'Annonce proactive.
+  Événements neutres ; le noyau les met en attente hors Repos et les juge au Repos par un
+  modèle texte, puis n'ouvre une Connexion Live que pour faire prononcer l'Annonce : une
+  Session automatique n'apparaît qu'au moment de l'Annonce proactive.
 - **Événement → Session**: Un Événement n'est jamais injecté dans une Session active ; il
   attend la fin de la Session et est jugé au Repos.
 - **Connexion Live → Session**: Une Connexion Live ne devient une Session que si Athena

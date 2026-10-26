@@ -11,11 +11,19 @@ from server.adapters.memory.embedder import DEFAULT_EMBED_MODEL
 from server.app.secrets import EnvSecretResolver, SecretResolver
 
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-live-preview"
-DEFAULT_GEMINI_VOICE = "Zephyr"
+DEFAULT_GEMINI_VOICE = "Leda"
+# Modèle de jugement : Flash-Lite, disponible sur l'échelle gratuite. Le défaut
+# précédent (`gemini-3.8-flash`) épuisait le quota gratuit (20 requêtes/jour),
+# répondait en ~30-50 s et renvoyait 503/429 : le juge échouait alors en faute
+# fermée, donc plus aucune Session automatique ne se lançait.
+DEFAULT_JUDGE_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_MEMORY_DB = "athena_memory.db"
-DEFAULT_CONSOLIDATION_MODEL = "gemini-2.0-flash"
+# Modèle de Consolidation : Flash-Lite, disponible sur l'échelle gratuite. Le
+# précédent défaut (`gemini-2.0-flash`) a été retiré et renvoyait 404.
+DEFAULT_CONSOLIDATION_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_WEBHOOK_HOST = "127.0.0.1"
 DEFAULT_WEBHOOK_PORT = 8766
+DEFAULT_LOG_DIR = "logs"
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"", "0", "false", "no", "off"}
@@ -63,6 +71,7 @@ class GeminiConfig(BaseModel):
     api_key: str
     model: str = DEFAULT_GEMINI_MODEL
     voice: str = DEFAULT_GEMINI_VOICE
+    judge_model: str = Field(default=DEFAULT_JUDGE_MODEL, min_length=1)
 
 
 class MemoryConfig(BaseModel):
@@ -155,6 +164,7 @@ class AppConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     webhook: WebhookConfig = Field(default_factory=WebhookConfig)
     log_level: LogLevel = LogLevel.INFO
+    log_dir: str = Field(default=DEFAULT_LOG_DIR, min_length=1)
     debug_decisions: bool = False
 
     @field_validator("log_level", mode="before")
@@ -162,6 +172,13 @@ class AppConfig(BaseModel):
     def _uppercase_level(cls, value: object) -> object:
         if isinstance(value, str):
             return value.strip().upper()
+        return value
+
+    @field_validator("log_dir", mode="before")
+    @classmethod
+    def _strip_log_dir(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
         return value
 
     @field_validator("debug_decisions", mode="before")
@@ -222,6 +239,7 @@ def load_config(
             api_key=api_key,
             model=merged.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
             voice=merged.get("GEMINI_VOICE", DEFAULT_GEMINI_VOICE),
+            judge_model=merged.get("GEMINI_JUDGE_MODEL", DEFAULT_JUDGE_MODEL),
         ),
         memory=MemoryConfig(
             user_id=merged.get("ATHENA_USER_ID", "owner"),
@@ -245,5 +263,6 @@ def load_config(
             port=merged.get("ATHENA_WEBHOOK_PORT", str(DEFAULT_WEBHOOK_PORT)),
         ),
         log_level=merged.get("LOG_LEVEL", "INFO"),
+        log_dir=merged.get("ATHENA_LOG_DIR", DEFAULT_LOG_DIR),
         debug_decisions=merged.get("ATHENA_DEBUG_DECISIONS", "0"),
     )

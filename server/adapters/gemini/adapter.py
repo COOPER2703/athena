@@ -11,7 +11,7 @@ from server.core.commands import (
     Command,
     OpenLiveConnection,
     SendAudioToLlm,
-    SendJudgeBatchToLlm,
+    SendAnnouncementToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
     Trace,
@@ -22,6 +22,8 @@ from server.core.events import (
     LlmFailed,
     LlmFailureCause,
     LlmOpened,
+    LlmTranscription,
+    Role,
 )
 from server.core.ports import ToolSpec, TraceSink
 
@@ -72,6 +74,10 @@ class GeminiLiveAdapter:
         self._connection_id = ""
         self._receiver: asyncio.Task[None] | None = None
         self._terminated = False
+        # Gemini Live streame la transcription de sortie par fragments. Le noyau
+        # raisonne en tours : on recompose le tour complet avant de l'émettre,
+        # sinon le Journal (mémoire) accumule des lignes comme « envoyé ».
+        self._pending_transcription: list[str] = []
 
     async def recv(self) -> Event:
         return await self._events.get()
@@ -98,8 +104,10 @@ class GeminiLiveAdapter:
         if isinstance(command, SendMemoryToLlm):
             await self.send_memory(command.connection_id, command.text)
             return
-        if isinstance(command, SendJudgeBatchToLlm):
-            await self.send_judge_batch(command.connection_id, command.text)
+        if isinstance(command, SendAnnouncementToLlm):
+            await self.send_announcement(
+                command.connection_id, command.text, command.facts
+            )
             return
         if isinstance(command, SendToolResultToLlm):
             await self.send_tool_result(
@@ -118,6 +126,7 @@ class GeminiLiveAdapter:
     ) -> None:
         if self._receiver is not None or self._context is not None:
             await self._shutdown()
+        self._pending_transcription.clear()
         self._connection_id = connection_id
         self._terminated = False
         try:
@@ -159,6 +168,9 @@ class GeminiLiveAdapter:
                     await self._handle_response(response)
                     if self._terminated:
                         break
+                # Fin du tour : la transcription de sortie accumulée devient
+                # une seule prise de parole du domaine.
+                await self._flush_transcription()
                 if not delivered:
                     break
         except asyncio.CancelledError:
@@ -186,8 +198,21 @@ class GeminiLiveAdapter:
         for event in translate_response(response):
             if isinstance(event, LlmFailed):
                 await self._fail(event.cause)
+            elif isinstance(event, LlmTranscription) and event.role is Role.ASSISTANT:
+                self._pending_transcription.append(event.text)
             else:
                 await self._events.put(event)
+
+    async def _flush_transcription(self) -> None:
+        """Émet la transcription de sortie accumulée comme un seul tour."""
+        if not self._pending_transcription:
+            return
+        text = "".join(self._pending_transcription)
+        self._pending_transcription.clear()
+        if text:
+            await self._events.put(
+                LlmTranscription(text=text, role=Role.ASSISTANT)
+            )
 
     async def _fail(self, cause: LlmFailureCause) -> None:
         if self._terminated:
@@ -204,6 +229,7 @@ class GeminiLiveAdapter:
     async def _shutdown(self) -> None:
         receiver = self._receiver
         self._receiver = None
+        self._pending_transcription.clear()
         if receiver is not None and not receiver.done():
             receiver.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -268,21 +294,33 @@ class GeminiLiveAdapter:
             sent_kind="memory_injected",
         )
 
-    async def send_judge_batch(self, connection_id: str, text: str) -> None:
-        """Transmet le lot d'Événements comme contenu de tour au jugement.
+    async def send_announcement(
+        self, connection_id: str, text: str, facts: str = ""
+    ) -> None:
+        """Fait prononcer au modèle Live une Annonce proactive.
 
-        Commande distincte de l'injection de mémoire (ADR-0007) : le lot complète
-        le tour (``turn_complete=True``) pour que le modèle puisse parler s'il
-        juge le fait digne d'une Annonce. Le verdict reste reconnu par timeout,
-        jamais par un signal de fin de tour Gemini. Le jugement est best effort :
-        un envoi raté ne lève jamais.
+        Commande distincte de l'injection de mémoire (ADR-0007, amendé) : le
+        verdict (parler ou se taire) vient du jugement **texte**. Les faits bruts
+        de l'Événement (``facts``) sont d'abord injectés comme contexte
+        (``turn_complete=False``) pour qu'Athena puisse détailler l'Événement à
+        la demande ; puis la phrase du juge (``text``) complète le tour
+        (``turn_complete=True``) pour que le modèle parle. Best effort : un envoi
+        raté ne lève jamais.
         """
+        if facts:
+            await self._send_client_content(
+                connection_id,
+                facts,
+                turn_complete=False,
+                kind="announcement_facts",
+                sent_kind="announcement_facts_sent",
+            )
         await self._send_client_content(
             connection_id,
             text,
             turn_complete=True,
-            kind="judge_batch",
-            sent_kind="judge_batch_sent",
+            kind="announcement",
+            sent_kind="announcement_sent",
         )
 
     async def _send_client_content(
