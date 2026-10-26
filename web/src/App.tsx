@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { fetchStatus, type StatusPayload } from "./api";
 import { sessionSummary } from "./session";
+import { TraceFeed } from "./TraceFeed";
 
 /** État de chargement de la page, sans état intermédiaire ambigu. */
 type View =
@@ -98,10 +99,13 @@ export function App() {
             </dl>
           ) : null}
         </section>
+
+        <TraceFeed />
       </main>
 
       <footer className="app__footer">
-        Instantané lu depuis <code>GET /api/status</code>
+        Instantané lu depuis <code>GET /api/status</code>, traces depuis{" "}
+        <code>GET /api/stream</code>
       </footer>
     </div>
   );
