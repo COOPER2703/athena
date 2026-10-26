@@ -11,6 +11,21 @@ from protocol import SessionEndReason
 # ici pour que les imports existants du noyau continuent de marcher.
 
 
+class MissingSecretError(RuntimeError):
+    """Levée quand un secret requis est introuvable dans sa source."""
+
+
+class SecretResolver(Protocol):
+    """Port de résolution des secrets.
+
+    Les adaptateurs reçoivent la valeur déjà résolue et ne lisent jamais
+    l'environnement eux-mêmes (ADR-0001). Le port vit dans le noyau pour qu'un
+    adaptateur n'ait pas à importer la racine de composition.
+    """
+
+    def resolve(self, name: str) -> str: ...
+
+
 class ClientLink(Protocol):
     async def send_audio(self, client_id: str, data: bytes) -> None: ...
 

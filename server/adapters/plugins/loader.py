@@ -11,7 +11,6 @@ from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 
 from server.adapters.trace import emit
-from server.app.secrets import MissingSecretError, SecretResolver
 from server.core.plugins import (
     KNOWN_PLATFORMS,
     SERVER_PLATFORM,
@@ -23,7 +22,7 @@ from server.core.plugins import (
     PluginUnavailable,
     SecretField,
 )
-from server.core.ports import TraceSink
+from server.core.ports import MissingSecretError, SecretResolver, TraceSink
 from server.core.tools import ToolNameConflict
 
 _TRACE_SOURCE = "plugins"
