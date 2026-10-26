@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from types import MappingProxyType
+from typing import Mapping
+
 from plugin_api import (
     KNOWN_PLATFORMS,
     SERVER_PLATFORM,
@@ -19,6 +22,7 @@ from server.core.tools import ToolRegistry
 
 __all__ = [
     "KNOWN_PLATFORMS",
+    "PLUGIN_STATES",
     "SERVER_PLATFORM",
     "ConfigField",
     "PluginBinding",
@@ -30,6 +34,10 @@ __all__ = [
     "ToolBinding",
 ]
 
+# États de chargement observables d'un plugin (GLOSSARY, section Plugins) :
+# activé, désactivé, dossier manquant, ou en échec de chargement.
+PLUGIN_STATES = ("activated", "disabled", "missing", "failed")
+
 
 class PluginRegistry:
     """Agrégat pur des plugins activés et de leurs Tool (ADR-0014).
@@ -39,15 +47,41 @@ class PluginRegistry:
     de noms (fatal au démarrage). Il compose aussi l'instruction d'usage des
     plugins, dans un ordre déterministe, pour que le prompt système reste
     reproductible.
+
+    Il porte aussi l'**état de chargement** de chaque plugin, pour qu'il soit
+    lisible sans relire la trace : c'est le catalogue décrit par le glossaire.
+    Le chargeur l'entretient ; la trace reste émise par l'adaptateur.
     """
 
     def __init__(self) -> None:
         self._tools = ToolRegistry()
         self._instructions: dict[str, str] = {}
+        self._states: dict[str, str] = {}
 
     @property
     def tools(self) -> ToolRegistry:
         return self._tools
+
+    @property
+    def states(self) -> Mapping[str, str]:
+        """États connus des plugins, en lecture seule."""
+        return MappingProxyType(self._states)
+
+    def state_of(self, plugin: str) -> str | None:
+        """État de chargement d'un plugin, ``None`` s'il n'a jamais été vu."""
+        return self._states.get(plugin)
+
+    def mark_state(self, plugin: str, state: str) -> None:
+        """Enregistre l'état de chargement d'un plugin.
+
+        Les états sont ceux du glossaire ; une valeur inconnue signale une
+        dérive du chargeur, pas une donnée utilisateur.
+        """
+        if state not in PLUGIN_STATES:
+            raise ValueError(
+                f"unknown plugin state {state!r} (known: {', '.join(PLUGIN_STATES)})"
+            )
+        self._states[plugin.strip()] = state
 
     def add(self, binding: PluginBinding) -> None:
         """Enregistre tous les Tools d'un binding, attribués à son plugin.

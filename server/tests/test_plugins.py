@@ -118,3 +118,25 @@ def test_kernel_tools_are_owned_by_core_by_default() -> None:
     registry.tools.register(_spec("save_memory"), _handler("save_memory"))
 
     assert registry.tools.owner_of("save_memory") == "core"
+
+
+def test_registry_exposes_the_loading_state_of_each_plugin() -> None:
+    """Le Plugin Registry est le catalogue des plugins et de leur état (glossaire)."""
+    registry = PluginRegistry()
+
+    assert registry.state_of("alpha") is None
+    registry.mark_state("alpha", "activated")
+    registry.mark_state("beta", "failed")
+
+    assert registry.state_of("alpha") == "activated"
+    assert registry.state_of("beta") == "failed"
+    assert dict(registry.states) == {"alpha": "activated", "beta": "failed"}
+
+
+def test_registry_refuses_an_unknown_plugin_state() -> None:
+    registry = PluginRegistry()
+
+    with pytest.raises(ValueError) as excinfo:
+        registry.mark_state("alpha", "activatd")
+
+    assert "activatd" in str(excinfo.value)

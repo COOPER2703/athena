@@ -543,6 +543,7 @@ def test_a_failing_create_is_traced_failed_and_kept_for_retry(tmp_path: Path) ->
     assert remaining == ()
     assert loader.pending == ()
     assert registry.tools.owner_of("fixture__ping") == FIXTURE_NAME
+    assert registry.state_of(FIXTURE_NAME) == "activated"
     states = [entry.payload["state"] for entry in sink.of_kind("PluginState")]
     assert states == ["failed", "activated"]
 
@@ -737,7 +738,7 @@ def test_startup_traces_every_plugin_state_in_one_deterministic_pass(
     _write_state(tmp_path, enabled=["alpha", "disparu", "gamma", "beta"])
 
     sink = RecordingTraceSink()
-    _load(_loader(tmp_path, sink))
+    registry = _load(_loader(tmp_path, sink))
 
     # Activés dans l'ordre du fichier d'état (activé, manquant, activé, en
     # échec), puis les dossiers présents non listés par ordre de nom.
@@ -748,3 +749,11 @@ def test_startup_traces_every_plugin_state_in_one_deterministic_pass(
         ("beta", "failed"),
         ("delta", "disabled"),
     ]
+    # Le registre porte le même état, lisible sans relire la trace.
+    assert dict(registry.states) == {
+        "alpha": "activated",
+        "disparu": "missing",
+        "gamma": "activated",
+        "beta": "failed",
+        "delta": "disabled",
+    }

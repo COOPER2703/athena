@@ -127,7 +127,7 @@ class PluginLoader:
         for name in enabled:
             await self._load_enabled(name, registry, configs.get(name, {}), push_event)
         for name in sorted(self._on_disk() - set(enabled)):
-            self._trace_state(name, "disabled")
+            self._record_state(registry, name, "disabled")
 
     # -- État d'activation ---------------------------------------------------
 
@@ -191,13 +191,15 @@ class PluginLoader:
     ) -> None:
         plugin_dir = self._directory / name
         if not plugin_dir.is_dir():
-            self._trace_state(name, "missing")
+            self._record_state(registry, name, "missing")
             return
         manifest = self._read_manifest(name, plugin_dir)
         if manifest.platform != SERVER_PLATFORM:
             # Une plateforme cliente n'est jamais chargée par le serveur : le
             # plugin reste inerte ici, sans faire échouer le démarrage.
-            self._trace_state(name, "disabled", platform=manifest.platform)
+            self._record_state(
+                registry, name, "disabled", platform=manifest.platform
+            )
             return
         config = self._resolve_config(manifest, raw_config)
         secrets = self._resolve_secrets(manifest)
@@ -210,10 +212,14 @@ class PluginLoader:
             self._pending[name] = _PendingPlugin(
                 name=name, create=create, config=config, secrets=secrets
             )
-            self._trace_state(name, "failed", reason=failure.reason)
+            self._record_state(
+                registry, name, "failed", reason=failure.reason
+            )
             return
         self._register(name, binding, registry)
-        self._trace_state(name, "activated", tools=len(binding.tools))
+        self._record_state(
+            registry, name, "activated", tools=len(binding.tools)
+        )
 
     async def retry_pending(
         self,
@@ -242,13 +248,16 @@ class PluginLoader:
                     push_event,
                 )
             except _CreateFailure as failure:
-                self._trace_state(name, "failed", reason=failure.reason, retry=True)
+                self._record_state(
+                    registry, name, "failed", reason=failure.reason, retry=True
+                )
                 continue
             except PluginLoadError as exc:
                 # Défaut du plugin découvert à la retente : le serveur tourne
                 # déjà, donc il est tracé puis oublié au lieu de tuer le process.
                 del self._pending[name]
-                self._trace_state(
+                self._record_state(
+                    registry,
                     name,
                     "failed",
                     reason=_redact(str(exc), pending.secrets.values()),
@@ -260,7 +269,8 @@ class PluginLoader:
             try:
                 self._register(name, binding, registry)
             except PluginLoadError as exc:
-                self._trace_state(
+                self._record_state(
+                    registry,
                     name,
                     "failed",
                     reason=_redact(str(exc), pending.secrets.values()),
@@ -268,8 +278,8 @@ class PluginLoader:
                     level="error",
                 )
                 continue
-            self._trace_state(
-                name, "activated", tools=len(binding.tools), retry=True
+            self._record_state(
+                registry, name, "activated", tools=len(binding.tools), retry=True
             )
         return self.pending
 
@@ -555,10 +565,21 @@ class PluginLoader:
 
     # -- Trace ---------------------------------------------------------------
 
-    def _trace_state(
-        self, plugin: str, state: str, *, level: str = "info", **extra: object
+    def _record_state(
+        self,
+        registry: PluginRegistry,
+        plugin: str,
+        state: str,
+        *,
+        level: str = "info",
+        **extra: object,
     ) -> None:
-        """Trace l'état d'un plugin (source ``plugins``, kind ``PluginState``)."""
+        """Met à jour l'état du plugin dans le registre, puis le trace.
+
+        Le registre porte l'état lisible (glossaire) ; la trace reste le flux
+        d'observabilité, avec les mêmes payloads qu'avant.
+        """
+        registry.mark_state(plugin, state)
         emit(
             self._trace_sink,
             _TRACE_SOURCE,
