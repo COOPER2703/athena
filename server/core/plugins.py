@@ -13,6 +13,7 @@ from plugin_api import (
     PluginUnavailable,
     SecretField,
     ToolBinding,
+    ToolSpec,
 )
 from server.core.tools import ToolRegistry
 
@@ -32,6 +33,7 @@ __all__ = [
     "PluginUnavailable",
     "SecretField",
     "ToolBinding",
+    "ToolSpec",
 ]
 
 # États de chargement observables d'un plugin (GLOSSARY, section Plugins) :

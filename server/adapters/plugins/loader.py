@@ -212,14 +212,10 @@ class PluginLoader:
             self._pending[name] = _PendingPlugin(
                 name=name, create=create, config=config, secrets=secrets
             )
-            self._record_state(
-                registry, name, "failed", reason=failure.reason
-            )
+            self._record_state(registry, name, "failed", reason=failure.reason)
             return
         self._register(name, binding, registry)
-        self._record_state(
-            registry, name, "activated", tools=len(binding.tools)
-        )
+        self._record_state(registry, name, "activated", tools=len(binding.tools))
 
     async def retry_pending(
         self,
