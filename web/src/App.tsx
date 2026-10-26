@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { fetchStatus, type StatusPayload } from "./api";
 import { EventForm } from "./EventForm";
 import { sessionSummary } from "./session";
+import { TraceFeed } from "./TraceFeed";
 
 /** État de chargement de la page, sans état intermédiaire ambigu. */
 type View =
@@ -100,11 +101,14 @@ export function App() {
           ) : null}
         </section>
 
+        <TraceFeed />
         <EventForm />
       </main>
 
       <footer className="app__footer">
-        Instantané lu depuis <code>GET /api/status</code>
+        Instantané lu depuis <code>GET /api/status</code>, traces depuis{" "}
+        <code>GET /api/stream</code>, Événements via{" "}
+        <code>POST /api/events</code>
       </footer>
     </div>
   );

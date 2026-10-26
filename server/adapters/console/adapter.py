@@ -24,6 +24,7 @@ from server.adapters.console.events import (
     MAX_BODY_BYTES,
     EventInjection,
 )
+from server.adapters.console.trace_buffer import TraceBuffer
 from server.adapters.trace import NullTraceSink
 from server.core.ports import TraceSink
 
@@ -94,11 +95,16 @@ class ConsoleAdapter:
         host: str = "127.0.0.1",
         port: int = 8767,
         static_dir: str | os.PathLike[str] = DEFAULT_STATIC_DIR,
+        trace_buffer: TraceBuffer | None = None,
         trace_sink: TraceSink | None = None,
     ) -> None:
         self._host = host
         self._port = port
         self._static_dir = Path(static_dir)
+        # Le tampon est alimenté par le fan-out de traces de la racine de
+        # composition ; l'adaptateur ne fait que le lire. Un tampon vide par
+        # défaut garde la surface utilisable (et testable) sans câblage.
+        self._trace_buffer = trace_buffer if trace_buffer is not None else TraceBuffer()
         # Le flux d'observation est le flux unique (ADR-0004) : l'injection
         # d'un Événement y trace ``event_received`` comme le Webhook.
         self._trace_sink: TraceSink = trace_sink or NullTraceSink()
@@ -107,6 +113,10 @@ class ConsoleAdapter:
         self._event_injection: EventInjection | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
+
+    @property
+    def trace_buffer(self) -> TraceBuffer:
+        return self._trace_buffer
 
     @property
     def port(self) -> int:
@@ -141,6 +151,9 @@ class ConsoleAdapter:
         await self._site.start()
 
     async def stop(self) -> None:
+        # Fermer les abonnés d'abord : leur itération se termine et les
+        # handlers WebSocket sortent avant que le runner ne coupe les sockets.
+        self._trace_buffer.close()
         if self._runner is not None:
             await self._runner.cleanup()
         self._runner = None
@@ -157,6 +170,15 @@ class ConsoleAdapter:
         au reste de l'adaptateur.
         """
         app.router.add_get(STATUS_PATH, self._handle_status)
+        # Le flux de traces est un WebSocket unidirectionnel. L'import est
+        # local pour éviter le cycle ``adapter`` ↔ ``stream`` (le module de
+        # flux réutilise l'enveloppe versionnée de l'adaptateur).
+        from server.adapters.console.stream import STREAM_PATH, stream_handler
+
+        app.router.add_get(
+            STREAM_PATH,
+            stream_handler(self._trace_buffer, self._current_snapshot),
+        )
         app.router.add_post(EVENTS_PATH, self._handle_event)
         # Tout chemin inconnu **sous /api** reste du JSON : un client de l'API
         # ne reçoit jamais une page HTML ou du texte. Le repli est enregistré
@@ -169,8 +191,10 @@ class ConsoleAdapter:
         app.router.add_get("/{tail:.*}", self._handle_spa)
 
     async def _handle_status(self, request: web.Request) -> web.Response:
-        snapshot = self._snapshot() if self._snapshot is not None else {}
-        return web.json_response({"v": ENVELOPE_VERSION, **snapshot})
+        return web.json_response({"v": ENVELOPE_VERSION, **self._current_snapshot()})
+
+    def _current_snapshot(self) -> Mapping[str, object]:
+        return self._snapshot() if self._snapshot is not None else {}
 
     async def _handle_event(self, request: web.Request) -> web.Response:
         """Délègue l'injection à la route dédiée (mêmes règles que le Webhook)."""

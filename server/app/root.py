@@ -6,6 +6,7 @@ from typing import Awaitable, Callable, Mapping, Protocol
 
 from server import __version__
 from server.adapters.console import ConsoleAdapter
+from server.adapters.console.trace_buffer import TraceBuffer
 from server.adapters.gemini import GeminiEventJudge, GeminiLiveAdapter
 from server.adapters.memory import (
     GeminiFactExtractor,
@@ -437,10 +438,17 @@ def build_app(
     ``AppConfig``. La racine de composition fournit aussi le ``TraceSink`` au
     chargeur, pour que les états de plugin entrent dans le flux unique.
     """
+    # Tampon de traces de la Console : consommateur borné du flux unique, gardé
+    # seulement quand la surface est servie. Le fan-out y pousse chaque entrée,
+    # tous niveaux confondus (ADR-0004).
+    console_trace_buffer = (
+        TraceBuffer(config.console.trace_buffer) if config.console.enabled else None
+    )
     trace_sink = build_trace_sink(
         debug_decisions=config.debug_decisions,
         log_dir=config.log_dir,
         level=config.log_level,
+        extra_sinks=[console_trace_buffer] if console_trace_buffer else [],
     )
     install_logging_bridge(
         trace_sink,
@@ -545,6 +553,7 @@ def build_app(
             host=config.console.host,
             port=config.console.port,
             static_dir=config.console.static_dir,
+            trace_buffer=console_trace_buffer,
             trace_sink=trace_sink,
         )
 
