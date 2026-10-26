@@ -71,6 +71,9 @@ class FakeAdapter:
         self.tool_results: list[tuple[str, str, str, object]] = []
         self.started = False
         self.stopped = False
+        # Le transport réel expose les Clients branchés : la racine de
+        # composition les lit directement pour l'instantané de la Console.
+        self.clients: dict[str, object] = {}
 
     async def start(self) -> None:
         self.started = True

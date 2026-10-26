@@ -15,7 +15,7 @@ from server.adapters.memory import (
 )
 from server.adapters.plugins import PluginLoader
 from server.adapters.trace import emit
-from server.adapters.transport import WebSocketTransport
+from server.adapters.transport import ClientConnection, WebSocketTransport
 from server.adapters.webhook import WebhookAdapter
 from server.app.clock import AsyncioClock
 from server.app.config import AppConfig, default_env_file, merged_environment
@@ -125,6 +125,26 @@ class WebhookServer(Protocol):
     async def stop(self) -> None: ...
 
 
+class Transport(Protocol):
+    """Couture du transport audio, vue par la racine de composition.
+
+    Enumère tout ce que ``App`` utilise : le cycle de vie, la file entrante,
+    l'exécution des Commandes et les Clients branchés (lus par l'instantané de
+    lecture de la Console).
+    """
+
+    @property
+    def clients(self) -> Mapping[str, ClientConnection]: ...
+
+    async def start(self) -> None: ...
+
+    async def stop(self) -> None: ...
+
+    async def recv(self) -> Event: ...
+
+    async def execute(self, command: Command) -> None: ...
+
+
 class ConsoleServer(Protocol):
     """Couture de la Console web : instantané de lecture et injection d'Événement.
 
@@ -156,7 +176,7 @@ class App:
     def __init__(
         self,
         *,
-        transport: WebSocketTransport,
+        transport: Transport,
         gemini: GeminiLiveAdapter,
         clock: AsyncioClock,
         trace_sink: TraceSink,
@@ -232,11 +252,11 @@ class App:
         """Instantané de lecture de l'état du noyau, prêt pour le JSON.
 
         Construit **à la demande** par la racine de composition, jamais poussé
-        par le noyau : la Console lit un état gelé et ne peut pas atteindre le
-        Coordinator (ADR-0016). Aucun secret : ``config`` ne porte que les
-        valeurs explicitement injectées par ``build_app``.
+        par le noyau : la Console lit un instantané de lecture et ne peut pas
+        atteindre le Coordinator (ADR-0016). Aucun secret : ``config`` ne porte
+        que les valeurs explicitement injectées par ``build_app``.
         """
-        clients = getattr(self._transport, "clients", {})
+        clients = self._transport.clients
         return {
             "session": {
                 "state": self._coordinator.state.value,
