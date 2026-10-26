@@ -1,0 +1,10 @@
+{
+  "api_version": 1,
+  "name": "homeassistant",
+  "version": "0.1.0",
+  "description": "Pilote Home Assistant via son serveur MCP",
+  "platform": "server",
+  "entrypoint": "plugin.py",
+  "config": [{ "key": "url", "type": "url", "required": true }],
+  "secrets": [{ "key": "token", "required": true }]
+}
