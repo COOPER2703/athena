@@ -155,7 +155,7 @@ d'événements unique** par la couture `push` et une Trace `[console] event_rece
 dans le flux, avec `source` et `chars` dans le payload. La validation est **la même** que le
 Webhook (module partagé `server/adapters/event_body.py`), seule la Source par défaut change.
 
-Rejets attendus, tous en JSON :
+Rejets attendus de la validation partagée, tous en JSON :
 
 | Requête | Code | Message |
 | --- | --- | --- |
@@ -164,6 +164,11 @@ Rejets attendus, tous en JSON :
 | contenu vide après trim | `400` | `source and content must be non-empty` |
 | contenu > 4 096 caractères | `413` | `content exceeds 4096 characters` |
 | surface sans couture `push` | `503` | `console not serving` |
+
+Un corps qui dépasse la garde mémoire de 64 Kio (65 536 octets) n'atteint jamais cette
+validation : aiohttp le refuse avant, en `413 text/plain` avec le message
+`Maximum request body size 65536 exceeded.` Ce rejet **n'est pas du JSON** et ne porte donc
+pas la forme `{"error": …}` des autres.
 
 Exemple pour les trois cas vérifiables sur un serveur sain :
 
@@ -228,7 +233,7 @@ Attendu, en première trame :
 }
 ```
 
-`snapshot` est l'instantané **gelé** au moment de la connexion (même forme que
+`snapshot` est l'instantané de **lecture** pris au moment de la connexion (même forme que
 `/api/status`, sans l'enveloppe). `backlog` contient les dernières Traces du tampon borné
 (`ATHENA_CONSOLE_TRACE_BUFFER`, 500 par défaut), **tous niveaux confondus**. La lecture du
 backlog et l'abonnement sont atomiques : ni trou ni doublon entre l'historique et le direct.
@@ -464,6 +469,10 @@ locale) · **aiohttp** : 3.14.5 · **Node** : 26.8.2 / npm 11.19.1 · **Chrome**
 
 **Ce qui a été exécuté pour de vrai** :
 
+Les chiffres cités ci-dessous sont les mesures de ce run daté (taille du bundle, nombre de
+lignes de log, compteurs de traces, ports) : ils varient avec la machine, les versions et
+l'état du serveur. Ce sont des résultats observés, pas des invariants du contrat.
+
 1. **Génération et suites** — `make generate`, puis
    `pytest server/tests protocol/tests client/tests -q` : `653 passed, 1 warning in 25.94s`.
    Front : `npm ci` (46 paquets), `npm run typecheck` (aucune erreur), `npm test`
@@ -509,9 +518,10 @@ locale) · **aiohttp** : 3.14.5 · **Node** : 26.8.2 / npm 11.19.1 · **Chrome**
    filtres. » ; pause → vue gelée à 39 lignes, bandeau « Affichage gelé · 4 nouvelle(s)
    trace(s) » pendant qu'un Événement injecté par le formulaire était accepté ; reprise →
    43 lignes ; bascule autoscroll → « Défilement suspendu » ; un Client `smoke-browser` est
-   apparu en direct dans le panneau Clients puis a disparu à sa déconnexion. Capture :
-   `console.png` (page réelle). Aucune vérification visuelle humaine écran par écran n'a été
-   faite au-delà de cette capture.
+   apparu en direct dans le panneau Clients puis a disparu à sa déconnexion. Le rendu a été
+   observé par les lectures DOM via CDP (texte des panneaux, lignes de traces, bandeaux) ;
+   aucune capture n'est committée, et aucune vérification visuelle humaine écran par écran
+   n'a été faite au-delà de ces lectures.
 
 6. **Mode dev Vite réel** — serveur Console sur `33581`, `npm run dev -- --port 35173` dans
    `web/` avec `ATHENA_CONSOLE_PORT=33581`. Vite 8.3.5 démarre ; `GET /api/status` via le
