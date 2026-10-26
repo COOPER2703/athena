@@ -164,3 +164,64 @@ def test_without_a_build_the_root_explains_what_to_run(tmp_path) -> None:
             await adapter.stop()
 
     asyncio.run(scenario())
+
+
+def _write_build(tmp_path):
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    index = dist / "index.html"
+    index.write_text("<!doctype html><div id=\"root\"></div>", encoding="utf-8")
+    (dist / "assets" / "app.js").write_text("console.log('athena');", encoding="utf-8")
+    return dist
+
+
+def test_build_is_served_with_spa_fallback(tmp_path) -> None:
+    """Le build présent sert `/`, les fichiers statiques et les chemins inconnus."""
+
+    async def scenario() -> None:
+        adapter = ConsoleAdapter(port=0, static_dir=_write_build(tmp_path))
+        await adapter.start(_snapshot)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(_url(adapter, "/")) as response:
+                    assert response.status == 200
+                    assert response.content_type == "text/html"
+                    assert 'id="root"' in await response.text()
+
+                async with session.get(_url(adapter, "/clients")) as response:
+                    assert response.status == 200
+                    assert 'id="root"' in await response.text()
+
+                async with session.get(_url(adapter, "/assets/app.js")) as response:
+                    assert response.status == 200
+                    body = await response.text()
+                assert body == "console.log('athena');"
+
+                async with session.get(_url(adapter, "/api/inconnu")) as response:
+                    assert response.status == 404
+                    assert response.content_type == "application/json"
+        finally:
+            await adapter.stop()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("path", ["/%2e%2e/secret.txt", "/..%2fsecret.txt", "/assets/%2e%2e/%2e%2e/secret.txt"])
+def test_a_static_path_cannot_escape_the_build_directory(tmp_path, path) -> None:
+    """Aucun chemin ne sert un fichier hors du répertoire statique."""
+
+    async def scenario() -> None:
+        secret = tmp_path / "secret.txt"
+        secret.write_text("do not leak", encoding="utf-8")
+        adapter = ConsoleAdapter(port=0, static_dir=_write_build(tmp_path))
+        await adapter.start(_snapshot)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(_url(adapter, path)) as response:
+                    body = await response.text()
+                    assert "do not leak" not in body
+                    assert response.status in {200, 404}
+        finally:
+            await adapter.stop()
+
+    asyncio.run(scenario())
