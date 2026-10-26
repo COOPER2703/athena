@@ -33,6 +33,8 @@ configuration suit le même schéma que le Webhook :
 - `ATHENA_CONSOLE_STATIC_DIR` : `web/dist` par défaut ; répertoire du build de la SPA
   (produit par `make web`). Absent, la Console sert une page explicative et l'API répond
   normalement.
+- `ATHENA_CONSOLE_TRACE_BUFFER` : `500` par défaut ; nombre de Traces récentes rejouées à la
+  connexion de `GET /api/stream` (WebSocket : une trame `hello`, puis des trames `trace`).
 
 Le Webhook reste séparé (`ATHENA_WEBHOOK_ENABLED`, `ATHENA_WEBHOOK_HOST`,
 `ATHENA_WEBHOOK_PORT`, `127.0.0.1:8766` par défaut). Le contrat JSON de la Console
