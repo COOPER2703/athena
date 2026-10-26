@@ -23,6 +23,10 @@ DEFAULT_MEMORY_DB = "athena_memory.db"
 DEFAULT_CONSOLIDATION_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_WEBHOOK_HOST = "127.0.0.1"
 DEFAULT_WEBHOOK_PORT = 8766
+# La Console web est une surface d'observation (ADR-0003) : port dédié,
+# loopback par défaut, sans authentification en v1, comme le Webhook.
+DEFAULT_CONSOLE_HOST = "127.0.0.1"
+DEFAULT_CONSOLE_PORT = 8767
 DEFAULT_LOG_DIR = "logs"
 # Un plugin est un dossier déposé (ADR-0014) ; l'état d'activation et la
 # configuration non secrète vivent dans un fichier JSON séparé, à la racine du
@@ -160,6 +164,36 @@ class WebhookConfig(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
+class ConsoleConfig(BaseModel):
+    """Paramètres de la Console web (ADR-0003, ADR-0016).
+
+    Surface d'observation servie sur son propre port, **liée à ``127.0.0.1``
+    par défaut** : elle n'est joignable que depuis la machine du serveur et
+    reste sans authentification en v1. Elle est **activée par défaut**, comme
+    le Webhook, et se désactive par ``ATHENA_CONSOLE_ENABLED=0``.
+
+    Défauts : ``enabled=True``, ``host="127.0.0.1"``, ``port=8767``. Les trois
+    sont surchargeables par ``ATHENA_CONSOLE_ENABLED``, ``ATHENA_CONSOLE_HOST``
+    et ``ATHENA_CONSOLE_PORT``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = True
+    host: str = Field(default=DEFAULT_CONSOLE_HOST, min_length=1)
+    port: int = Field(default=DEFAULT_CONSOLE_PORT, ge=1, le=65535)
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _enabled(cls, value: object) -> object:
+        return _coerce_bool(value, variable="ATHENA_CONSOLE_ENABLED")
+
+    @field_validator("host", mode="before")
+    @classmethod
+    def _strip_host(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
 class PluginsConfig(BaseModel):
     """Emplacements des plugins serveur (ADR-0014).
 
@@ -189,6 +223,7 @@ class AppConfig(BaseModel):
     gemini: GeminiConfig
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     webhook: WebhookConfig = Field(default_factory=WebhookConfig)
+    console: ConsoleConfig = Field(default_factory=ConsoleConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
     log_level: LogLevel = LogLevel.INFO
     log_dir: str = Field(default=DEFAULT_LOG_DIR, min_length=1)
@@ -308,6 +343,11 @@ def load_config(
             enabled=merged.get("ATHENA_WEBHOOK_ENABLED", "1"),
             host=merged.get("ATHENA_WEBHOOK_HOST", DEFAULT_WEBHOOK_HOST),
             port=merged.get("ATHENA_WEBHOOK_PORT", str(DEFAULT_WEBHOOK_PORT)),
+        ),
+        console=ConsoleConfig(
+            enabled=merged.get("ATHENA_CONSOLE_ENABLED", "1"),
+            host=merged.get("ATHENA_CONSOLE_HOST", DEFAULT_CONSOLE_HOST),
+            port=merged.get("ATHENA_CONSOLE_PORT", str(DEFAULT_CONSOLE_PORT)),
         ),
         plugins=PluginsConfig(
             directory=merged.get("ATHENA_PLUGINS_DIR", DEFAULT_PLUGINS_DIR),

@@ -61,6 +61,7 @@ def test_python_m_server_starts_and_shuts_down_cleanly_on_sigint(
         "WS_PORT": str(_free_port()),
         "ATHENA_MEMORY_DB": str(tmp_path / "memory.db"),
         "ATHENA_LOG_DIR": str(tmp_path / "logs"),
+        "ATHENA_CONSOLE_ENABLED": "0",
         "LOG_LEVEL": "INFO",
     }
     process = subprocess.Popen(

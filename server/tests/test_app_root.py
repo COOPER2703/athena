@@ -7,12 +7,16 @@ import socket
 from pathlib import Path
 from typing import Callable, TypeVar
 
+import aiohttp
 import websockets
 
 from conftest import FakeJudge, RecordingTraceSink, wait_until
 from protocol import Register, Registered, SessionEndReason, decode, encode
+from server import __version__
+from server.adapters.console import ConsoleAdapter
 from server.app.config import (
     AppConfig,
+    ConsoleConfig,
     GeminiConfig,
     PluginsConfig,
     ServerConfig,
@@ -767,6 +771,7 @@ def test_build_app_announces_the_kernel_and_plugin_tools_on_registration(
         config = AppConfig(
             gemini=GeminiConfig(api_key="test-key"),
             server=ServerConfig(host="127.0.0.1", port=port),
+            console=ConsoleConfig(enabled=False),
             plugins=PluginsConfig(
                 directory=str(plugins_dir), state_path=str(state_path)
             ),
@@ -788,6 +793,103 @@ def test_build_app_announces_the_kernel_and_plugin_tools_on_registration(
                     "forget_memory",
                     "fixture__echo",
                 ]
+        finally:
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+
+    asyncio.run(scenario())
+
+
+def test_build_app_does_not_wire_a_disabled_console(tmp_path: Path) -> None:
+    app = build_app(
+        AppConfig(
+            gemini=GeminiConfig(api_key="test-key"),
+            console=ConsoleConfig(enabled=False),
+            log_dir=str(tmp_path),
+        )
+    )
+
+    assert app.console is None
+
+
+def test_build_app_wires_an_enabled_console(tmp_path: Path) -> None:
+    app = build_app(
+        AppConfig(
+            gemini=GeminiConfig(api_key="test-key"),
+            console=ConsoleConfig(port=_free_port()),
+            log_dir=str(tmp_path),
+        )
+    )
+
+    assert isinstance(app.console, ConsoleAdapter)
+
+
+async def _snapshot_when_ready(url: str) -> dict:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 2.0
+    while True:
+        try:
+            async with aiohttp.ClientSession() as http:
+                async with http.get(url) as response:
+                    assert response.status == 200
+                    return await response.json()
+        except aiohttp.ClientConnectorError:
+            if loop.time() > deadline:
+                raise
+            await asyncio.sleep(0.01)
+
+
+def test_build_app_serves_plugins_and_safe_config_in_the_snapshot(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Câblage réel : build_app injecte l'instantané, sans secret."""
+
+    async def scenario() -> None:
+        plugins_dir, state_path = _install_fixture_plugin(tmp_path)
+        monkeypatch.setattr(
+            "server.app.root.SentenceTransformerEmbedder", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            "server.app.root.SqliteMemoryStore", lambda *a, **k: FakeMemory()
+        )
+        port = _free_port()
+        console_port = _free_port()
+        config = AppConfig(
+            gemini=GeminiConfig(
+                api_key="test-key", model="gemini-live", voice="Aoede"
+            ),
+            server=ServerConfig(host="127.0.0.1", port=port),
+            console=ConsoleConfig(port=console_port),
+            plugins=PluginsConfig(
+                directory=str(plugins_dir), state_path=str(state_path)
+            ),
+            log_dir=str(tmp_path),
+        )
+        app = build_app(config, secrets=EnvSecretResolver({}), env={}, env_file=None)
+        runner = asyncio.create_task(app.run())
+        try:
+            snapshot = await _snapshot_when_ready(
+                f"http://127.0.0.1:{console_port}/api/status"
+            )
+
+            assert snapshot["v"] == 1
+            assert snapshot["plugins"] == [
+                {
+                    "name": "fixture",
+                    "state": "activated",
+                    "tools": ["fixture__echo"],
+                }
+            ]
+            assert snapshot["config"] == {
+                "model": "gemini-live",
+                "voice": "Aoede",
+                "user_id": "owner",
+                "memory_db": "athena_memory.db",
+                "log_dir": str(tmp_path),
+                "version": __version__,
+            }
+            assert "api_key" not in snapshot["config"]
+            assert "test-key" not in json.dumps(snapshot)
         finally:
             app.request_shutdown()
             await asyncio.wait_for(runner, 1.0)

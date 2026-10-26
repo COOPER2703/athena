@@ -5,10 +5,12 @@ import json
 from types import SimpleNamespace
 from typing import Any
 
+import aiohttp
 import websockets
 
 from conftest import FakeJudge, RecordingTraceSink, _url, register, wait_until
 from protocol import Audio, SessionStart, SessionStarted, decode, encode
+from server.adapters.console import ConsoleAdapter
 from server.adapters.gemini import GeminiLiveAdapter
 from server.adapters.plugins import PluginLoader
 from server.adapters.transport import WebSocketTransport
@@ -870,5 +872,89 @@ def test_a_listed_plugin_without_a_directory_is_missing_and_keeps_its_state_line
 
         assert sink.of_kind("stopped")
         assert state_path.read_bytes() == before
+
+    asyncio.run(scenario())
+
+
+async def _console_snapshot(
+    http: aiohttp.ClientSession, console: ConsoleAdapter
+) -> dict[str, Any]:
+    async with http.get(f"http://127.0.0.1:{console.port}/api/status") as response:
+        assert response.status == 200
+        return await response.json()
+
+
+def test_console_snapshot_tracks_clients_and_the_session_owner() -> None:
+    async def scenario() -> None:
+        sink = RecordingTraceSink()
+        transport = WebSocketTransport(host="127.0.0.1", port=0, trace_sink=sink)
+        gemini = GeminiLiveAdapter(
+            api_key="test-key",
+            model="gemini-live",
+            voice="Aoede",
+            live_connect=_TalkingLiveConnect(audio=b"reply"),
+            trace_sink=sink,
+        )
+        console = ConsoleAdapter(port=0)
+        app = App(
+            transport=transport,
+            gemini=gemini,
+            clock=AsyncioClock(),
+            trace_sink=sink,
+            console=console,
+        )
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: bool(sink.of_kind("started")))
+
+            async with aiohttp.ClientSession() as http:
+                snapshot = await _console_snapshot(http, console)
+                assert snapshot["v"] == 1
+                assert snapshot["session"] == {
+                    "state": "Idle",
+                    "session_id": "",
+                    "connection_id": "",
+                    "active_client_id": "",
+                }
+                assert snapshot["clients"] == []
+
+                async with websockets.connect(_url(transport)) as ws:
+                    registered = await register(
+                        ws, transport, client_name="desktop", drain=False
+                    )
+                    await wait_until(
+                        lambda: any(
+                            entry.kind == "client_registered"
+                            for entry in sink.entries
+                        )
+                    )
+
+                    snapshot = await _console_snapshot(http, console)
+                    assert snapshot["clients"] == [
+                        {
+                            "client_id": registered.client_id,
+                            "client_name": "desktop",
+                            "platform": "linux",
+                        }
+                    ]
+                    assert snapshot["session"]["active_client_id"] == ""
+
+                    await ws.send(encode(SessionStart()))
+                    assert decode(await asyncio.wait_for(ws.recv(), 1.0)) == (
+                        SessionStarted(auto=False)
+                    )
+                    await wait_until(lambda: _session_visible(sink))
+
+                    snapshot = await _console_snapshot(http, console)
+                    assert snapshot["session"]["state"] == "SessionVisible"
+                    assert snapshot["session"]["session_id"] == "s1"
+                    assert snapshot["session"]["connection_id"] == "s1"
+                    assert (
+                        snapshot["session"]["active_client_id"]
+                        == registered.client_id
+                    )
+        finally:
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
 
     asyncio.run(scenario())

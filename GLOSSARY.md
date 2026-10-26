@@ -108,6 +108,16 @@ Le transport HTTP par lequel une application externe pousse un Événement dans 
 d'événements. N'est pas un concept du noyau, seulement un moyen d'accès.
 _Avoid_: endpoint, callback, hook
 
+### Console
+
+**Console web**:
+La surface d'observation du serveur : une page unique servie en HTTP/JSON et WebSocket sur
+un port dédié, liée à `127.0.0.1` par défaut, sans authentification en v1. Elle lit un
+**instantané gelé** de l'état (Session, Clients, Plugins, configuration non sensible) et le
+flux de traces. Ce n'est **pas un Client** : elle ne parle pas le Protocole partagé, ne
+s'enregistre pas, ne reçoit pas d'audio et ne démarre pas de Session (ADR-0003, ADR-0016).
+_Avoid_: dashboard, UI, interface web, client web
+
 **Session automatique**:
 Une Session ouverte par le noyau sans Wake word, lorsqu'un Événement est jugé digne d'être
 annoncé. Le jugement se fait en texte, hors Session ; la Connexion Live n'est ouverte que
