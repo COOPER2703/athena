@@ -80,9 +80,11 @@ Dans le terminal du serveur, cherchez (l'ordre est celui du Canal unique) :
 - `[core] EventWindowOpened` — **fenêtre paresseuse de 5 s** armée par ce premier fait ;
 - après l'échéance : `[core] EventJudge` (`events` = taille du lot) puis
   `[judge] judgment_done` (`announce`) — le verdict vient d'un **modèle texte** ;
-- si le verdict annonce (`announce=true`) : une **seule** Connexion Live d'Annonce
-  (sans Rappel ni Tools), `[gemini] connected` puis `announcement_sent` ; l'instruction
-  est celle de l'Annonce (`announce-prompt.txt`) et le message est celui du juge ;
+- si le verdict annonce (`announce=true`) : une **seule** Connexion Live d'Annonce — une
+  Session ordinaire (prompt système, Activation mémoire, Tools) augmentée de l'instruction
+  d'Annonce (ADR-0013). `[gemini] connected`, puis `announcement_facts_sent` (les faits bruts
+  de l'Événement entrent en contexte, sans être prononcés) et `announcement_sent` (la phrase
+  du juge, qui déclenche la parole) ;
 - si le LLM parle : `[core] LlmTranscription` puis `[core] AnnounceSessionStarted` avec
   `auto=true` — le Client reçoit une **Annonce proactive** et le fait entre au Journal en
   rôle `event` ;
@@ -168,7 +170,9 @@ serveur réel `WS_PORT=8791 ATHENA_WEBHOOK_PORT=8792`, base mémoire temporaire,
    `400` (contenu vide), `415` (Content-Type), `404` (chemin `/nope`), `405` (`GET /events`).
 
 4. **Jugement réel au bout des 5 s** — le verdict vient du **modèle texte** ; un fait
-   important ouvre alors **une seule** Connexion Live d'Annonce, sans Rappel ni Tools :
+   important ouvre alors **une seule** Connexion Live d'Annonce. Trace capturée **avant
+   l'ADR-0013** : depuis, la Connexion est une Session ordinaire et deux envois suivent,
+   `announcement_facts_sent` (contexte) puis `announcement_sent` (parole) :
 
    ```
    INFO     [core] EventWindowOpened {"events": 1, ...}

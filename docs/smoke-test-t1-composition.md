@@ -17,6 +17,7 @@ GEMINI_API_KEY=votre-cle
 # WS_PORT=8765
 # LOG_LEVEL=INFO
 # ATHENA_DEBUG_DECISIONS=0
+# ATHENA_LOG_DIR=logs
 ```
 
 Le serveur refuse de démarrer si `GEMINI_API_KEY` manque : il affiche alors
@@ -28,9 +29,10 @@ Le serveur refuse de démarrer si `GEMINI_API_KEY` manque : il affiche alors
 python -m server
 ```
 
-Le flux d'observabilité (ADR-0004) est rendu sur `stderr`. L'ordre de démarrage est
-explicite : configuration → trace → transport → Gemini → horloge → Coordinator, puis
-`started` apparaît dans la chronologie.
+Le flux d'observabilité (ADR-0004) est rendu sur `stderr` et recopié dans
+`logs/server.log` (rotation par taille : `server.log.1`…`server.log.3`). L'ordre de
+démarrage est explicite : configuration → trace → transport → Gemini → horloge →
+Coordinator, puis `started` apparaît dans la chronologie.
 
 ## 2. Démarrer le client et parler
 

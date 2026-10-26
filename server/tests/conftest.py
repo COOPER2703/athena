@@ -32,13 +32,22 @@ class FakeJudge:
     du filtre lui passent ``announce=False``.
     """
 
-    def __init__(self, *, announce: bool = True, message: str = "Annonce") -> None:
+    def __init__(
+        self,
+        *,
+        announce: bool = True,
+        message: str = "Annonce",
+        failed: bool = False,
+    ) -> None:
         self._announce = announce
         self._message = message
+        self._failed = failed
         self.calls: list[list[str]] = []
 
     async def judge(self, facts: list[str]) -> Judgment:
         self.calls.append(list(facts))
+        if self._failed:
+            return Judgment(announce=False, failed=True)
         if not self._announce:
             return Judgment(announce=False)
         return Judgment(announce=True, message=self._message)

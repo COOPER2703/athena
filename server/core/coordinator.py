@@ -376,8 +376,23 @@ class Coordinator:
         verdict = (
             await self._judge.judge(facts)
             if self._judge is not None
-            else Judgment(announce=False)
+            else Judgment(announce=False, failed=True)
         )
+        if verdict.failed:
+            # Verdict manquant (panne du juge, réponse malformée) : faute fermée,
+            # mais tracée **distinctement** d'un fait jugé banal, pour qu'une
+            # panne silencieuse (quota, réseau) ne se lise pas comme « tout est
+            # banal » (ADR-0012).
+            return [
+                self._trace(
+                    "EventJudgmentFailed",
+                    from_state=SessionState.IDLE,
+                    to_state=SessionState.IDLE,
+                    client_id=self._registered_client_id,
+                    extra={"events": len(batch)},
+                    level="error",
+                )
+            ]
         if not verdict.announce:
             return [
                 self._trace(
@@ -388,18 +403,22 @@ class Coordinator:
                     extra={"events": len(batch), "announce": False},
                 )
             ]
-        return self._start_announcement(batch, verdict.message)
+        return await self._start_announcement(batch, verdict.message)
 
-    def _start_announcement(
+    async def _start_announcement(
         self, batch: list[EventReceived], message: str
     ) -> list[Command]:
         """Ouvre l'unique Connexion Live et lui fait prononcer l'Annonce.
 
-        Instruction d'annonce dédiée, **sans Rappel mémoire ni Tools** ; le
-        message du jugement texte est transmis comme contenu de tour par une
-        commande distincte de l'injection de mémoire. La Connexion est marquée
-        ``auto`` : son premier son devient une Session automatique annoncée au
-        Client de référence.
+        La Session automatique est une **Session ordinaire** : même prompt
+        système, même Activation mémoire et mêmes Tools qu'une Session ouverte
+        par un Wake word (ADR-0013) ; l'instruction d'Annonce s'y ajoute pour
+        qu'Athena sache qu'un Événement a ouvert la Session. Le message du juge
+        est la phrase à prononcer ; les faits bruts du lot sont transmis au Live
+        comme contexte (``facts``), sans être prononcés, pour qu'Athena puisse
+        détailler l'Événement à la demande. La Connexion est marquée ``auto`` :
+        son premier son devient une Session automatique annoncée au Client de
+        référence.
         """
         self._judged_batch = batch
         self._session_counter += 1
@@ -411,20 +430,43 @@ class Coordinator:
         self._judging = True
         self._state = SessionState.LIVE_CONNECTING
         self._recent_utterances = []
-        self._injected_memories = set()
-        text = message.strip() or self._render_batch(batch)
+
+        # Activation, comme une Session ordinaire : le contexte mémoire
+        # (profil épinglé, tours récents) fait partie de l'instruction. Les
+        # faits bruts du lot y étant aussi, semer le dédoublonnage du Rappel
+        # avec eux évite de les réinjecter au premier tour utilisateur.
+        context = ""
+        injected: set[str] = set()
+        if self._memory is not None:
+            context = await self._memory.session_context(self._user_id)
+            injected = set(await self._memory.pinned_facts(self._user_id))
+        self._injected_memories = injected | {
+            self._format_fact(event) for event in batch
+        }
+        instruction = "\n\n".join(
+            part
+            for part in (self._system_prompt, self._announce_prompt, context)
+            if part
+        ).strip()
+
+        rendered = self._render_batch(batch)
+        text = message.strip()
+        # Les faits bruts ne sont transmis comme contexte séparé que si le juge
+        # a fourni une phrase : sans phrase, le lot est le tour à prononcer.
+        facts = rendered if text else ""
         return [
             OpenLiveConnection(
                 connection_id=self._connection_id,
-                instruction=self._announce_prompt,
-                tools=(),
+                instruction=instruction,
+                tools=self._open_tools(),
             ),
             StartIdleTimer(
                 connection_id=self._connection_id, timeout=ANNOUNCE_TIMEOUT
             ),
             SendAnnouncementToLlm(
                 connection_id=self._connection_id,
-                text=text,
+                text=text or rendered,
+                facts=facts,
             ),
             self._trace(
                 "EventJudge",

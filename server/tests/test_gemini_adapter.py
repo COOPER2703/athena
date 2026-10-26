@@ -625,6 +625,49 @@ def test_send_announcement_sends_the_message_as_a_completed_turn() -> None:
     asyncio.run(scenario())
 
 
+def test_send_announcement_injects_the_facts_then_speaks_the_message() -> None:
+    """Les faits bruts entrent en contexte (tour non complété) puis la phrase du
+    juge complète le tour : l'Annonce parle, et l'Événement reste disponible
+    pour le suivi."""
+    async def scenario() -> None:
+        session = FakeSession(block=True)
+        live_connect = FakeLiveConnect(session=session)
+        sink = RecordingTraceSink()
+        adapter = GeminiLiveAdapter(
+            api_key="test-key",
+            model="gemini-live",
+            voice="Aoede",
+            live_connect=live_connect,
+            trace_sink=sink,
+        )
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        await adapter.execute(
+            SendAnnouncementToLlm(
+                connection_id="s1",
+                text="La porte est ouverte.",
+                facts="[ÉVÉNEMENTS]\n- [maison] La porte d'entrée vient de s'ouvrir",
+            )
+        )
+
+        assert len(session.sent_client_content) == 2
+        context, spoken = session.sent_client_content
+        assert context["turns"].role == "user"
+        assert (
+            context["turns"].parts[0].text
+            == "[ÉVÉNEMENTS]\n- [maison] La porte d'entrée vient de s'ouvrir"
+        )
+        assert context["turn_complete"] is False
+        assert spoken["turns"].parts[0].text == "La porte est ouverte."
+        assert spoken["turn_complete"] is True
+        assert sink.of_kind("announcement_facts_sent")
+        assert sink.of_kind("announcement_sent")
+
+    asyncio.run(scenario())
+
+
 def test_send_announcement_without_open_connection_is_ignored() -> None:
     async def scenario() -> None:
         live_connect = FakeLiveConnect(session=FakeSession())

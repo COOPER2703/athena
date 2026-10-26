@@ -1,4 +1,5 @@
 legacy/
+logs/
 protocol/generated/
 __pycache__/
 .venv/

@@ -2,8 +2,9 @@
 
 Le noyau et les adaptateurs émettent une **chronologie unique d'événements structurés** :
 transitions de Session, décisions (jugement d'Événement, Activation, Rappel), appels de
-Tools, et logs d'adaptateurs y compris des bibliothèques tierces. Le rendu texte et la
-console web en sont deux consommateurs. Rien n'est loggé en dehors de ce flux.
+Tools, et logs d'adaptateurs y compris des bibliothèques tierces. Le rendu texte, la
+console web et le fichier `logs/server.log` en sont trois consommateurs. Rien n'est
+loggé en dehors de ce flux.
 
 ## Considérations
 

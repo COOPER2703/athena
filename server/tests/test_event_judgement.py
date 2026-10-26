@@ -43,6 +43,7 @@ from server.core import (
     LlmFailureCause,
     LlmOpened,
     LlmTranscription,
+    MemoryHit,
     OpenLiveConnection,
     Role,
     SendAudioToClient,
@@ -54,12 +55,15 @@ from server.core import (
     ShutdownRequested,
     StartIdleTimer,
     TimerFired,
+    ToolRegistry,
+    ToolSpec,
 )
 
 
 class FakeMemory:
-    def __init__(self, context: str = "") -> None:
+    def __init__(self, context: str = "", hits: list | None = None) -> None:
         self.context = context
+        self.hits = list(hits or [])
         self.users: list[str] = []
         self.turns: list[tuple[str, str]] = []
 
@@ -74,7 +78,7 @@ class FakeMemory:
         self.turns.append((role, text))
 
     async def recall(self, user_id: str, query: str) -> list:
-        return []
+        return list(self.hits)
 
 
 def test_first_event_at_repos_arms_the_window_and_opens_no_connection():
@@ -124,7 +128,16 @@ def test_window_deadline_judges_the_whole_batch_and_announces_the_verdict():
     assert effects(commands) == [
         OpenLiveConnection(connection_id="s1", instruction="JUGE", tools=()),
         StartIdleTimer(connection_id="s1", timeout=ANNOUNCE_TIMEOUT),
-        SendAnnouncementToLlm(connection_id="s1", text="Porte ouverte"),
+        SendAnnouncementToLlm(
+            connection_id="s1",
+            text="Porte ouverte",
+            facts=(
+                "[ÉVÉNEMENTS]\n"
+                "- [matrix] porte ouverte\n"
+                "- [door] porte d'entrée\n"
+                "- [matrix] colis"
+            ),
+        ),
     ]
     assert coordinator.state is SessionState.LIVE_CONNECTING
 
@@ -141,21 +154,95 @@ def test_isolated_event_is_judged_when_the_window_elapses():
     assert announcement(commands).text == "Seul"
 
 
-def test_announcement_uses_the_dedicated_prompt_without_any_memory_recall():
-    memory = FakeMemory(context="PROFIL")
+def test_announcement_uses_the_system_prompt_plus_the_announce_instruction():
+    """La Session automatique est une Session ordinaire : le Live reçoit le
+    prompt système d'Athena, et l'instruction d'Annonce lui dit qu'un Événement
+    a ouvert la Session."""
     coordinator = Coordinator(
-        memory=memory,
-        user_id="alice",
-        announce_prompt="JUGE",
+        system_prompt="SYSTÈME",
+        announce_prompt="ANNONCE",
         judge=FakeJudge(),
     )
     handle(coordinator, EventReceived(source="matrix", content="x"))
 
     commands = close_window(coordinator)
 
-    assert opened(commands).instruction == "JUGE"
-    assert memory.users == []
+    instruction = opened(commands).instruction
+    assert "SYSTÈME" in instruction
+    assert "ANNONCE" in instruction
+
+
+def test_announcement_activates_the_memory_context_like_a_normal_session():
+    """L'Annonce bénéficie de l'Activation : contexte mémoire injecté dans
+    l'instruction et faits épinglés semés dans le dédoublonnage du Rappel."""
+    memory = FakeMemory(context="PROFIL")
+    coordinator = Coordinator(
+        memory=memory,
+        user_id="alice",
+        announce_prompt="ANNONCE",
+        judge=FakeJudge(),
+    )
+    handle(coordinator, EventReceived(source="matrix", content="x"))
+
+    commands = close_window(coordinator)
+
+    assert memory.users == ["alice"]
+    assert "PROFIL" in opened(commands).instruction
+
+
+def test_announcement_connection_opens_with_the_kernel_tools():
+    """La Connexion d'Annonce n'est plus sans Tools : le suivi peut agir."""
+    spec = ToolSpec(
+        name="save_memory",
+        description="mémorise",
+        parameters={"type": "object", "properties": {}},
+    )
+    tools = ToolRegistry()
+    tools.register(spec, lambda _args: _noop())
+    coordinator = Coordinator(announce_prompt="JUGE", judge=FakeJudge(), tools=tools)
+    handle(coordinator, EventReceived(source="matrix", content="x"))
+
+    commands = close_window(coordinator)
+
+    assert opened(commands).tools == (spec,)
+
+
+async def _noop() -> dict:
+    return {"status": "ok"}
+
+
+def test_announcement_carries_the_raw_facts_for_follow_up_questions():
+    """Le contenu brut du lot atteint le Live, pas seulement la phrase du juge :
+    Athena peut répondre « donne-moi plus de détails » après l'Annonce."""
+    coordinator = Coordinator(
+        announce_prompt="JUGE", judge=FakeJudge(message="Porte ouverte")
+    )
+    handle(
+        coordinator,
+        EventReceived(source="maison", content="La porte d'entrée vient de s'ouvrir"),
+    )
+
+    commands = close_window(coordinator)
+
+    command = announcement(commands)
+    assert command.text == "Porte ouverte"
+    assert "[maison] La porte d'entrée vient de s'ouvrir" in command.facts
+
+
+def test_follow_up_recall_does_not_reinject_the_announced_fact():
+    """Le fait annoncé est déjà en contexte : le Rappel du premier tour utilisateur
+    ne le réinjecte pas (il est semé dans le dédoublonnage). Avant l'ADR-0013,
+    le fait n'était pas en contexte et le Rappel le réinjectait."""
+    memory = FakeMemory(hits=[MemoryHit("[matrix] porte", 0.1, "journal")])
+    coordinator = judging(memory)
+
+    commands = handle(
+        coordinator, LlmTranscription(role=Role.USER, text="plus de détails ?")
+    )
+
     assert SendMemoryToLlm not in [type(c) for c in commands]
+    assert coordinator.state is SessionState.LIVE_ACTIVE
+
 
 
 def test_event_during_a_visible_session_is_queued_and_never_injected():
@@ -249,6 +336,61 @@ def test_silent_judgment_opens_no_connection_and_announces_nothing():
     assert OpenLiveConnection not in [type(c) for c in commands]
     assert SendAnnouncementToLlm not in [type(c) for c in commands]
     assert AnnounceSessionStarted not in [type(c) for c in commands]
+    assert coordinator.state is SessionState.IDLE
+
+
+def test_a_rendered_silent_verdict_is_traced_as_event_judged():
+    judge = FakeJudge(announce=False)
+    coordinator = Coordinator(announce_prompt="JUGE", judge=judge)
+    drive(coordinator, [EventReceived(source="matrix", content="x")])
+
+    commands = close_window(coordinator)
+
+    kinds = [t.kind for t in traces(commands)]
+    assert "EventJudged" in kinds
+    assert "EventJudgmentFailed" not in kinds
+
+
+def test_a_failed_judgment_is_traced_distinctly_from_a_silent_verdict():
+    judge = FakeJudge(failed=True)
+    coordinator = Coordinator(announce_prompt="JUGE", judge=judge)
+    drive(
+        coordinator,
+        [
+            ClientRegistered(client_id="c9"),
+            EventReceived(source="matrix", content="x"),
+        ],
+    )
+
+    commands = close_window(coordinator)
+
+    # Faute fermée : rien n'est annoncé, aucune Connexion ne s'ouvre...
+    assert OpenLiveConnection not in [type(c) for c in commands]
+    assert SendAnnouncementToLlm not in [type(c) for c in commands]
+    assert coordinator.state is SessionState.IDLE
+    # ...mais la panne est un fait observable, jamais confondu avec un « banal ».
+    kinds = [t.kind for t in traces(commands)]
+    assert "EventJudgmentFailed" in kinds
+    assert "EventJudged" not in kinds
+    failed = next(t for t in traces(commands) if t.kind == "EventJudgmentFailed")
+    assert failed.level == "error"
+    assert failed.payload["events"] == 1
+
+
+def test_a_failed_judgment_consumes_the_batch_fail_closed():
+    judge = FakeJudge(failed=True)
+    coordinator = Coordinator(announce_prompt="JUGE", judge=judge)
+    drive(
+        coordinator,
+        [
+            EventReceived(source="matrix", content="x"),
+            window_timer(),
+        ],
+    )
+
+    # Le lot est consommé une seule fois : l'échéance tardive ne rejuge rien.
+    handle(coordinator, window_timer())
+    assert judge.calls == [["[matrix] x"]]
     assert coordinator.state is SessionState.IDLE
 
 

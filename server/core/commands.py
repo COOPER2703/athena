@@ -37,12 +37,15 @@ class SendAnnouncementToLlm:
     """Fait prononcer au modèle Live une Annonce proactive (ADR-0007, amendé).
 
     Le verdict (parler ou se taire) vient du jugement **texte** ; cette commande
-    ne sert qu'à faire parler la Connexion Live ouverte pour l'Annonce, jamais à
-    juger. Distincte de l'injection de mémoire.
+    porte à la fois la phrase à prononcer (``text``, le message du juge) et les
+    faits bruts de l'Événement (``facts``). Les faits entrent dans le contexte du
+    Live, sans être prononcés, pour qu'Athena puisse détailler l'Événement quand
+    l'utilisateur le lui demande (ADR-0013). Distincte de l'injection de mémoire.
     """
 
     connection_id: str
     text: str
+    facts: str = ""
 
 
 @dataclass(frozen=True, slots=True)

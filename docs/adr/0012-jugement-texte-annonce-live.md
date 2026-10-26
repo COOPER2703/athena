@@ -7,6 +7,9 @@ accepted
 Amende l'ADR-0007 : le verdict de jugement ne vient plus du modèle Live vocal mais d'un
 modèle **texte** hors Session.
 
+Amendé par l'ADR-0013 : la Connexion d'Annonce devient une Session ordinaire — prompt système,
+Activation mémoire, Tools — et reçoit aussi les faits bruts de l'Événement.
+
 ## Contexte
 
 L'ADR-0007 faisait reposer le verdict sur le **silence** de la Connexion Live : le lot
@@ -22,7 +25,8 @@ système. Mesuré sur `gemini-3.1-flash-live-preview` :
 - un fait banal (« La température du salon est de 19 degrés ») est **récité à l'oral** 3 fois
   sur 3, sans aucun filtrage ;
 - un modèle **texte** (`gemini-3.8-flash`, sortie structurée) sépare proprement banal
-  (`announce=false`) et important (`announce=true`).
+  (`announce=false`) et important (`announce=true`), mais son quota gratuit (20 requêtes/jour)
+  et sa latence (~30-50 s) le rendent inutilisable comme juge par défaut.
 
 Conséquence : la moindre audition ouvrait une Session automatique — « le jugement ne se fait
 pas, la session se lance à chaque fois ».
@@ -42,9 +46,16 @@ pas, la session se lance à chaque fois ».
   un **filet de sécurité** : si la Connexion d'Annonce ne produit aucun son, elle est
   refermée sans qu'aucune Session n'apparaisse.
 - Une panne de jugement (réseau, réponse non-JSON) est une **faute fermée** : `announce=false`,
-  on ne dérange pas l'utilisateur dans le doute. Le juge ne lève jamais.
-- Le modèle de jugement est configurable (`GEMINI_JUDGE_MODEL`, défaut `gemini-3.8-flash`),
-  distinct du modèle Live. Le prompt de jugement reste versionné (`judge-prompt.txt`).
+  on ne dérange pas l'utilisateur dans le doute. Le juge ne lève jamais. Un pic transitoire du
+  fournisseur (503/429) est d'abord **retenté** (trois tentatives, backoff court) avant la
+  faute fermée, sinon une Session automatique serait silencieusement perdue.
+- Le modèle de jugement est configurable (`GEMINI_JUDGE_MODEL`, défaut
+  `gemini-3.1-flash-lite`), distinct du modèle Live. Un modèle Flash-Lite est retenu par
+  défaut : il tient le quota gratuit et juge en quelques secondes, là où `gemini-3.8-flash`
+  épuisait son quota (20 requêtes/jour) et rendait des verdicts `failed` (faute fermée),
+  donc plus aucune Session automatique. Le prompt de jugement reste versionné
+  (`judge-prompt.txt`) et distingue explicitement les messages personnels (invitation,
+  rendez-vous, question) du bruit ambiant (domotique, spam, bavardage de groupe).
 
 Le reste de l'ADR-0007 est inchangé : jugement au Repos seul, fenêtre de regroupement
 paresseuse, File d'attente plafonnée et éphémère, « l'utilisateur gagne toujours », une seule

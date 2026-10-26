@@ -99,7 +99,9 @@ class GeminiLiveAdapter:
             await self.send_memory(command.connection_id, command.text)
             return
         if isinstance(command, SendAnnouncementToLlm):
-            await self.send_announcement(command.connection_id, command.text)
+            await self.send_announcement(
+                command.connection_id, command.text, command.facts
+            )
             return
         if isinstance(command, SendToolResultToLlm):
             await self.send_tool_result(
@@ -268,15 +270,27 @@ class GeminiLiveAdapter:
             sent_kind="memory_injected",
         )
 
-    async def send_announcement(self, connection_id: str, text: str) -> None:
+    async def send_announcement(
+        self, connection_id: str, text: str, facts: str = ""
+    ) -> None:
         """Fait prononcer au modèle Live une Annonce proactive.
 
         Commande distincte de l'injection de mémoire (ADR-0007, amendé) : le
-        verdict (parler ou se taire) vient du jugement **texte**, cette commande
-        ne fait que donner la parole à l'Annonce. Le tour est complété
+        verdict (parler ou se taire) vient du jugement **texte**. Les faits bruts
+        de l'Événement (``facts``) sont d'abord injectés comme contexte
+        (``turn_complete=False``) pour qu'Athena puisse détailler l'Événement à
+        la demande ; puis la phrase du juge (``text``) complète le tour
         (``turn_complete=True``) pour que le modèle parle. Best effort : un envoi
         raté ne lève jamais.
         """
+        if facts:
+            await self._send_client_content(
+                connection_id,
+                facts,
+                turn_complete=False,
+                kind="announcement_facts",
+                sent_kind="announcement_facts_sent",
+            )
         await self._send_client_content(
             connection_id,
             text,

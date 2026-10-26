@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Callable, TypeVar
 
 from conftest import FakeJudge, RecordingTraceSink, wait_until
@@ -432,24 +433,39 @@ def test_shutdown_requested_is_traced_even_when_idle() -> None:
     asyncio.run(scenario())
 
 
-def test_build_app_installs_logging_bridge_debug_only_when_flag_on() -> None:
+def test_build_app_installs_logging_bridge_debug_only_when_flag_on(
+    tmp_path: Path,
+) -> None:
     root = logging.getLogger()
     original_handlers = root.handlers[:]
     original_level = root.level
     gemini = GeminiConfig(api_key="test-key")
     try:
-        build_app(AppConfig(gemini=gemini, debug_decisions=True))
+        build_app(
+            AppConfig(
+                gemini=gemini, debug_decisions=True, log_dir=str(tmp_path)
+            )
+        )
         assert root.level == logging.DEBUG
 
-        build_app(AppConfig(gemini=gemini, debug_decisions=False, log_level="WARNING"))
+        build_app(
+            AppConfig(
+                gemini=gemini,
+                debug_decisions=False,
+                log_level="WARNING",
+                log_dir=str(tmp_path),
+            )
+        )
         assert root.level == logging.WARNING
     finally:
         root.handlers[:] = original_handlers
         root.setLevel(original_level)
 
 
-def test_build_app_wires_the_kernel_memory_tools() -> None:
-    app = build_app(AppConfig(gemini=GeminiConfig(api_key="test-key")))
+def test_build_app_wires_the_kernel_memory_tools(tmp_path: Path) -> None:
+    app = build_app(
+        AppConfig(gemini=GeminiConfig(api_key="test-key"), log_dir=str(tmp_path))
+    )
 
     assert app.tools is not None
     assert {spec.name for spec in app.tools.specs()} == {"save_memory", "forget_memory"}

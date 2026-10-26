@@ -58,6 +58,8 @@ def test_python_m_server_starts_and_shuts_down_cleanly_on_sigint(
         "WS_HOST": "127.0.0.1",
         "WS_PORT": str(_free_port()),
         "ATHENA_MEMORY_DB": str(tmp_path / "memory.db"),
+        "ATHENA_LOG_DIR": str(tmp_path / "logs"),
+        "LOG_LEVEL": "INFO",
     }
     process = subprocess.Popen(
         [sys.executable, "-m", "server"],
@@ -95,6 +97,10 @@ def test_python_m_server_starts_and_shuts_down_cleanly_on_sigint(
         assert process.returncode == 0, "".join(lines)
         reader.join(timeout=1.0)
         assert any("stopped" in line for line in lines), "".join(lines)
+        written = (tmp_path / "logs" / "server.log").read_text(encoding="utf-8")
+        assert "started" in written
+        assert "stopped" in written
+        assert "DEBUG" not in written
     finally:
         if process.poll() is None:
             process.kill()

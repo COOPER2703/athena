@@ -5,7 +5,8 @@
 accepted
 
 Amendé par l'ADR-0012 : le verdict de jugement vient d'un modèle texte, plus du silence du
-modèle Live.
+modèle Live. Puis par l'ADR-0013 : la Connexion d'Annonce devient une Session ordinaire qui
+reçoit aussi les faits bruts de l'Événement.
 
 Amende la pratique décrite par le glossaire (une Notification injectée dans la Session
 active) et précise l'ADR-0019 de `legacy/`. La forme du transport (une seule file) est

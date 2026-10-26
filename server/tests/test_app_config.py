@@ -29,6 +29,7 @@ def test_defaults_with_only_required_secret() -> None:
     assert isinstance(cfg, AppConfig)
     assert cfg.server == ServerConfig(host="0.0.0.0", port=8765)
     assert cfg.log_level is LogLevel.INFO
+    assert cfg.log_dir == "logs"
     assert cfg.debug_decisions is False
     assert cfg.gemini.api_key == "k"
     assert cfg.gemini.model == DEFAULT_GEMINI_MODEL
@@ -44,6 +45,7 @@ def test_reads_and_coerces_environment() -> None:
             "WS_PORT": "9000",
             "LOG_LEVEL": "debug",
             "ATHENA_DEBUG_DECISIONS": "true",
+            "ATHENA_LOG_DIR": " var/athena-logs ",
             "GEMINI_MODEL": "custom-model",
             "GEMINI_VOICE": "Puck",
             "GEMINI_JUDGE_MODEL": "custom-judge",
@@ -53,6 +55,7 @@ def test_reads_and_coerces_environment() -> None:
     assert cfg.server.host == "127.0.0.1"
     assert cfg.server.port == 9000
     assert cfg.log_level is LogLevel.DEBUG
+    assert cfg.log_dir == "var/athena-logs"
     assert cfg.debug_decisions is True
     assert cfg.gemini.model == "custom-model"
     assert cfg.gemini.voice == "Puck"

@@ -12,6 +12,8 @@ import pytest
 from server.adapters.trace import emit
 from server.app.trace import (
     ConsoleTraceSink,
+    FanOutTraceSink,
+    FileTraceSink,
     build_trace_sink,
     install_logging_bridge,
     render,
@@ -115,6 +117,89 @@ def test_debug_decisions_gates_a_real_decision_entry_end_to_end() -> None:
 
     assert "ClientRegistered" not in off_stream.getvalue()
     assert "ClientRegistered" in on_stream.getvalue()
+
+
+def test_file_sink_writes_every_entry_when_level_is_debug(tmp_path: Path) -> None:
+    path = tmp_path / "logs" / "server.log"
+    sink = FileTraceSink(path, min_level="debug")
+    sink.emit(_entry(kind="SessionRequested"))
+    sink.emit(_entry(kind="ClientAudio", level="debug"))
+    sink.close()
+
+    content = path.read_text(encoding="utf-8")
+    assert "SessionRequested" in content
+    assert "ClientAudio" in content
+    assert path.parent.is_dir()
+
+
+def test_file_sink_respects_info_level(tmp_path: Path) -> None:
+    path = tmp_path / "server.log"
+    sink = FileTraceSink(path, min_level="info")
+    sink.emit(_entry(kind="SessionRequested"))
+    sink.emit(_entry(kind="ClientAudio", level="debug"))
+    sink.close()
+
+    content = path.read_text(encoding="utf-8")
+    assert "SessionRequested" in content
+    assert "ClientAudio" not in content
+
+
+def test_file_sink_rotates_and_keeps_a_backup(tmp_path: Path) -> None:
+    path = tmp_path / "server.log"
+    first = render(_entry(kind="First")) + "\n"
+    sink = FileTraceSink(path, max_bytes=len(first) + 1, backup_count=1)
+    sink.emit(_entry(kind="First"))
+    sink.emit(_entry(kind="Second"))
+    sink.close()
+
+    assert "Second" in path.read_text(encoding="utf-8")
+    backup = tmp_path / "server.log.1"
+    assert backup.exists()
+    assert "First" in backup.read_text(encoding="utf-8")
+
+
+def test_fan_out_sink_feeds_every_consumer(tmp_path: Path) -> None:
+    stream = io.StringIO()
+    path = tmp_path / "server.log"
+    sink = FanOutTraceSink(ConsoleTraceSink(stream), FileTraceSink(path))
+    sink.emit(_entry(kind="LlmOpened"))
+    sink.close()
+
+    assert "LlmOpened" in stream.getvalue()
+    assert "LlmOpened" in path.read_text(encoding="utf-8")
+
+
+def test_build_trace_sink_tees_console_and_file(tmp_path: Path) -> None:
+    stream = io.StringIO()
+    sink = build_trace_sink(stream=stream, log_dir=tmp_path)
+    sink.emit(_entry(kind="LlmOpened"))
+    sink.close()
+
+    assert "LlmOpened" in stream.getvalue()
+    assert "LlmOpened" in (tmp_path / "server.log").read_text(encoding="utf-8")
+
+
+def test_build_trace_sink_filters_the_file_at_the_configured_level(
+    tmp_path: Path,
+) -> None:
+    sink = build_trace_sink(log_dir=tmp_path, level="info")
+    sink.emit(_entry(kind="SessionRequested"))
+    sink.emit(_entry(kind="ClientAudio", level="debug"))
+    sink.close()
+
+    content = (tmp_path / "server.log").read_text(encoding="utf-8")
+    assert "SessionRequested" in content
+    assert "ClientAudio" not in content
+
+
+def test_build_trace_sink_keeps_debug_when_decisions_are_enabled(
+    tmp_path: Path,
+) -> None:
+    sink = build_trace_sink(log_dir=tmp_path, level="info", debug_decisions=True)
+    sink.emit(_entry(kind="ClientAudio", level="debug"))
+    sink.close()
+
+    assert "ClientAudio" in (tmp_path / "server.log").read_text(encoding="utf-8")
 
 
 def test_logging_bridge_feeds_third_party_logs_into_the_stream() -> None:

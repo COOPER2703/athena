@@ -189,6 +189,9 @@ class App:
                 await self._webhook.stop()
             self._clock.close()
             self._emit("stopped")
+            close = getattr(self._trace_sink, "close", None)
+            if close is not None:
+                close()
 
     async def _warmup_memory(self) -> None:
         warmup = getattr(self._memory, "warmup", None)
@@ -266,7 +269,11 @@ class App:
 
 def build_app(config: AppConfig) -> App:
     """Construit explicitement : config → trace → adaptateurs → Coordinator."""
-    trace_sink = build_trace_sink(debug_decisions=config.debug_decisions)
+    trace_sink = build_trace_sink(
+        debug_decisions=config.debug_decisions,
+        log_dir=config.log_dir,
+        level=config.log_level,
+    )
     install_logging_bridge(
         trace_sink,
         level="DEBUG" if config.debug_decisions else config.log_level,

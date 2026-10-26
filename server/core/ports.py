@@ -44,7 +44,9 @@ class LlmSocket(Protocol):
 
     async def send_memory(self, session_id: str, text: str) -> None: ...
 
-    async def send_announcement(self, session_id: str, text: str) -> None: ...
+    async def send_announcement(
+        self, session_id: str, text: str, facts: str = ""
+    ) -> None: ...
 
     async def send_tool_result(
         self,
@@ -61,10 +63,17 @@ class Judgment:
 
     ``announce`` décide si le lot mérite une Annonce proactive ; ``message`` est
     la phrase à prononcer, vide quand ``announce`` est faux.
+
+    ``failed`` distingue un verdict **rendu** (le juge a bien décidé, y compris
+    « se taire ») d'un verdict **manquant** (panne réseau, réponse malformée).
+    Les deux donnent ``announce=False`` — c'est la faute fermée — mais un échec
+    ne doit jamais être confondu avec un fait jugé banal dans le trail : il est
+    tracé comme tel (ADR-0012).
     """
 
     announce: bool
     message: str = ""
+    failed: bool = False
 
 
 class EventJudge(Protocol):
@@ -73,8 +82,9 @@ class EventJudge(Protocol):
     Le verdict vient d'un modèle **texte**, jamais du modèle Live vocal : un
     modèle Live répond toujours à un tour utilisateur, il ne sait pas « se
     taire ». L'adaptateur possède l'appel réseau et ne lève jamais : un échec de
-    jugement renvoie ``Judgment(announce=False)`` (faute fermée : dans le doute,
-    on ne dérange pas l'utilisateur).
+    jugement renvoie ``Judgment(announce=False, failed=True)`` (faute fermée :
+    dans le doute, on ne dérange pas l'utilisateur). ``failed`` doit refléter un
+    verdict manquant, jamais un verdict rendu.
     """
 
     async def judge(self, facts: Sequence[str]) -> Judgment: ...
