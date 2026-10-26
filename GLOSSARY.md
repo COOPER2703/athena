@@ -147,10 +147,16 @@ _Avoid_: Silencieux, muet
 ### Domotique
 
 **Intent**:
-Une commande sémantique Assist de Home Assistant (`HassTurnOn`, `HassLightSet`, …).
-Athena expose les Intents à Gemini comme des Tools ; la résolution des noms, zones et
-alias se fait dans Home Assistant, jamais dans le plugin.
+Une commande sémantique Assist de Home Assistant (`HassTurnOn`, `HassLightSet`, …). La
+résolution des noms, zones et alias se fait dans Home Assistant, jamais dans le plugin.
 _Avoid_: Command, action, service, appel REST
+
+**Tool Assist**:
+Un Tool exposé par l'API Assist de Home Assistant. La plupart sont des Intents ; d'autres
+lisent l'état de la maison (`GetLiveContext`, `HassGetState`) ou lancent un script. Le
+plugin `homeassistant` les expose tels quels : Athena ne filtre pas les Tools Assist aux
+seuls Intents et ne les renomme pas.
+_Avoid_: Tool HA, outil domotique, function
 
 **Exposition Assist**:
 Le périmètre des entités pilotables par Athena, défini dans Home Assistant par son
@@ -232,24 +238,41 @@ _Avoid_: save_memory proactif, sauvegarde automatique, mémorisation implicite
 
 ### Plugins
 
-Un plugin est un module externe exposant des Tools à Gemini. Le noyau (session, mémoire)
-n'est pas un plugin.
+Un plugin est un module externe qui expose des Tools à Gemini et peut fournir une
+instruction d'usage. Le noyau (session, mémoire) n'est pas un plugin.
 
 **Plugin**:
 Un module chargé par le serveur ou un Client, exposant des Tools à Gemini. Chaque plugin a
 une seule plateforme (server, desktop, android, ios). Peut être activé, désactivé ou
-supprimé.
+supprimé. Un plugin activé est du code de confiance : il tourne dans le serveur avec ses
+privilèges.
 _Avoid_: Extension, addon, module
 
 **Plugin Registry**:
-Le catalogue central des plugins disponibles avec leur plateforme, source de vérité pour
-les plugins du système.
-_Avoid_: Plugin list, plugin catalog
+Le catalogue des plugins installés sur le serveur et de leur état (activé, désactivé, en
+échec). Il n'existe pas de catalogue de plugins disponibles : installer un plugin, c'est le
+rendre présent sur le serveur.
+_Avoid_: Plugin list, plugin catalog, marketplace
 
 **Plugin Manifest**:
-La description d'un plugin : nom, version, description, plateforme, configuration et
-secrets requis.
+La description d'un plugin : nom, version, description, plateforme, configuration requise
+et noms des secrets requis. Il ne contient jamais de valeur de secret, ne liste pas les
+Tools que le plugin expose — ils sont découverts à l'exécution — et ne déclare pas les
+Sources qu'il émet : une Source est nommée au moment où l'Événement est poussé.
 _Avoid_: Plugin config, plugin metadata
+
+**Instruction de plugin**:
+Le texte qu'un plugin fournit pour expliquer à Gemini comment utiliser ses Tools. Le noyau
+le compose dans le prompt système de toute Session où les Tools de ce plugin sont déclarés.
+Se distingue des descriptions de Tools : c'est une politique d'usage, pas un schéma.
+_Avoid_: Prompt de plugin, system prompt du plugin, instructions HA
+
+**Tool de plugin**:
+Un Tool exposé par un plugin. Son nom, sa description et son schéma viennent de la
+plateforme que le plugin relie ; Athena ne les renomme pas et ne leur ajoute aucun préfixe.
+Le noyau l'exécute par le même round-trip qu'un Tool du noyau, mais l'exécution sort du
+serveur, vers la plateforme.
+_Avoid_: Tool externe, tool intégré, wrapper
 
 ### Développement assisté
 
