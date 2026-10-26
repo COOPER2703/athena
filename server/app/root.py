@@ -538,6 +538,7 @@ def build_app(
         console = ConsoleAdapter(
             host=config.console.host,
             port=config.console.port,
+            static_dir=config.console.static_dir,
         )
 
     return App(

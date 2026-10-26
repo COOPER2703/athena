@@ -9,6 +9,7 @@ from server.app.config import (
     DEFAULT_CONSOLIDATION_MODEL,
     DEFAULT_CONSOLE_HOST,
     DEFAULT_CONSOLE_PORT,
+    DEFAULT_CONSOLE_STATIC_DIR,
     DEFAULT_EMBED_MODEL,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_GEMINI_VOICE,
@@ -265,6 +266,7 @@ def test_console_defaults_are_local_and_enabled() -> None:
     assert cfg.console.enabled is True
     assert cfg.console.host == DEFAULT_CONSOLE_HOST
     assert cfg.console.port == DEFAULT_CONSOLE_PORT
+    assert cfg.console.static_dir == DEFAULT_CONSOLE_STATIC_DIR
 
 
 def test_console_reads_and_coerces_environment() -> None:
@@ -274,12 +276,14 @@ def test_console_reads_and_coerces_environment() -> None:
             "ATHENA_CONSOLE_ENABLED": "0",
             "ATHENA_CONSOLE_HOST": "0.0.0.0",
             "ATHENA_CONSOLE_PORT": "9001",
+            "ATHENA_CONSOLE_STATIC_DIR": "web/custom-dist",
         },
         env_file=None,
     )
     assert cfg.console.enabled is False
     assert cfg.console.host == "0.0.0.0"
     assert cfg.console.port == 9001
+    assert cfg.console.static_dir == "web/custom-dist"
 
 
 @pytest.mark.parametrize(
@@ -290,6 +294,7 @@ def test_console_reads_and_coerces_environment() -> None:
         {"ATHENA_CONSOLE_PORT": "not-a-port"},
         {"ATHENA_CONSOLE_ENABLED": "maybe"},
         {"ATHENA_CONSOLE_HOST": "   "},
+        {"ATHENA_CONSOLE_STATIC_DIR": "   "},
     ],
 )
 def test_invalid_console_config_raises_clear_validation_error(overrides) -> None:

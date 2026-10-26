@@ -30,8 +30,21 @@ configuration suit le même schéma que le Webhook :
 - `ATHENA_CONSOLE_HOST` : `127.0.0.1` par défaut (loopback ; ne l'ouvrir au réseau qu'en
   connaissance de cause).
 - `ATHENA_CONSOLE_PORT` : `8767` par défaut.
+- `ATHENA_CONSOLE_STATIC_DIR` : `web/dist` par défaut ; répertoire du build de la SPA
+  (produit par `make web`). Absent, la Console sert une page explicative et l'API répond
+  normalement.
 
 Le Webhook reste séparé (`ATHENA_WEBHOOK_ENABLED`, `ATHENA_WEBHOOK_HOST`,
 `ATHENA_WEBHOOK_PORT`, `127.0.0.1:8766` par défaut). Le contrat JSON de la Console
 commence par `GET /api/status` ; le front vit dans `web/` et n'est pas requis pour que
 l'API réponde.
+
+### Front (`web/`)
+
+Le front est une SPA Vite + React + TypeScript strict, servie en statique par la Console.
+Le build n'est jamais committé : `node_modules/` et `web/dist/` sont ignorés.
+
+- `make web` installe les dépendances si besoin (`npm ci`) puis construit (`npm run build`).
+- `make web-check` vérifie les types (`tsc --noEmit`), `make web-test` lance `vitest run`.
+- En développement, `npm run dev` dans `web/` proxifie `/api` et le WebSocket vers la
+  Console (`127.0.0.1:8767` par défaut, port surchargeable par `ATHENA_CONSOLE_PORT`).

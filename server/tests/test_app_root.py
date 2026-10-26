@@ -839,6 +839,60 @@ async def _snapshot_when_ready(url: str) -> dict:
             await asyncio.sleep(0.01)
 
 
+def test_build_app_serves_the_configured_build_at_the_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Câblage réel : le répertoire statique de la configuration est servi."""
+
+    async def scenario() -> None:
+        monkeypatch.setattr(
+            "server.app.root.SentenceTransformerEmbedder", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            "server.app.root.SqliteMemoryStore", lambda *a, **k: FakeMemory()
+        )
+        static_dir = tmp_path / "dist"
+        static_dir.mkdir()
+        (static_dir / "index.html").write_text(
+            "<!doctype html><div id=\"root\"></div>", encoding="utf-8"
+        )
+        port = _free_port()
+        console_port = _free_port()
+        config = AppConfig(
+            gemini=GeminiConfig(api_key="test-key"),
+            server=ServerConfig(host="127.0.0.1", port=port),
+            console=ConsoleConfig(port=console_port, static_dir=str(static_dir)),
+            plugins=PluginsConfig(
+                directory=str(tmp_path / "plugins"),
+                state_path=str(tmp_path / "plugins.json"),
+            ),
+            log_dir=str(tmp_path),
+        )
+        app = build_app(config, secrets=EnvSecretResolver({}), env={}, env_file=None)
+        runner = asyncio.create_task(app.run())
+        try:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 2.0
+            while True:
+                try:
+                    async with aiohttp.ClientSession() as http:
+                        async with http.get(
+                            f"http://127.0.0.1:{console_port}/"
+                        ) as response:
+                            assert response.status == 200
+                            assert 'id="root"' in await response.text()
+                            break
+                except aiohttp.ClientConnectorError:
+                    if loop.time() > deadline:
+                        raise
+                    await asyncio.sleep(0.01)
+        finally:
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+
+    asyncio.run(scenario())
+
+
 def test_build_app_serves_plugins_and_safe_config_in_the_snapshot(
     tmp_path: Path, monkeypatch
 ) -> None:
