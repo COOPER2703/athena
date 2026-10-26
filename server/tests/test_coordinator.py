@@ -224,6 +224,23 @@ def test_visibility_assigns_session_id_to_the_connection():
     assert coordinator.session_id == "s1"
 
 
+def test_owner_client_id_reads_the_session_owner_and_clears_with_it():
+    coordinator = Coordinator()
+    assert coordinator.owner_client_id == ""
+
+    drive(coordinator, [SessionRequested(client_id="c1")])
+    # Une Connexion Live n'est pas encore une Session : aucun Client actif.
+    assert coordinator.owner_client_id == ""
+    drive(coordinator, [LlmOpened()])
+    assert coordinator.owner_client_id == ""
+
+    drive(coordinator, [LlmAudio(data=b"hi")])
+    assert coordinator.owner_client_id == "c1"
+
+    drive(coordinator, [LlmClosed(connection_id="s1")])
+    assert coordinator.owner_client_id == ""
+
+
 def test_events_and_commands_are_frozen_slots_dataclasses():
     types_to_check = [
         ClientRegistered,

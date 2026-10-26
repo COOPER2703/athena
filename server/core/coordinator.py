@@ -159,6 +159,20 @@ class Coordinator:
     def session_id(self) -> str:
         return self._session_id
 
+    @property
+    def owner_client_id(self) -> str:
+        """Client propriétaire de la Session en cours, vide hors Session.
+
+        Lecture seule : la Console web lit cette valeur à travers l'instantané
+        de la racine de composition (ADR-0016). Le nom évite volontairement
+        ``active_client_id``, réservé aux garde-fous des adaptateurs.
+
+        Une Connexion Live n'est pas encore une Session : tant que la Session
+        n'est pas visible, aucun Client n'est actif et la valeur reste vide
+        (GLOSSARY, Connexion Live et Client actif).
+        """
+        return self._client_id if self._visible else ""
+
     async def handle(self, event: Event) -> list[Command]:
         commands = await self._dispatch(event)
         # Modèle unifié : dès que le noyau est au Repos avec des Événements en
