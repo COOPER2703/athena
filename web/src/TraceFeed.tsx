@@ -1,146 +1,62 @@
 import { useEffect, useRef, useState } from "react";
 
 import {
-  applyTrace,
-  backoffDelay,
-  connectionLabel,
-  emptyFeed,
+  EMPTY_FILTERS,
+  LIVE_VIEW,
+  availableLevels,
+  availableSources,
+  displayedEntries,
+  pauseView,
+  resumeView,
+  type FeedView,
+  type TraceFilters,
+} from "./filters";
+import {
   formatPayload,
   formatTimestamp,
-  resetOnHello,
+  connectionLabel,
   type ConnectionStatus,
   type FeedState,
-  type StreamFrame,
   type TraceEntry,
 } from "./trace";
 
-/** URL du flux vivant, sur la même origine que la page servie par la Console. */
-function streamUrl(): string {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/api/stream`;
-}
-
 /**
- * Panneau de traces alimenté par `GET /api/stream`.
+ * Panneau de traces alimenté par le flux de la page.
  *
- * La reconnexion est automatique avec backoff exponentiel. Chaque `hello`
- * remplace le backlog affiché (`resetOnHello`) : on ne concatène jamais deux
- * connexions. L'autoscroll se suspend d'un clic pour lire un passage stable.
+ * Le flux (connexion, reconnexion, backlog) vit plus haut, dans
+ * `useConsoleStream` : ce panneau ne fait que filtrer, geler et faire défiler
+ * ce qu'il reçoit. Une pause fige l'affichage mais pas les données.
  */
-export function TraceFeed() {
-  const [feed, setFeed] = useState<FeedState>(emptyFeed);
-  const [status, setStatus] = useState<ConnectionStatus>("connecting");
+export function TraceFeed({
+  feed,
+  connection,
+}: {
+  feed: FeedState;
+  connection: ConnectionStatus;
+}) {
+  const [filters, setFilters] = useState<TraceFilters>(EMPTY_FILTERS);
+  const [view, setView] = useState<FeedView>(LIVE_VIEW);
   const [autoScroll, setAutoScroll] = useState(true);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => {
-    let disposed = false;
-    let socket: WebSocket | null = null;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let failures = 0;
-
-    const connect = () => {
-      if (disposed) {
-        return;
-      }
-      setStatus(failures === 0 ? "connecting" : "reconnecting");
-      const ws = new WebSocket(streamUrl());
-      socket = ws;
-
-      ws.addEventListener("open", () => {
-        if (disposed) {
-          return;
-        }
-        failures = 0;
-        setStatus("connected");
-      });
-
-      ws.addEventListener("message", (event) => {
-        if (disposed) {
-          return;
-        }
-        let frame: StreamFrame;
-        try {
-          frame = JSON.parse(String(event.data)) as StreamFrame;
-        } catch {
-          return;
-        }
-        if (frame.type === "hello") {
-          setFeed((state) => resetOnHello(state, frame));
-        } else if (frame.type === "trace") {
-          setFeed((state) => applyTrace(state, frame.data));
-        }
-      });
-
-      ws.addEventListener("close", () => {
-        if (disposed) {
-          return;
-        }
-        if (typeof navigator !== "undefined" && !navigator.onLine) {
-          setStatus("disconnected");
-          return;
-        }
-        setStatus("reconnecting");
-        const delay = backoffDelay(failures);
-        failures += 1;
-        timer = setTimeout(connect, delay);
-      });
-
-      ws.addEventListener("error", () => {
-        // `close` suit toujours : la reconnexion est planifiée là-bas.
-        ws.close();
-      });
-    };
-
-    const handleOffline = () => {
-      setStatus("disconnected");
-      if (timer !== null) {
-        clearTimeout(timer);
-        timer = null;
-      }
-      socket?.close();
-    };
-
-    const handleOnline = () => {
-      if (
-        socket !== null &&
-        (socket.readyState === WebSocket.CONNECTING ||
-          socket.readyState === WebSocket.OPEN ||
-          socket.readyState === WebSocket.CLOSING)
-      ) {
-        return;
-      }
-      if (timer !== null) {
-        clearTimeout(timer);
-        timer = null;
-      }
-      failures = 0;
-      connect();
-    };
-
-    window.addEventListener("offline", handleOffline);
-    window.addEventListener("online", handleOnline);
-    connect();
-    return () => {
-      disposed = true;
-      window.removeEventListener("offline", handleOffline);
-      window.removeEventListener("online", handleOnline);
-      if (timer !== null) {
-        clearTimeout(timer);
-      }
-      socket?.close();
-    };
-  }, []);
+  const levels = availableLevels(feed.entries);
+  const sources = availableSources(feed.entries);
+  const entries = displayedEntries(feed.entries, filters, view);
+  const pending = view.paused
+    ? Math.max(0, feed.entries.length - view.snapshot.length)
+    : 0;
+  const filtersActive =
+    filters.level !== "" || filters.source !== "" || filters.text.trim() !== "";
 
   useEffect(() => {
-    if (!autoScroll) {
+    if (!autoScroll || view.paused) {
       return;
     }
     const list = scrollRef.current;
     if (list !== null) {
       list.scrollTop = list.scrollHeight;
     }
-  }, [feed, autoScroll]);
+  }, [feed.entries, autoScroll, view.paused]);
 
   return (
     <section className="panel trace-panel" aria-labelledby="traces-title">
@@ -149,7 +65,88 @@ export function TraceFeed() {
           Traces
         </h2>
         <div className="trace-panel__controls">
-          <span className={`status status--${status}`}>{connectionLabel(status)}</span>
+          <span className={`status status--${connection}`}>
+            {connectionLabel(connection)}
+          </span>
+        </div>
+      </div>
+
+      <div className="trace-filters">
+        <label className="field field--filter" htmlFor="trace-level">
+          <span className="field__label">Niveau</span>
+          <select
+            className="field__input mono"
+            id="trace-level"
+            value={filters.level}
+            onChange={(event) =>
+              setFilters((current) => ({
+                ...current,
+                level: event.target.value,
+              }))
+            }
+          >
+            <option value="">Tous</option>
+            {levels.map((level) => (
+              <option key={level} value={level}>
+                {level}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="field field--filter" htmlFor="trace-source">
+          <span className="field__label">Source</span>
+          <select
+            className="field__input mono"
+            id="trace-source"
+            value={filters.source}
+            onChange={(event) =>
+              setFilters((current) => ({
+                ...current,
+                source: event.target.value,
+              }))
+            }
+          >
+            <option value="">Toutes</option>
+            {sources.map((source) => (
+              <option key={source} value={source}>
+                {source}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="field field--search" htmlFor="trace-text">
+          <span className="field__label">Texte</span>
+          <input
+            className="field__input"
+            id="trace-text"
+            type="search"
+            value={filters.text}
+            placeholder="source, kind ou payload…"
+            onChange={(event) =>
+              setFilters((current) => ({
+                ...current,
+                text: event.target.value,
+              }))
+            }
+            spellCheck={false}
+          />
+        </label>
+
+        <div className="trace-filters__actions">
+          <button
+            className="button"
+            type="button"
+            aria-pressed={view.paused}
+            onClick={() =>
+              setView((current) =>
+                current.paused ? resumeView() : pauseView(feed.entries),
+              )
+            }
+          >
+            {view.paused ? "Reprendre" : "Pause"}
+          </button>
           <button
             className="button"
             type="button"
@@ -157,6 +154,14 @@ export function TraceFeed() {
             onClick={() => setAutoScroll((value) => !value)}
           >
             {autoScroll ? "Défilement auto" : "Défilement suspendu"}
+          </button>
+          <button
+            className="button"
+            type="button"
+            disabled={!filtersActive}
+            onClick={() => setFilters(EMPTY_FILTERS)}
+          >
+            Réinitialiser
           </button>
         </div>
       </div>
@@ -167,12 +172,25 @@ export function TraceFeed() {
         </p>
       ) : null}
 
+      {view.paused ? (
+        <p className="notice notice--warning" role="status">
+          Affichage gelé{pending > 0 ? ` · ${pending} nouvelle(s) trace(s)` : ""}.
+        </p>
+      ) : null}
+
       <div className="trace-list" ref={scrollRef} aria-live="polite">
-        {feed.entries.length === 0 ? (
-          <p className="notice">En attente de traces…</p>
+        {entries.length === 0 ? (
+          <p className="notice">
+            {feed.entries.length === 0
+              ? "En attente de traces…"
+              : "Aucune trace ne correspond aux filtres."}
+          </p>
         ) : (
-          feed.entries.map((entry, index) => (
-            <TraceRow key={`${entry.timestamp}-${index}`} entry={entry} />
+          entries.map((entry, index) => (
+            <TraceRow
+              key={`${entry.timestamp}-${entry.source}-${entry.kind}-${index}`}
+              entry={entry}
+            />
           ))
         )}
       </div>
