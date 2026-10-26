@@ -82,6 +82,15 @@ def _write_plugin(
     return directory
 
 
+def _named_code(name: str, code: str = FIXTURE_CODE) -> str:
+    """Point d'entrée de fixture lié au nom du plugin (nom et Tools suivent)."""
+    return (
+        code.replace('name="fixture"', f'name="{name}"')
+        .replace("fixture__echo", f"{name}__echo")
+        .replace("fixture__ping", f"{name}__ping")
+    )
+
+
 def _write_state(
     root: Path,
     *,
@@ -357,3 +366,227 @@ def test_malformed_manifest_fails_the_startup(tmp_path: Path) -> None:
         _load(_loader(tmp_path, RecordingTraceSink()))
 
     assert FIXTURE_NAME in str(excinfo.value)
+
+
+# -- Pannes retentables (ticket #57) -----------------------------------------
+
+# Un plugin dont ``create`` échoue la première fois puis réussit : le cas d'une
+# plateforme injoignable au démarrage, qui se répare sans redémarrer Athena.
+FLAKY_CODE = '''
+from server.core.plugins import PluginBinding, ToolBinding
+from server.core.ports import ToolSpec
+
+attempts = 0
+
+
+async def handle(arguments):
+    return {"status": "ok"}
+
+
+def create(context):
+    global attempts
+    attempts += 1
+    if attempts == 1:
+        raise ConnectionError("home assistant unreachable")
+    return PluginBinding(
+        name="fixture",
+        tools=(
+            ToolBinding(
+                spec=ToolSpec(name="fixture__ping", description="ping", parameters={}),
+                handler=handle,
+            ),
+        ),
+    )
+'''
+
+ALWAYS_FAILING_CODE = '''
+def create(context):
+    raise ConnectionError("home assistant toujours injoignable")
+'''
+
+
+WRONG_BINDING_CODE = '''
+from server.core.plugins import PluginBinding, ToolBinding
+from server.core.ports import ToolSpec
+
+attempts = 0
+
+
+async def handle(arguments):
+    return {"status": "ok"}
+
+
+def create(context):
+    global attempts
+    attempts += 1
+    if attempts == 1:
+        raise ConnectionError("home assistant unreachable")
+    return PluginBinding(
+        name="un-autre-nom",
+        tools=(
+            ToolBinding(
+                spec=ToolSpec(name="fixture__ping", description="ping", parameters={}),
+                handler=handle,
+            ),
+        ),
+    )
+'''
+
+
+def test_a_failing_create_is_traced_failed_and_kept_for_retry(tmp_path: Path) -> None:
+    _write_plugin(tmp_path, code=FLAKY_CODE)
+    _write_state(tmp_path, enabled=[FIXTURE_NAME])
+    sink = RecordingTraceSink()
+    loader = _loader(tmp_path, sink)
+
+    registry = _load(loader)
+
+    # Le démarrage n'échoue pas : le plugin est seulement en échec.
+    assert registry.tools.specs() == ()
+    [failed] = sink.of_kind("PluginState")
+    assert failed.payload["plugin"] == FIXTURE_NAME
+    assert failed.payload["state"] == "failed"
+    assert "ConnectionError" in failed.payload["reason"]
+    assert "unreachable" in failed.payload["reason"]
+    assert loader.pending == (FIXTURE_NAME,)
+
+    remaining = asyncio.run(
+        loader.retry_pending(registry, push_event=lambda source, content: None)
+    )
+
+    assert remaining == ()
+    assert loader.pending == ()
+    assert registry.tools.owner_of("fixture__ping") == FIXTURE_NAME
+    states = [entry.payload["state"] for entry in sink.of_kind("PluginState")]
+    assert states == ["failed", "activated"]
+
+
+def test_a_retry_that_fails_again_is_traced_and_kept(tmp_path: Path) -> None:
+    _write_plugin(tmp_path, code=ALWAYS_FAILING_CODE)
+    _write_state(tmp_path, enabled=[FIXTURE_NAME])
+    sink = RecordingTraceSink()
+    loader = _loader(tmp_path, sink)
+    registry = _load(loader)
+
+    remaining = asyncio.run(
+        loader.retry_pending(registry, push_event=lambda source, content: None)
+    )
+
+    assert remaining == (FIXTURE_NAME,)
+    states = [entry.payload["state"] for entry in sink.of_kind("PluginState")]
+    assert states == ["failed", "failed"]
+    assert "toujours injoignable" in sink.of_kind("PluginState")[-1].payload["reason"]
+
+
+def test_a_retry_never_retries_a_structural_defect(tmp_path: Path) -> None:
+    """Un nom de binding faux n'est pas une panne passagère : la retente s'arrête."""
+    _write_plugin(tmp_path, code=WRONG_BINDING_CODE)
+    _write_state(tmp_path, enabled=[FIXTURE_NAME])
+    sink = RecordingTraceSink()
+    loader = _loader(tmp_path, sink)
+    registry = _load(loader)
+
+    remaining = asyncio.run(
+        loader.retry_pending(registry, push_event=lambda source, content: None)
+    )
+
+    assert remaining == ()
+    assert loader.pending == ()
+    assert registry.tools.specs() == ()
+    [failed] = sink.of_kind("PluginState")[1:]
+    assert failed.payload["state"] == "failed"
+    assert "un-autre-nom" in failed.payload["reason"]
+
+
+def test_a_retry_after_a_create_failure_still_refuses_a_tool_collision(
+    tmp_path: Path,
+) -> None:
+    _write_plugin(
+        tmp_path,
+        "alpha",
+        manifest=_manifest("alpha"),
+        code=_named_code("alpha"),
+    )
+    _write_plugin(
+        tmp_path,
+        "beta",
+        manifest=_manifest("beta"),
+        code=FLAKY_CODE.replace('name="fixture"', 'name="beta"').replace(
+            "fixture__ping", "alpha__echo"
+        ),
+    )
+    _write_state(tmp_path, enabled=["alpha", "beta"])
+    sink = RecordingTraceSink()
+    loader = _loader(tmp_path, sink)
+    registry = _load(loader)
+
+    remaining = asyncio.run(
+        loader.retry_pending(registry, push_event=lambda source, content: None)
+    )
+
+    # La collision reste fatale : elle est tracée et n'entre jamais en retente,
+    # et aucun Tool du plugin refusé n'entre dans le registre.
+    assert remaining == ()
+    assert registry.tools.owner_of("alpha__echo") == "alpha"
+    failed = sink.of_kind("PluginState")[-1]
+    assert failed.payload["plugin"] == "beta"
+    assert failed.payload["state"] == "failed"
+    assert "alpha" in failed.payload["reason"]
+
+
+def test_entrypoint_raising_at_import_fails_the_startup(tmp_path: Path) -> None:
+    _write_plugin(tmp_path, code='raise RuntimeError("boom à l\'import")')
+    _write_state(tmp_path, enabled=[FIXTURE_NAME])
+
+    with pytest.raises(PluginLoadError) as excinfo:
+        _load(_loader(tmp_path, RecordingTraceSink()))
+
+    message = str(excinfo.value)
+    assert FIXTURE_NAME in message
+    assert "boom à l'import" in message
+
+
+LEAKY_CODE = '''
+def create(context):
+    raise RuntimeError(f"refusé pour {context.secrets['token']}")
+'''
+
+
+def test_a_failed_plugin_never_leaks_a_secret_in_its_reason(tmp_path: Path) -> None:
+    secret = "s3cr3t-token-value"
+    _write_plugin(
+        tmp_path,
+        code=LEAKY_CODE,
+        manifest=_manifest(secrets=[{"key": "token", "required": True}]),
+    )
+    _write_state(tmp_path, enabled=[FIXTURE_NAME])
+    sink = RecordingTraceSink()
+
+    _load(_loader(tmp_path, sink, env={"ATHENA_PLUGIN_FIXTURE_TOKEN": secret}))
+
+    [failed] = sink.of_kind("PluginState")
+    assert failed.payload["state"] == "failed"
+    assert secret not in json.dumps([entry.payload for entry in sink.entries])
+    assert "***" in failed.payload["reason"]
+
+
+def test_startup_traces_every_plugin_state_in_one_deterministic_pass(
+    tmp_path: Path,
+) -> None:
+    for name in ("alpha", "gamma", "delta"):
+        _write_plugin(tmp_path, name, manifest=_manifest(name), code=_named_code(name))
+    _write_plugin(tmp_path, "beta", manifest=_manifest("beta"), code=ALWAYS_FAILING_CODE)
+    _write_state(tmp_path, enabled=["alpha", "disparu", "gamma", "beta"])
+
+    sink = RecordingTraceSink()
+    _load(_loader(tmp_path, sink))
+
+    # Activés dans l'ordre du fichier d'état (activé, manquant, activé, en
+    # échec), puis les dossiers présents non listés par ordre de nom.
+    assert _states(sink) == [
+        ("alpha", "activated"),
+        ("disparu", "missing"),
+        ("gamma", "activated"),
+        ("beta", "failed"),
+        ("delta", "disabled"),
+    ]

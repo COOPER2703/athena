@@ -15,7 +15,7 @@ from server.adapters.trace import emit
 from server.adapters.transport import WebSocketTransport
 from server.adapters.webhook import WebhookAdapter
 from server.app.clock import AsyncioClock
-from server.app.config import AppConfig
+from server.app.config import AppConfig, default_env_file, merged_environment
 from server.app.secrets import EnvSecretResolver, SecretResolver
 from server.app.trace import build_trace_sink, install_logging_bridge
 from server.core.consolidation import (
@@ -132,6 +132,7 @@ class App:
         tools: ToolRegistry | None = None,
         plugins: PluginRegistry | None = None,
         plugin_loader: PluginLoader | None = None,
+        plugin_retry_interval: float = 5.0,
         recall_k: int = 5,
         recall_window_turns: int = 3,
         recall_max_distance: float = 0.6,
@@ -151,6 +152,9 @@ class App:
         # les Tools de plugin s'y ajoutent au démarrage.
         self._tools = plugins.tools if plugins is not None else tools
         self._plugin_loader = plugin_loader
+        # Cadence de la retente des plugins en échec, possédée par l'App : une
+        # seule tâche de fond, jamais sur le chemin d'un Événement (ADR-0005).
+        self._plugin_retry_interval = plugin_retry_interval
         self._coordinator = Coordinator(
             memory=memory,
             user_id=user_id,
@@ -198,6 +202,10 @@ class App:
         if self._scheduler is not None:
             # Background task: never on the event-handling path (ADR-0009).
             pumps.append(asyncio.create_task(self._scheduler.run()))
+        if self._has_pending_plugins():
+            # Une panne de plateforme se répare seule : la retente tourne en
+            # tâche de fond et les Tools arrivent à la Connexion Live suivante.
+            pumps.append(asyncio.create_task(self._retry_plugins()))
         try:
             await self._core_loop()
         finally:
@@ -223,6 +231,25 @@ class App:
         if self._plugin_loader is None or self._plugins is None:
             return
         await self._plugin_loader.load(self._plugins, push_event=self.push_event)
+
+    def _has_pending_plugins(self) -> bool:
+        loader = self._plugin_loader
+        return loader is not None and bool(getattr(loader, "pending", ()))
+
+    async def _retry_plugins(self) -> None:
+        """Retente en tâche de fond les plugins dont ``create`` a échoué.
+
+        La boucle appartient à l'App (ADR-0005) : elle attend l'intervalle, fait
+        une tentative par plugin en échec, et s'arrête dès qu'il n'en reste
+        aucun. Elle est annulée par le ``finally`` de ``run`` comme les pompes.
+        """
+        loader = self._plugin_loader
+        registry = self._plugins
+        if loader is None or registry is None:  # pragma: no cover - défensif
+            return
+        while loader.pending:
+            await asyncio.sleep(self._plugin_retry_interval)
+            await loader.retry_pending(registry, push_event=self.push_event)
 
     def request_shutdown(self) -> None:
         """Dépose ``ShutdownRequested`` dans le flux, appelable depuis un signal."""
@@ -294,13 +321,20 @@ class App:
 
 
 def build_app(
-    config: AppConfig, *, secrets: SecretResolver | None = None
+    config: AppConfig,
+    *,
+    secrets: SecretResolver | None = None,
+    env: Mapping[str, str] | None = None,
+    env_file: str | Path | None = None,
 ) -> App:
     """Construit explicitement : config → trace → adaptateurs → Coordinator.
 
     ``secrets`` résout les secrets des plugins (variables
-    ``ATHENA_PLUGIN_<PLUGIN>_<SECRET>``) ; par défaut l'environnement du
-    processus. La racine de composition fournit aussi le ``TraceSink`` au
+    ``ATHENA_PLUGIN_<PLUGIN>_<SECRET>``) ; par défaut la même vue fusionnée que
+    le reste de la configuration : fichier ``.env`` (celui du répertoire
+    courant, ou ``env_file``) recouvert par l'environnement du processus. Un
+    jeton posé dans le ``.env`` est donc visible des plugins sans être passé par
+    ``AppConfig``. La racine de composition fournit aussi le ``TraceSink`` au
     chargeur, pour que les états de plugin entrent dans le flux unique.
     """
     trace_sink = build_trace_sink(
@@ -311,6 +345,17 @@ def build_app(
     install_logging_bridge(
         trace_sink,
         level="DEBUG" if config.debug_decisions else config.log_level,
+    )
+
+    plugin_secrets = (
+        secrets
+        if secrets is not None
+        else EnvSecretResolver(
+            merged_environment(
+                env,
+                env_file=env_file if env_file is not None else default_env_file(),
+            )
+        )
     )
 
     transport = WebSocketTransport(
@@ -376,7 +421,7 @@ def build_app(
     plugin_loader = PluginLoader(
         directory=config.plugins.directory,
         state_path=config.plugins.state_path,
-        secrets=secrets or EnvSecretResolver(),
+        secrets=plugin_secrets,
         trace_sink=trace_sink,
     )
 

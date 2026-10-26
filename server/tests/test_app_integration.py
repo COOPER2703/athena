@@ -471,7 +471,7 @@ class _ToolLiveConnect:
         return [decl for tool in tools for decl in (tool.function_declarations or [])]
 
 
-def _install_fixture_plugin(tmp_path) -> tuple:
+def _install_fixture_plugin(tmp_path, code: str = PLUGIN_CODE) -> tuple:
     plugins_dir = tmp_path / "plugins"
     plugin_dir = plugins_dir / "fixture"
     plugin_dir.mkdir(parents=True)
@@ -488,7 +488,7 @@ def _install_fixture_plugin(tmp_path) -> tuple:
         ),
         encoding="utf-8",
     )
-    (plugin_dir / "plugin.py").write_text(PLUGIN_CODE, encoding="utf-8")
+    (plugin_dir / "plugin.py").write_text(code, encoding="utf-8")
     state_path = tmp_path / "plugins.json"
     state_path.write_text(
         json.dumps({"enabled": ["fixture"], "config": {}}), encoding="utf-8"
@@ -595,5 +595,236 @@ def test_plugin_tool_is_declared_called_and_answered_on_the_live_connection(
         finally:
             app.request_shutdown()
             await asyncio.wait_for(runner, 1.0)
+
+    asyncio.run(scenario())
+
+
+FLAKY_PLUGIN_CODE = PLUGIN_CODE.replace(
+    "def create(context):\n    return PluginBinding(",
+    '''_attempts = 0
+
+
+def create(context):
+    global _attempts
+    _attempts += 1
+    if _attempts == 1:
+        raise ConnectionError("home assistant injoignable")
+    return PluginBinding(''',
+)
+
+
+def test_a_failed_plugin_is_retried_and_its_tools_arrive_on_the_next_connection(
+    tmp_path,
+) -> None:
+    """Démarrage dégradé : la panne est tracée, la retente répare sans redémarrage."""
+
+    async def scenario() -> None:
+        plugins_dir, state_path = _install_fixture_plugin(
+            tmp_path, code=FLAKY_PLUGIN_CODE
+        )
+        sink = RecordingTraceSink()
+        transport = WebSocketTransport(host="127.0.0.1", port=0, trace_sink=sink)
+        live = _ToolLiveConnect()
+        gemini = GeminiLiveAdapter(
+            api_key="test-key",
+            model="gemini-live",
+            voice="Aoede",
+            live_connect=live,
+            trace_sink=sink,
+        )
+        plugins = PluginRegistry()
+        loader = PluginLoader(
+            directory=plugins_dir,
+            state_path=state_path,
+            secrets=EnvSecretResolver({}),
+            trace_sink=sink,
+        )
+        app = App(
+            transport=transport,
+            gemini=gemini,
+            clock=AsyncioClock(),
+            trace_sink=sink,
+            plugins=plugins,
+            plugin_loader=loader,
+            plugin_retry_interval=0.01,
+        )
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: bool(sink.of_kind("started")))
+
+            # Le serveur a démarré malgré la panne, et le plugin est en échec.
+            [failed] = sink.of_kind("PluginState")
+            assert failed.payload["state"] == "failed"
+            assert "ConnectionError" in failed.payload["reason"]
+            assert plugins.tools.specs() == ()
+
+            # Première Connexion Live : le plugin est absent des Tools déclarés.
+            async with websockets.connect(_url(transport)) as ws_a:
+                await register(ws_a, transport, client_name="a", drain=False)
+                await ws_a.send(encode(SessionStart()))
+                await wait_until(lambda: bool(live.sessions))
+                assert live.declarations() == []
+
+            # La déconnexion rend le noyau Idle, puis la retente de fond répare.
+            await wait_until(
+                lambda: any(
+                    entry.kind == "SessionClosed"
+                    and entry.payload.get("reason") == "CLIENT_GONE"
+                    for entry in sink.entries
+                )
+            )
+            await wait_until(
+                lambda: any(
+                    entry.kind == "PluginState"
+                    and entry.payload["state"] == "activated"
+                    for entry in sink.entries
+                )
+            )
+            assert plugins.tools.owner_of("fixture__echo") == "fixture"
+            assert not runner.done()
+
+            # Connexion Live suivante, sans redémarrage : le Tool est là et sert.
+            async with websockets.connect(_url(transport)) as ws_b:
+                await register(ws_b, transport, client_name="b", drain=False)
+                await ws_b.send(encode(SessionStart()))
+                await wait_until(lambda: len(live.sessions) == 2)
+
+                [declaration] = live.declarations()
+                assert declaration.name == "fixture__echo"
+
+                live.session.call_tool("t1", "fixture__echo", {"value": "bonjour"})
+                await wait_until(lambda: bool(live.session.function_responses))
+                assert dict(live.session.function_responses[0].response) == {
+                    "status": "ok",
+                    "echo": "bonjour",
+                }
+
+            assert len(sink.of_kind("started")) == 1
+            assert not sink.of_kind("stopped")
+        finally:
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+
+        assert loader.pending == ()
+
+    asyncio.run(scenario())
+
+
+def test_a_retry_that_keeps_failing_never_crashes_the_running_server(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        code = '''def create(context):
+    raise ConnectionError("toujours injoignable")
+'''
+        plugins_dir, state_path = _install_fixture_plugin(tmp_path, code=code)
+        sink = RecordingTraceSink()
+        transport = WebSocketTransport(host="127.0.0.1", port=0, trace_sink=sink)
+        gemini = GeminiLiveAdapter(
+            api_key="test-key",
+            model="gemini-live",
+            voice="Aoede",
+            live_connect=_ToolLiveConnect(),
+            trace_sink=sink,
+        )
+        plugins = PluginRegistry()
+        loader = PluginLoader(
+            directory=plugins_dir,
+            state_path=state_path,
+            secrets=EnvSecretResolver({}),
+            trace_sink=sink,
+        )
+        app = App(
+            transport=transport,
+            gemini=gemini,
+            clock=AsyncioClock(),
+            trace_sink=sink,
+            plugins=plugins,
+            plugin_loader=loader,
+            plugin_retry_interval=0.01,
+        )
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(
+                lambda: len(
+                    [
+                        entry
+                        for entry in sink.of_kind("PluginState")
+                        if entry.payload["state"] == "failed"
+                    ]
+                )
+                >= 3
+            )
+            assert not runner.done()
+            assert loader.pending == ("fixture",)
+        finally:
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+
+        assert sink.of_kind("stopped")
+
+    asyncio.run(scenario())
+
+
+def test_a_listed_plugin_without_a_directory_is_missing_and_keeps_its_state_line(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        plugins_dir = tmp_path / "plugins"
+        plugins_dir.mkdir()
+        state_path = tmp_path / "plugins.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "enabled": ["homeassistant"],
+                    "config": {"homeassistant": {"url": "http://maison:8123"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        before = state_path.read_bytes()
+
+        sink = RecordingTraceSink()
+        transport = WebSocketTransport(host="127.0.0.1", port=0, trace_sink=sink)
+        gemini = GeminiLiveAdapter(
+            api_key="test-key",
+            model="gemini-live",
+            voice="Aoede",
+            live_connect=_ToolLiveConnect(),
+            trace_sink=sink,
+        )
+        plugins = PluginRegistry()
+        loader = PluginLoader(
+            directory=plugins_dir,
+            state_path=state_path,
+            secrets=EnvSecretResolver({}),
+            trace_sink=sink,
+        )
+        app = App(
+            transport=transport,
+            gemini=gemini,
+            clock=AsyncioClock(),
+            trace_sink=sink,
+            plugins=plugins,
+            plugin_loader=loader,
+        )
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: bool(sink.of_kind("started")))
+
+            [state] = sink.of_kind("PluginState")
+            assert state.source == "plugins"
+            assert state.payload == {"plugin": "homeassistant", "state": "missing"}
+            assert plugins.tools.specs() == ()
+            assert loader.pending == ()
+            # Le chargeur ne réécrit jamais le fichier d'état : la ligne du
+            # plugin absent est conservée pour une réinstallation.
+            assert state_path.read_bytes() == before
+        finally:
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+
+        assert sink.of_kind("stopped")
+        assert state_path.read_bytes() == before
 
     asyncio.run(scenario())

@@ -236,6 +236,28 @@ def parse_dotenv(path: str | Path) -> dict[str, str]:
     return values
 
 
+def default_env_file() -> Path:
+    """Fichier ``.env`` conventionnel : à la racine du répertoire courant."""
+    return Path.cwd() / ".env"
+
+
+def merged_environment(
+    env: Mapping[str, str] | None = None,
+    *,
+    env_file: str | Path | None = None,
+) -> dict[str, str]:
+    """Vue fusionnée de la configuration : fichier ``.env`` puis environnement.
+
+    L'environnement du processus prime sur le fichier, exactement comme pour
+    ``load_config``. Sert aussi aux secrets de plugin : un jeton posé dans le
+    ``.env`` doit être visible du plugin, comme ``GEMINI_API_KEY`` l'est du
+    reste de la configuration.
+    """
+    file_values = parse_dotenv(env_file) if env_file is not None else {}
+    process_env = os.environ if env is None else env
+    return {**file_values, **process_env}
+
+
 def load_config(
     env: Mapping[str, str] | None = None,
     *,
@@ -248,9 +270,7 @@ def load_config(
     ``SecretResolver`` injecté (ou un résolveur d'environnement par défaut) :
     une variable manquante lève ``MissingSecretError``.
     """
-    file_values = parse_dotenv(env_file) if env_file is not None else {}
-    process_env = os.environ if env is None else env
-    merged: dict[str, str] = {**file_values, **process_env}
+    merged = merged_environment(env, env_file=env_file)
 
     resolver: SecretResolver = (
         secrets if secrets is not None else EnvSecretResolver(merged)
