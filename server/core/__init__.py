@@ -51,6 +51,16 @@ from server.core.events import (
     TimerFired,
 )
 from server.core.memory_tools import register_memory_tools
+from server.core.plugins import (
+    SERVER_PLATFORM,
+    ConfigField,
+    PluginBinding,
+    PluginContext,
+    PluginManifest,
+    PluginRegistry,
+    SecretField,
+    ToolBinding,
+)
 from server.core.ports import (
     ClientLink,
     Clock,
@@ -67,7 +77,7 @@ from server.core.ports import (
     TraceSink,
 )
 from server.core.state import SessionState
-from server.core.tools import ToolHandler, ToolRegistry
+from server.core.tools import ToolHandler, ToolNameConflict, ToolRegistry
 
 __all__ = [
     "AnnounceSessionEnded",
@@ -82,6 +92,7 @@ __all__ = [
     "Clock",
     "CloseLiveConnection",
     "Command",
+    "ConfigField",
     "Consolidation",
     "ConsolidationPolicy",
     "ConsolidationReport",
@@ -112,18 +123,26 @@ __all__ = [
     "MemoryHit",
     "MemoryStore",
     "OpenLiveConnection",
+    "PluginBinding",
+    "PluginContext",
+    "PluginManifest",
+    "PluginRegistry",
     "Role",
     "SendAudioToClient",
     "SendAudioToLlm",
     "SendAnnouncementToLlm",
     "SendMemoryToLlm",
     "SendToolResultToLlm",
+    "SERVER_PLATFORM",
+    "SecretField",
     "SessionRequested",
     "SessionState",
     "ShutdownRequested",
     "StartIdleTimer",
     "TimerFired",
+    "ToolBinding",
     "ToolHandler",
+    "ToolNameConflict",
     "ToolRegistry",
     "ToolSpec",
     "Trace",

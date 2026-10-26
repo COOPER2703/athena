@@ -7,6 +7,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from server.adapters.plugins import PluginLoadError
 from server.app.config import load_config
 from server.app.root import App, build_app
 from server.app.secrets import MissingSecretError
@@ -41,7 +42,7 @@ async def main(
 def cli() -> None:
     try:
         asyncio.run(main())
-    except (MissingSecretError, ValidationError) as exc:
+    except (MissingSecretError, ValidationError, PluginLoadError) as exc:
         print(f"Erreur de configuration : {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 

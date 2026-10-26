@@ -597,3 +597,16 @@ def test_run_serves_the_webhook_and_binds_push_event() -> None:
 
     asyncio.run(scenario())
 
+
+
+def test_build_app_wires_the_plugin_registry_and_loader(tmp_path: Path) -> None:
+    app = build_app(
+        AppConfig(gemini=GeminiConfig(api_key="test-key"), log_dir=str(tmp_path))
+    )
+
+    assert app.plugins is not None
+    # Un seul registre de Tools : celui du Plugin Registry, où le noyau est
+    # propriétaire de ses Tools et où les plugins s'ajoutent au démarrage.
+    assert app.tools is app.plugins.tools
+    assert app.tools.owner_of("save_memory") == "core"
+    assert app.tools.owner_of("forget_memory") == "core"

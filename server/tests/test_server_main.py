@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
 import signal
 import socket
@@ -105,3 +107,46 @@ def test_python_m_server_starts_and_shuts_down_cleanly_on_sigint(
         if process.poll() is None:
             process.kill()
         process.wait(timeout=5.0)
+
+
+def test_cli_reports_a_broken_plugin_and_exits_with_the_config_error_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GEMINI_API_KEY", "key")
+    monkeypatch.setenv("ATHENA_MEMORY_DB", str(tmp_path / "memory.db"))
+    monkeypatch.setenv("ATHENA_LOG_DIR", str(tmp_path / "logs"))
+    plugin_dir = tmp_path / "plugins" / "fixture"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "api_version": 2,
+                "name": "fixture",
+                "version": "0.1.0",
+                "description": "Plugin cassé",
+                "platform": "server",
+                "entrypoint": "plugin.py",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (plugin_dir / "plugin.py").write_text("", encoding="utf-8")
+    (tmp_path / "plugins.json").write_text(
+        json.dumps({"enabled": ["fixture"]}), encoding="utf-8"
+    )
+
+    root = logging.getLogger()
+    original_handlers = root.handlers[:]
+    original_level = root.level
+    try:
+        with pytest.raises(SystemExit) as excinfo:
+            cli()
+    finally:
+        root.handlers[:] = original_handlers
+        root.setLevel(original_level)
+
+    assert excinfo.value.code == 2
+    error = capsys.readouterr().err
+    assert "fixture" in error
+    assert "api_version" in error

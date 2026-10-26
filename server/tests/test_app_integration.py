@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,9 +10,12 @@ import websockets
 from conftest import FakeJudge, RecordingTraceSink, _url, register, wait_until
 from protocol import Audio, SessionStart, SessionStarted, decode, encode
 from server.adapters.gemini import GeminiLiveAdapter
+from server.adapters.plugins import PluginLoader
 from server.adapters.transport import WebSocketTransport
 from server.app.clock import AsyncioClock
 from server.app.root import App
+from server.app.secrets import EnvSecretResolver
+from server.core.plugins import PluginRegistry
 
 
 class _FakeSession:
@@ -371,5 +375,225 @@ def test_pushed_event_opens_a_proactive_auto_session_for_the_registered_client()
         judge = sink.of_kind("EventJudge")[-1]
         assert judge.source == "core"
         assert judge.payload["events"] == 1
+
+    asyncio.run(scenario())
+
+
+PLUGIN_CODE = '''
+from server.core.plugins import PluginBinding, ToolBinding
+from server.core.ports import ToolSpec
+
+PARAMETERS = {
+    "type": "object",
+    "properties": {"value": {"type": "string"}},
+}
+DESCRIPTION = "Écho du plugin de fixture"
+
+
+async def handle(arguments):
+    return {"status": "ok", "echo": arguments.get("value", "")}
+
+
+def create(context):
+    return PluginBinding(
+        name="fixture",
+        tools=(
+            ToolBinding(
+                spec=ToolSpec(
+                    name="fixture__echo",
+                    description=DESCRIPTION,
+                    parameters=PARAMETERS,
+                ),
+                handler=handle,
+            ),
+        ),
+    )
+'''
+
+
+class _ScriptedSession:
+    """Fake Live session : le test pousse les réponses, l'adaptateur les lit."""
+
+    def __init__(self) -> None:
+        self._responses: asyncio.Queue[Any] = asyncio.Queue()
+        self.function_responses: list[Any] = []
+
+    async def send_realtime_input(self, **kwargs: Any) -> None:
+        pass
+
+    async def send_client_content(self, **kwargs: Any) -> None:
+        pass
+
+    async def send_tool_response(self, function_responses: Any) -> None:
+        self.function_responses.append(function_responses)
+
+    async def receive(self) -> Any:
+        yield await self._responses.get()
+
+    def call_tool(self, tool_id: str, name: str, arguments: dict) -> None:
+        call = SimpleNamespace(id=tool_id, name=name, args=arguments)
+        response = SimpleNamespace(
+            tool_call=SimpleNamespace(function_calls=[call])
+        )
+        self._responses.put_nowait(response)
+
+
+class _ScriptedContext:
+    def __init__(self, session: _ScriptedSession) -> None:
+        self._session = session
+
+    async def __aenter__(self) -> _ScriptedSession:
+        return self._session
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        return False
+
+
+class _ToolLiveConnect:
+    """Fake ``live_connect`` : retient les configs et les sessions ouvertes."""
+
+    def __init__(self) -> None:
+        self.configs: list[Any] = []
+        self.sessions: list[_ScriptedSession] = []
+
+    def __call__(self, model: str, config: Any) -> _ScriptedContext:
+        session = _ScriptedSession()
+        self.configs.append(config)
+        self.sessions.append(session)
+        return _ScriptedContext(session)
+
+    @property
+    def session(self) -> _ScriptedSession:
+        return self.sessions[-1]
+
+    def declarations(self) -> list[Any]:
+        tools = self.configs[-1].tools or []
+        return [decl for tool in tools for decl in (tool.function_declarations or [])]
+
+
+def _install_fixture_plugin(tmp_path) -> tuple:
+    plugins_dir = tmp_path / "plugins"
+    plugin_dir = plugins_dir / "fixture"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "api_version": 1,
+                "name": "fixture",
+                "version": "0.1.0",
+                "description": "Plugin de fixture",
+                "platform": "server",
+                "entrypoint": "plugin.py",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (plugin_dir / "plugin.py").write_text(PLUGIN_CODE, encoding="utf-8")
+    state_path = tmp_path / "plugins.json"
+    state_path.write_text(
+        json.dumps({"enabled": ["fixture"], "config": {}}), encoding="utf-8"
+    )
+    return plugins_dir, state_path
+
+
+def test_plugin_tool_is_declared_called_and_answered_on_the_live_connection(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        plugins_dir, state_path = _install_fixture_plugin(tmp_path)
+        sink = RecordingTraceSink()
+        transport = WebSocketTransport(host="127.0.0.1", port=0, trace_sink=sink)
+        live = _ToolLiveConnect()
+        gemini = GeminiLiveAdapter(
+            api_key="test-key",
+            model="gemini-live",
+            voice="Aoede",
+            live_connect=live,
+            trace_sink=sink,
+        )
+        plugins = PluginRegistry()
+        loader = PluginLoader(
+            directory=plugins_dir,
+            state_path=state_path,
+            secrets=EnvSecretResolver({}),
+            trace_sink=sink,
+        )
+        app = App(
+            transport=transport,
+            gemini=gemini,
+            clock=AsyncioClock(),
+            trace_sink=sink,
+            plugins=plugins,
+            plugin_loader=loader,
+        )
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: bool(sink.of_kind("started")))
+
+            # Le chargement des plugins précède le démarrage du transport et
+            # la trace ``started``.
+            kinds = [entry.kind for entry in sink.entries]
+            state_index = next(
+                i for i, entry in enumerate(sink.entries)
+                if entry.kind == "PluginState"
+            )
+            assert state_index < kinds.index("started")
+            assert sink.of_kind("PluginState")[0].payload["state"] == "activated"
+
+            async with websockets.connect(_url(transport)) as ws:
+                await register(ws, transport, drain=False)
+                await ws.send(encode(SessionStart()))
+                await wait_until(lambda: bool(live.sessions))
+
+                # Les Tools du plugin sont déclarés tels quels : nom,
+                # description et schéma d'origine, sans préfixe Athena.
+                [declaration] = live.declarations()
+                assert declaration.name == "fixture__echo"
+                assert declaration.description == "Écho du plugin de fixture"
+                assert dict(declaration.parameters_json_schema) == {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                }
+
+                live.session.call_tool("t1", "fixture__echo", {"value": "bonjour"})
+                await wait_until(lambda: bool(live.session.function_responses))
+
+                response = live.session.function_responses[0]
+                assert response.id == "t1"
+                assert response.name == "fixture__echo"
+                assert dict(response.response) == {
+                    "status": "ok",
+                    "echo": "bonjour",
+                }
+
+                # Un nom inconnu rend l'erreur conventionnelle au modèle sans
+                # faire tomber la Session : l'appel suivant passe encore.
+                live.session.call_tool("t2", "ghost", {})
+                await wait_until(lambda: len(live.session.function_responses) == 2)
+                error = live.session.function_responses[1]
+                assert dict(error.response) == {
+                    "status": "error",
+                    "message": "unknown tool: ghost",
+                }
+
+                live.session.call_tool("t3", "fixture__echo", {"value": "encore"})
+                await wait_until(lambda: len(live.session.function_responses) == 3)
+                assert dict(live.session.function_responses[2].response) == {
+                    "status": "ok",
+                    "echo": "encore",
+                }
+
+                # Chaque appel est tracé avec son plugin propriétaire.
+                calls = sink.of_kind("ToolCall")
+                assert [call.payload["plugin"] for call in calls] == [
+                    "fixture",
+                    None,
+                    "fixture",
+                ]
+                assert sink.of_kind("ToolResult")[1].payload["status"] == "error"
+                assert not sink.of_kind("SessionClosed")
+        finally:
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
 
     asyncio.run(scenario())
