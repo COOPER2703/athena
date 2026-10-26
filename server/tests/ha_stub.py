@@ -38,7 +38,10 @@ SLOW_TOOL = "homeassistant__Slow"
 TURN_ON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "name": {"type": "string", "description": "Friendly name, e.g. 'kitchen light'"},
+        "name": {
+            "type": "string",
+            "description": "Friendly name, e.g. 'kitchen light'",
+        },
         "domain": {"type": "string", "description": "HA domain, e.g. 'light'"},
     },
     "required": ["name"],

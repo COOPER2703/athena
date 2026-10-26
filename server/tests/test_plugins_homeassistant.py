@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib.util
 import json
+import re
 import shutil
-import sys
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
-from typing import Any, AsyncIterator, Mapping
+from types import SimpleNamespace
+from typing import Any, AsyncIterator
 
 import websockets
 
@@ -27,12 +26,11 @@ from ha_stub import (
 from protocol import SessionStart, encode
 from server.adapters.gemini import GeminiLiveAdapter
 from server.adapters.plugins import PluginLoader
-from server.adapters.trace import emit
 from server.adapters.transport import WebSocketTransport
 from server.app.clock import AsyncioClock
 from server.app.root import App
 from server.app.secrets import EnvSecretResolver
-from server.core.plugins import PluginContext, PluginRegistry
+from server.core.plugins import PluginRegistry
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_DIR = REPO_ROOT / "plugins" / "homeassistant"
@@ -108,7 +106,10 @@ async def _running_app(
     *,
     registry: PluginRegistry | None = None,
     loader: PluginLoader | None = None,
-) -> AsyncIterator[tuple[Any, _ToolLiveConnect, WebSocketTransport, RecordingTraceSink]]:
+    retry_interval: float = 5.0,
+) -> AsyncIterator[
+    tuple[Any, _ToolLiveConnect, WebSocketTransport, RecordingTraceSink]
+]:
     sink = RecordingTraceSink()
     transport = WebSocketTransport(host="127.0.0.1", port=0, trace_sink=sink)
     live = _ToolLiveConnect()
@@ -126,6 +127,7 @@ async def _running_app(
         trace_sink=sink,
         plugins=registry,
         plugin_loader=loader,
+        plugin_retry_interval=retry_interval,
     )
     runner = asyncio.create_task(app.run())
     try:
@@ -152,10 +154,33 @@ async def _live_session(
 # ---------------------------------------------------------------------------
 
 
-def _install_homeassistant(tmp_path: Path, url: str) -> tuple[Path, Path]:
+def _patched_constant(source: str, name: str, value: float) -> str:
+    """Réduit un budget du module copié ; le fichier du dépôt n'est pas touché."""
+    pattern = re.compile(rf"^{name} = [0-9.]+$", re.MULTILINE)
+    patched, count = pattern.subn(f"{name} = {value!r}", source, count=1)
+    assert count == 1, f"{name} not found in the plugin source"
+    return patched
+
+
+def _install_homeassistant(
+    tmp_path: Path,
+    url: str,
+    *,
+    discovery_timeout: float | None = None,
+    call_timeout: float | None = None,
+) -> tuple[Path, Path]:
     """Copie le vrai plugin et écrit un fichier d'état qui l'active."""
     plugins_dir = tmp_path / "plugins"
-    shutil.copytree(PLUGIN_DIR, plugins_dir / "homeassistant")
+    plugin_dir = plugins_dir / "homeassistant"
+    shutil.copytree(PLUGIN_DIR, plugin_dir)
+    if discovery_timeout is not None or call_timeout is not None:
+        source = (plugin_dir / "plugin.py").read_text(encoding="utf-8")
+        if discovery_timeout is not None:
+            source = _patched_constant(source, "DISCOVERY_TIMEOUT", discovery_timeout)
+        if call_timeout is not None:
+            source = _patched_constant(source, "CALL_TIMEOUT", call_timeout)
+        (plugin_dir / "plugin.py").write_text(source, encoding="utf-8")
+
     state_path = tmp_path / "plugins.json"
     state_path.write_text(
         json.dumps(
@@ -169,44 +194,28 @@ def _install_homeassistant(tmp_path: Path, url: str) -> tuple[Path, Path]:
     return plugins_dir, state_path
 
 
-def _plugin_module() -> ModuleType:
-    """Importe le vrai module du plugin, hors chargeur, pour patcher ses budgets."""
-    name = "homeassistant_plugin_under_test"
-    spec = importlib.util.spec_from_file_location(name, PLUGIN_DIR / "plugin.py")
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _context(
-    url: str,
+def _plugins(
+    tmp_path: Path,
     sink: RecordingTraceSink,
+    url: str,
     *,
-    token: str = TOKEN,
-) -> PluginContext:
-    def trace(
-        kind: str,
-        payload: Mapping[str, object] | None = None,
-        *,
-        level: str = "info",
-    ) -> None:
-        emit(
-            sink,
-            "plugins",
-            kind,
-            payload={"plugin": "homeassistant", **dict(payload or {})},
-            level=level,
-        )
-
-    return PluginContext(
-        name="homeassistant",
-        config={"url": url},
-        secrets={"token": token},
-        trace=trace,
-        push_event=lambda source, content: None,
+    discovery_timeout: float | None = None,
+    call_timeout: float | None = None,
+) -> tuple[PluginRegistry, PluginLoader]:
+    plugins_dir, state_path = _install_homeassistant(
+        tmp_path,
+        url,
+        discovery_timeout=discovery_timeout,
+        call_timeout=call_timeout,
     )
+    registry = PluginRegistry()
+    loader = PluginLoader(
+        directory=plugins_dir,
+        state_path=state_path,
+        secrets=EnvSecretResolver({TOKEN_VARIABLE: TOKEN}),
+        trace_sink=sink,
+    )
+    return registry, loader
 
 
 async def _call(session: _ScriptedSession, name: str, arguments: dict) -> dict:
@@ -218,6 +227,10 @@ async def _call(session: _ScriptedSession, name: str, arguments: dict) -> dict:
 
 def _declared(live: _ToolLiveConnect) -> dict[str, Any]:
     return {decl.name: decl for decl in live.declarations()}
+
+
+def _states(sink: RecordingTraceSink) -> list[str]:
+    return [str(entry.payload["state"]) for entry in sink.of_kind("PluginState")]
 
 
 # ---------------------------------------------------------------------------
@@ -251,16 +264,7 @@ def test_homeassistant_tools_are_declared_and_called_like_home_assistant(
     async def scenario() -> None:
         async with HaStub() as stub:
             sink = RecordingTraceSink()
-            plugins_dir, state_path = _install_homeassistant(
-                tmp_path, stub.base_url + "/"
-            )
-            registry = PluginRegistry()
-            loader = PluginLoader(
-                directory=plugins_dir,
-                state_path=state_path,
-                secrets=EnvSecretResolver({TOKEN_VARIABLE: TOKEN}),
-                trace_sink=sink,
-            )
+            registry, loader = _plugins(tmp_path, sink, stub.base_url + "/")
             async with _running_app(registry=registry, loader=loader) as (
                 app,
                 live,
@@ -277,9 +281,10 @@ def test_homeassistant_tools_are_declared_and_called_like_home_assistant(
                     assert set(declared) == {spec.name for spec in TOOL_SPECS}
                     for spec in TOOL_SPECS:
                         assert declared[spec.name].description == spec.description
-                        assert dict(
-                            declared[spec.name].parameters_json_schema
-                        ) == spec.parameters
+                        assert (
+                            dict(declared[spec.name].parameters_json_schema)
+                            == spec.parameters
+                        )
 
                     assert await _call(
                         session,
@@ -332,14 +337,7 @@ def test_home_assistant_error_text_reaches_the_model(tmp_path: Path) -> None:
     async def scenario() -> None:
         async with HaStub() as stub:
             sink = RecordingTraceSink()
-            plugins_dir, state_path = _install_homeassistant(tmp_path, stub.base_url)
-            registry = PluginRegistry()
-            loader = PluginLoader(
-                directory=plugins_dir,
-                state_path=state_path,
-                secrets=EnvSecretResolver({TOKEN_VARIABLE: TOKEN}),
-                trace_sink=sink,
-            )
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
             async with _running_app(registry=registry, loader=loader) as (
                 _,
                 live,
@@ -361,22 +359,24 @@ def test_home_assistant_error_text_reaches_the_model(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_absent_instruction_is_traced_but_tools_are_still_served() -> None:
+def test_absent_instruction_is_traced_but_tools_are_still_served(
+    tmp_path: Path,
+) -> None:
     async def scenario() -> None:
-        module = _plugin_module()
-        sink = RecordingTraceSink()
         async with HaStub(with_prompt=False) as stub:
-            binding = await module.create(_context(stub.base_url, sink))
-            assert binding.instruction == ""
-            assert {tool.spec.name for tool in binding.tools} == {
-                spec.name for spec in TOOL_SPECS
-            }
-            assert sink.of_kind("InstructionUnavailable")
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                app,
+                live,
+                transport,
+                _,
+            ):
+                assert app.plugins.instruction() == ""
+                assert sink.of_kind("InstructionUnavailable")
 
-            registry = PluginRegistry()
-            registry.add(binding)
-            async with _running_app(registry=registry) as (_, live, transport, _):
                 async with _live_session(transport, live) as session:
+                    assert set(_declared(live)) == {spec.name for spec in TOOL_SPECS}
                     assert await _call(session, TURN_ON_TOOL, {"name": "Salon"}) == {
                         "status": "ok",
                         "message": "Turned on Salon",
@@ -386,47 +386,65 @@ def test_absent_instruction_is_traced_but_tools_are_still_served() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Délais : les budgets sont réduits dans le test, les valeurs de prod intactes.
+# Délais : copies temporaires du module avec des budgets réduits.
 # ---------------------------------------------------------------------------
 
 
-def test_discovery_timeout_starts_without_tools_and_keeps_the_session_alive(
-    monkeypatch,
+def test_discovery_timeout_degrades_the_start_then_repairs_itself(
+    tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        module = _plugin_module()
-        monkeypatch.setattr(module, "DISCOVERY_TIMEOUT", 0.3)
-        sink = RecordingTraceSink()
         async with HaStub(delay=1.0) as stub:
-            binding = await module.create(_context(stub.base_url, sink))
-            assert binding.tools == ()
-            assert binding.instruction == ""
-            assert sink.of_kind("DiscoveryFailed")
-            assert sink.of_kind("PluginReady")[0].payload["tools"] == 0
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(
+                tmp_path, sink, stub.base_url, discovery_timeout=0.3
+            )
+            async with _running_app(
+                registry=registry, loader=loader, retry_interval=0.1
+            ) as (app, live, transport, _):
+                # HA dort : le plugin échoue au démarrage, Athena démarre quand même.
+                assert _states(sink) == ["failed"]
+                assert registry.tools.specs() == ()
+                assert sink.of_kind("DiscoveryFailed")
 
-            registry = PluginRegistry()
-            registry.add(binding)
-            async with _running_app(registry=registry) as (_, live, transport, _):
                 async with _live_session(transport, live) as session:
-                    result = await _call(session, TURN_ON_TOOL, {"name": "Salon"})
-                    assert result["status"] == "error"
-                    assert TURN_ON_TOOL in result["message"]
+                    missing = await _call(session, TURN_ON_TOOL, {"name": "Salon"})
+                    assert missing["status"] == "error"
+                    assert TURN_ON_TOOL in missing["message"]
+
+                    # HA répond de nouveau : la retente de fond répare la maison.
+                    stub.delay = 0.0
+                    await wait_until(
+                        lambda: any(
+                            entry.payload["state"] == "activated"
+                            for entry in sink.of_kind("PluginState")
+                        )
+                    )
+                    assert app.plugins.instruction() == ASSIST_INSTRUCTION
+                    assert await _call(session, TURN_ON_TOOL, {"name": "Salon"}) == {
+                        "status": "ok",
+                        "message": "Turned on Salon",
+                    }
                     assert not sink.of_kind("SessionClosed")
 
     asyncio.run(scenario())
 
 
 def test_call_timeout_returns_an_error_and_the_session_survives(
-    monkeypatch,
+    tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        module = _plugin_module()
-        monkeypatch.setattr(module, "CALL_TIMEOUT", 0.3)
-        sink = RecordingTraceSink()
         async with HaStub() as stub:
-            registry = PluginRegistry()
-            registry.add(await module.create(_context(stub.base_url, sink)))
-            async with _running_app(registry=registry) as (_, live, transport, _):
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(
+                tmp_path, sink, stub.base_url, call_timeout=0.3
+            )
+            async with _running_app(registry=registry, loader=loader) as (
+                _,
+                live,
+                transport,
+                _,
+            ):
                 async with _live_session(transport, live) as session:
                     slow = await _call(session, SLOW_TOOL, {})
                     assert slow["status"] == "error"
@@ -441,16 +459,19 @@ def test_call_timeout_returns_an_error_and_the_session_survives(
     asyncio.run(scenario())
 
 
-def test_unreachable_home_assistant_keeps_the_session_alive() -> None:
+def test_unreachable_home_assistant_keeps_the_session_alive(tmp_path: Path) -> None:
     async def scenario() -> None:
-        module = _plugin_module()
-        sink = RecordingTraceSink()
+        module_sink = RecordingTraceSink()
         stub = HaStub()
         await stub.start()
         try:
-            registry = PluginRegistry()
-            registry.add(await module.create(_context(stub.base_url, sink)))
-            async with _running_app(registry=registry) as (_, live, transport, _):
+            registry, loader = _plugins(tmp_path, module_sink, stub.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                _,
+                live,
+                transport,
+                _,
+            ):
                 async with _live_session(transport, live) as session:
                     assert await _call(session, TURN_ON_TOOL, {"name": "Salon"}) == {
                         "status": "ok",
@@ -461,24 +482,29 @@ def test_unreachable_home_assistant_keeps_the_session_alive() -> None:
                     unreachable = await _call(session, TURN_ON_TOOL, {"name": "Salon"})
                     assert unreachable["status"] == "error"
                     assert "injoignable" in unreachable["message"]
-                    assert not sink.of_kind("SessionClosed")
+                    assert not module_sink.of_kind("SessionClosed")
         finally:
             await stub.stop()
 
     asyncio.run(scenario())
 
 
-def test_home_assistant_restart_between_two_calls_needs_no_athena_restart() -> None:
+def test_home_assistant_restart_between_two_calls_needs_no_athena_restart(
+    tmp_path: Path,
+) -> None:
     async def scenario() -> None:
-        module = _plugin_module()
-        sink = RecordingTraceSink()
         first = HaStub()
         await first.start()
         second: HaStub | None = None
         try:
-            registry = PluginRegistry()
-            registry.add(await module.create(_context(first.base_url, sink)))
-            async with _running_app(registry=registry) as (_, live, transport, _):
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, first.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                _,
+                live,
+                transport,
+                _,
+            ):
                 async with _live_session(transport, live) as session:
                     assert await _call(
                         session, TURN_ON_TOOL, {"name": "Salon"}
