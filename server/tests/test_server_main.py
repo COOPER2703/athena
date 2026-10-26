@@ -256,8 +256,9 @@ def test_cli_refuses_startup_when_a_required_secret_is_missing_without_leaking_i
         MANIFEST, name="bavard", secrets=[{"key": "token", "required": True}]
     )
     bavard_code = (
+        "from plugin_api import PluginUnavailable\n"
         "def create(context):\n"
-        f'    raise RuntimeError("refusé {{}}".format(context.secrets["token"]))\n'
+        f'    raise PluginUnavailable("refusé {{}}".format(context.secrets["token"]))\n'
     )
 
     error = _run_cli_with_plugin(

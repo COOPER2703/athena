@@ -371,7 +371,7 @@ def test_malformed_manifest_fails_the_startup(tmp_path: Path) -> None:
 # Un plugin dont ``create`` échoue la première fois puis réussit : le cas d'une
 # plateforme injoignable au démarrage, qui se répare sans redémarrer Athena.
 FLAKY_CODE = '''
-from plugin_api import PluginBinding, ToolBinding, ToolSpec
+from plugin_api import PluginBinding, PluginUnavailable, ToolBinding, ToolSpec
 
 attempts = 0
 
@@ -384,7 +384,7 @@ def create(context):
     global attempts
     attempts += 1
     if attempts == 1:
-        raise ConnectionError("home assistant unreachable")
+        raise PluginUnavailable("home assistant unreachable")
     return PluginBinding(
         name="fixture",
         tools=(
@@ -397,13 +397,34 @@ def create(context):
 '''
 
 ALWAYS_FAILING_CODE = '''
+from plugin_api import PluginUnavailable
+
+
 def create(context):
-    raise ConnectionError("home assistant toujours injoignable")
+    raise PluginUnavailable("home assistant toujours injoignable")
 '''
 
+GENERIC_DEFECT_CODE = '''
+def create(context):
+    raise ValueError("bindings mélangés")
+'''
+
+DEFECT_ON_RETRY_CODE = '''
+from plugin_api import PluginBinding, PluginUnavailable
+
+attempts = 0
+
+
+def create(context):
+    global attempts
+    attempts += 1
+    if attempts == 1:
+        raise PluginUnavailable("home assistant injoignable")
+    raise TypeError("bogue du plugin")
+'''
 
 WRONG_BINDING_CODE = '''
-from plugin_api import PluginBinding, ToolBinding, ToolSpec
+from plugin_api import PluginBinding, PluginUnavailable, ToolBinding, ToolSpec
 
 attempts = 0
 
@@ -416,7 +437,7 @@ def create(context):
     global attempts
     attempts += 1
     if attempts == 1:
-        raise ConnectionError("home assistant unreachable")
+        raise PluginUnavailable("home assistant unreachable")
     return PluginBinding(
         name="un-autre-nom",
         tools=(
@@ -442,7 +463,7 @@ def test_a_failing_create_is_traced_failed_and_kept_for_retry(tmp_path: Path) ->
     [failed] = sink.of_kind("PluginState")
     assert failed.payload["plugin"] == FIXTURE_NAME
     assert failed.payload["state"] == "failed"
-    assert "ConnectionError" in failed.payload["reason"]
+    assert "PluginUnavailable" in failed.payload["reason"]
     assert "unreachable" in failed.payload["reason"]
     assert loader.pending == (FIXTURE_NAME,)
 
@@ -491,6 +512,7 @@ def test_a_retry_never_retries_a_structural_defect(tmp_path: Path) -> None:
     assert registry.tools.specs() == ()
     [failed] = sink.of_kind("PluginState")[1:]
     assert failed.payload["state"] == "failed"
+    assert failed.level == "error"
     assert "un-autre-nom" in failed.payload["reason"]
 
 
@@ -542,9 +564,56 @@ def test_entrypoint_raising_at_import_fails_the_startup(tmp_path: Path) -> None:
     assert "boom à l'import" in message
 
 
+def test_a_generic_defect_in_create_refuses_the_startup(tmp_path: Path) -> None:
+    """Seule ``PluginUnavailable`` est réparable : un bogue du plugin est fatal."""
+    _write_plugin(tmp_path, code=GENERIC_DEFECT_CODE)
+    _write_state(tmp_path, enabled=[FIXTURE_NAME])
+    sink = RecordingTraceSink()
+
+    with pytest.raises(PluginLoadError) as excinfo:
+        _load(_loader(tmp_path, sink))
+
+    message = str(excinfo.value)
+    assert FIXTURE_NAME in message
+    assert "ValueError" in message
+    assert "bindings mélangés" in message
+    # Un démarrage refusé ne trace jamais d'état : il ne tourne pas dégradé.
+    assert sink.of_kind("PluginState") == []
+
+
+def test_a_fatal_defect_discovered_at_retry_is_permanently_dropped(
+    tmp_path: Path,
+) -> None:
+    """Un bogue révélé par la retente est tracé ``failed`` (niveau error) et oublié."""
+    _write_plugin(tmp_path, code=DEFECT_ON_RETRY_CODE)
+    _write_state(tmp_path, enabled=[FIXTURE_NAME])
+    sink = RecordingTraceSink()
+    loader = _loader(tmp_path, sink)
+    registry = _load(loader)
+
+    remaining = asyncio.run(
+        loader.retry_pending(registry, push_event=lambda source, content: None)
+    )
+
+    assert remaining == ()
+    assert loader.pending == ()
+    assert registry.tools.specs() == ()
+    assert [entry.payload["state"] for entry in sink.of_kind("PluginState")] == [
+        "failed",
+        "failed",
+    ]
+    retry = sink.of_kind("PluginState")[-1]
+    assert retry.level == "error"
+    assert "TypeError" in retry.payload["reason"]
+    assert "bogue du plugin" in retry.payload["reason"]
+
+
 LEAKY_CODE = '''
+from plugin_api import PluginUnavailable
+
+
 def create(context):
-    raise RuntimeError(f"refusé pour {context.secrets['token']}")
+    raise PluginUnavailable(f"refusé pour {context.secrets['token']}")
 '''
 
 
@@ -564,6 +633,30 @@ def test_a_failed_plugin_never_leaks_a_secret_in_its_reason(tmp_path: Path) -> N
     assert failed.payload["state"] == "failed"
     assert secret not in json.dumps([entry.payload for entry in sink.entries])
     assert "***" in failed.payload["reason"]
+
+
+def test_a_fatal_defect_never_leaks_a_secret_in_its_message(tmp_path: Path) -> None:
+    """Un démarrage refusé nomme le plugin sans exposer le secret résolu."""
+    secret = "s3cr3t-token-value"
+    _write_plugin(
+        tmp_path,
+        code=GENERIC_DEFECT_CODE.replace(
+            'raise ValueError("bindings mélangés")',
+            'raise ValueError("bindings mélangés: " + context.secrets["token"])',
+        ),
+        manifest=_manifest(secrets=[{"key": "token", "required": True}]),
+    )
+    _write_state(tmp_path, enabled=[FIXTURE_NAME])
+
+    with pytest.raises(PluginLoadError) as excinfo:
+        _load(
+            _loader(
+                tmp_path, RecordingTraceSink(), env={"ATHENA_PLUGIN_FIXTURE_TOKEN": secret}
+            )
+        )
+
+    assert secret not in str(excinfo.value)
+    assert "***" in str(excinfo.value)
 
 
 def test_startup_traces_every_plugin_state_in_one_deterministic_pass(

@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.util
 import json
 import re
 import shutil
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
 
+import pytest
 import websockets
 
 from conftest import RecordingTraceSink, _url, register, wait_until
@@ -23,6 +26,7 @@ from ha_stub import (
     TURN_ON_TOOL,
     HaStub,
 )
+from plugin_api import PluginContext, PluginUnavailable
 from protocol import SessionStart, encode
 from server.adapters.gemini import GeminiLiveAdapter
 from server.adapters.plugins import PluginLoader
@@ -257,6 +261,29 @@ def test_manifest_declares_only_static_identity_and_requirements() -> None:
         "config": [{"key": "url", "type": "url", "required": True}],
         "secrets": [{"key": "token", "required": True}],
     }
+
+
+def test_unreachable_discovery_raises_the_retryable_error() -> None:
+    """Une maison injoignable lève ``PluginUnavailable``, jamais un défaut fatal."""
+    spec = importlib.util.spec_from_file_location(
+        "homeassistant_plugin_under_test", PLUGIN_DIR / "plugin.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    context = PluginContext(
+        name="homeassistant",
+        config={"url": "http://127.0.0.1:1"},
+        secrets={"token": TOKEN},
+        trace=lambda *args, **kwargs: None,
+        push_event=lambda source, content: None,
+    )
+
+    with pytest.raises(PluginUnavailable) as excinfo:
+        asyncio.run(module.create(context))
+
+    assert "discovery failed" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------

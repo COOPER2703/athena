@@ -13,8 +13,8 @@ redémarrer Athena.
 Délais (ADR-0015) : 5 s pour la découverte et l'instruction, 10 s pour un
 appel. Un appel ne lève jamais vers le noyau (sauf annulation) : une panne de
 la maison devient un résultat d'erreur rendu au modèle. Une découverte
-impossible, elle, lève : le chargeur trace ``failed``, démarre en mode dégradé
-et retente en tâche de fond (#57).
+impossible, elle, lève ``PluginUnavailable`` : le chargeur trace ``failed``,
+démarre en mode dégradé et retente en tâche de fond (#57).
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from mcp_types import PaginatedRequestParams
 from plugin_api import (
     PluginBinding,
     PluginContext,
+    PluginUnavailable,
     ToolBinding,
     ToolSpec,
 )
@@ -70,7 +71,8 @@ async def create(context: PluginContext) -> PluginBinding:
 
     Asynchrone : la découverte est une opération d'ouverture, exécutée dans la
     boucle du serveur (une seule boucle, ADR-0005). Une plateforme injoignable
-    lève ici, pour que le chargeur démarre dégradé et retente (#57).
+    ou qui refuse l'authentification lève ``PluginUnavailable`` : c'est la
+    seule panne retentable, le chargeur démarre dégradé et retente (#57).
     """
     endpoint = _endpoint(context)
     tools, instruction = await _discover(endpoint, context.trace)
@@ -107,9 +109,9 @@ async def _discover(
     et son échec est absorbé : une panne de ``prompts/get`` ne prive jamais le
     modèle des Tools déjà découverts (ADR-0015).
 
-    Une découverte impossible **lève** : le chargeur trace ``failed``, démarre
-    en mode dégradé et retente en tâche de fond (#57), pour qu'une maison
-    éteinte au démarrage se répare sans redémarrer Athena.
+    Une découverte impossible lève ``PluginUnavailable`` : le chargeur trace
+    ``failed``, démarre en mode dégradé et retente en tâche de fond (#57),
+    pour qu'une maison éteinte au démarrage se répare sans redémarrer Athena.
     """
     discovered: list[Any] = []
     loop = asyncio.get_running_loop()
@@ -135,7 +137,7 @@ async def _discover(
         # cette branche couvre donc aussi une maison éteinte ou un 401.
         error = _redact(_describe(exc), endpoint.token)
         trace("DiscoveryFailed", {"error": error}, level="warning")
-        raise RuntimeError(
+        raise PluginUnavailable(
             f"Home Assistant discovery failed: {error}"
         ) from exc
     return (

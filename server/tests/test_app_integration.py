@@ -382,7 +382,7 @@ def test_pushed_event_opens_a_proactive_auto_session_for_the_registered_client()
 FIXTURE_INSTRUCTION = "Utilise fixture__echo pour répéter."
 
 PLUGIN_CODE = '''
-from plugin_api import PluginBinding, ToolBinding, ToolSpec
+from plugin_api import PluginBinding, PluginUnavailable, ToolBinding, ToolSpec
 
 PARAMETERS = {
     "type": "object",
@@ -631,7 +631,7 @@ def create(context):
     global _attempts
     _attempts += 1
     if _attempts == 1:
-        raise ConnectionError("home assistant injoignable")
+        raise PluginUnavailable("home assistant injoignable")
     return PluginBinding(''',
 )
 
@@ -683,7 +683,7 @@ def test_a_failed_plugin_is_retried_and_its_tools_arrive_on_the_next_connection(
             # Le serveur a démarré malgré la panne, et le plugin est en échec.
             [failed] = sink.of_kind("PluginState")
             assert failed.payload["state"] == "failed"
-            assert "ConnectionError" in failed.payload["reason"]
+            assert "PluginUnavailable" in failed.payload["reason"]
             assert plugins.tools.specs() == ()
 
             # Première Connexion Live : le plugin est absent des Tools déclarés,
@@ -755,8 +755,11 @@ def test_a_retry_that_keeps_failing_never_crashes_the_running_server(
     tmp_path,
 ) -> None:
     async def scenario() -> None:
-        code = '''def create(context):
-    raise ConnectionError("toujours injoignable")
+        code = '''from plugin_api import PluginUnavailable
+
+
+def create(context):
+    raise PluginUnavailable("toujours injoignable")
 '''
         plugins_dir, state_path = _install_fixture_plugin(tmp_path, code=code)
         sink = RecordingTraceSink()

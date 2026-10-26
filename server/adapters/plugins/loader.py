@@ -18,6 +18,7 @@ from server.core.plugins import (
     PluginContext,
     PluginManifest,
     PluginRegistry,
+    PluginUnavailable,
     SecretField,
 )
 from server.core.ports import TraceSink
@@ -35,15 +36,15 @@ class PluginLoadError(RuntimeError):
     """Un plugin activé ne peut pas être chargé : le démarrage doit échouer.
 
     Réservée aux défauts **fatals** et permanents : manifeste, ``api_version``,
-    configuration ou secret requis, import du point d'entrée, collision de
-    Tools. Une exception levée par ``create(context)`` (plateforme injoignable)
-    n'est **pas** fatale : elle est tracée ``failed`` et retentée en tâche de
-    fond (#57).
+    configuration ou secret requis, import du point d'entrée, ``create()`` qui
+    lève autre chose que ``PluginUnavailable`` (bogue du plugin), collision de
+    Tools. Seule ``PluginUnavailable`` (plateforme injoignable) donne un
+    démarrage dégradé et une retente en tâche de fond (#57).
     """
 
 
 class _CreateFailure(Exception):
-    """``create(context)`` a échoué : panne retentable, jamais fatale."""
+    """``create(context)`` a levé ``PluginUnavailable`` : panne retentable."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -76,11 +77,12 @@ class PluginLoader:
     Seuls les plugins **listés** dans le fichier d'état sont importés ; un
     dossier présent mais non listé est tracé ``disabled`` sans être exécuté.
     Un défaut permanent d'un plugin activé lève ``PluginLoadError`` et fait
-    échouer le démarrage ; une exception de ``create(context)`` est tracée
-    ``failed`` et le plugin reste en attente de retente (``retry_pending``),
-    pour qu'une plateforme injoignable ne rende pas Athena muette. Un plugin
-    listé dont le dossier a disparu est tracé ``missing`` sans perdre sa ligne
-    d'état : le chargeur ne fait que lire le fichier d'état.
+    échouer le démarrage ; une exception ``PluginUnavailable`` de
+    ``create(context)`` (plateforme injoignable) est tracée ``failed`` et le
+    plugin reste en attente de retente (``retry_pending``), pour qu'une
+    plateforme injoignable ne rende pas Athena muette. Un plugin listé dont le
+    dossier a disparu est tracé ``missing`` sans perdre sa ligne d'état : le
+    chargeur ne fait que lire le fichier d'état.
     """
 
     def __init__(
@@ -217,10 +219,12 @@ class PluginLoader:
         """Retente une fois chaque plugin en échec ; renvoie ceux encore en échec.
 
         Appelée par la tâche de fond de l'application (ADR-0005), jamais sur le
-        chemin de traitement d'un Événement. Une panne passagère garde le plugin
-        en attente et laisse la boucle réessayer ; un défaut structurel (binding
-        mal nommé, collision de Tools) est permanent : il est tracé et retiré de
-        la retente, comme au démarrage il aurait fait échouer le serveur.
+        chemin de traitement d'un Événement. Une ``PluginUnavailable`` garde le
+        plugin en attente et laisse la boucle réessayer ; un défaut structurel
+        (``create()`` qui lève autre chose, binding mal nommé, collision de
+        Tools) est permanent : il est tracé ``failed`` au niveau ``error`` et
+        retiré définitivement de la retente, comme au démarrage il aurait fait
+        échouer le serveur.
         """
         for name in tuple(self._pending):
             pending = self._pending[name]
@@ -235,6 +239,18 @@ class PluginLoader:
             except _CreateFailure as failure:
                 self._trace_state(name, "failed", reason=failure.reason, retry=True)
                 continue
+            except PluginLoadError as exc:
+                # Défaut du plugin découvert à la retente : le serveur tourne
+                # déjà, donc il est tracé puis oublié au lieu de tuer le process.
+                del self._pending[name]
+                self._trace_state(
+                    name,
+                    "failed",
+                    reason=_redact(str(exc), pending.secrets.values()),
+                    retry=True,
+                    level="error",
+                )
+                continue
             del self._pending[name]
             try:
                 self._register(name, binding, registry)
@@ -244,6 +260,7 @@ class PluginLoader:
                     "failed",
                     reason=_redact(str(exc), pending.secrets.values()),
                     retry=True,
+                    level="error",
                 )
                 continue
             self._trace_state(
@@ -434,10 +451,13 @@ class PluginLoader:
         """Fait rendre au plugin son binding, sans importer à nouveau.
 
         ``create`` peut être synchrone ou asynchrone : le serveur attend le
-        résultat sans thread (une seule boucle, ADR-0005). Toute exception de
-        ``create`` devient une ``_CreateFailure`` retentable, dont la raison est
-        expurgée des valeurs de secrets : une panne de plateforme ne doit jamais
-        faire tomber le serveur ni écrire un jeton dans la trace.
+        résultat sans thread (une seule boucle, ADR-0005). Seule
+        ``PluginUnavailable`` est une panne réparable : elle devient une
+        ``_CreateFailure`` retentable, dont la raison est expurgée des valeurs
+        de secrets. Toute autre exception est un défaut du plugin : elle lève
+        ``PluginLoadError`` (fatal au démarrage, oublié à la retente), jamais
+        une trace qui laisserait croire à une panne passagère. Une valeur de
+        secret n'est jamais écrite dans la raison.
         """
         context = PluginContext(
             name=name,
@@ -450,9 +470,17 @@ class PluginLoader:
             result = create(context)
             if inspect.isawaitable(result):
                 result = await result
+        except PluginUnavailable as exc:
+            raise _CreateFailure(
+                _redact(f"{type(exc).__name__}: {exc}", secrets.values())
+            ) from None
         except Exception as exc:
+            # Bogue du plugin (TypeError, ValueError, import tardif…) : la
+            # panne est permanente, donc fatale au démarrage.
             reason = _redact(f"{type(exc).__name__}: {exc}", secrets.values())
-            raise _CreateFailure(reason) from None
+            raise PluginLoadError(
+                f"plugin {name!r}: create() failed ({reason})"
+            ) from None
         if not isinstance(result, PluginBinding):
             raise PluginLoadError(
                 f"plugin {name!r}: create() must return a PluginBinding, "
@@ -501,13 +529,16 @@ class PluginLoader:
 
     # -- Trace ---------------------------------------------------------------
 
-    def _trace_state(self, plugin: str, state: str, **extra: object) -> None:
+    def _trace_state(
+        self, plugin: str, state: str, *, level: str = "info", **extra: object
+    ) -> None:
         """Trace l'état d'un plugin (source ``plugins``, kind ``PluginState``)."""
         emit(
             self._trace_sink,
             _TRACE_SOURCE,
             "PluginState",
             payload={"plugin": plugin, "state": state, **extra},
+            level=level,
         )
 
     def _plugin_trace(self, name: str) -> Callable[..., None]:
