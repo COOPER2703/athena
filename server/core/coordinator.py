@@ -732,11 +732,15 @@ class Coordinator:
         return _MEMORY_HEADER + "\n" + "\n".join(lines), trace
 
     async def _on_llm_tool_call(self, event: LlmToolCall) -> list[Command]:
-        """Exécute un Tool du noyau et renvoie son résultat au modèle.
+        """Exécute un Tool (noyau ou plugin) et renvoie son résultat au modèle.
 
         Un nom inconnu (ou l'absence de registre) produit un résultat d'erreur
-        tracé : le round-trip ne lève jamais, la Session reste vivante.
+        tracé : le round-trip ne lève jamais, la Session reste vivante. Chaque
+        trace porte le plugin propriétaire (``core`` pour un Tool du noyau,
+        ``null`` pour un nom inconnu), pour attribuer appels et erreurs dans le
+        flux de trace (ADR-0014).
         """
+        plugin = self._tool_owner(event.name)
         commands: list[Command] = [
             self._trace(
                 "ToolCall",
@@ -744,7 +748,11 @@ class Coordinator:
                 to_state=self._state,
                 client_id=self._client_id,
                 level="debug",
-                extra={"tool_id": event.tool_id, "name": event.name},
+                extra={
+                    "tool_id": event.tool_id,
+                    "name": event.name,
+                    "plugin": plugin,
+                },
             )
         ]
         if self._tools is None:
@@ -772,11 +780,18 @@ class Coordinator:
                 extra={
                     "tool_id": event.tool_id,
                     "name": event.name,
+                    "plugin": plugin,
                     "status": str(result.get("status", "ok")),
                 },
             )
         )
         return commands
+
+    def _tool_owner(self, name: str) -> str | None:
+        """Plugin propriétaire d'un Tool, ``None`` quand le nom est inconnu."""
+        if self._tools is None:
+            return None
+        return self._tools.owner_of(name)
 
     def _on_llm_closed(self, event: LlmClosed) -> list[Command]:
         if not self._owns(event.connection_id):
