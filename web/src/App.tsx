@@ -1,44 +1,48 @@
 import { useEffect, useState } from "react";
 
-import { fetchStatus, type StatusPayload } from "./api";
+import { fetchStatus } from "./api";
 import { EventForm } from "./EventForm";
 import { sessionSummary } from "./session";
+import { ClientsPanel, ConfigPanel, PluginsPanel } from "./StatusPanels";
+import type { StatusData } from "./status";
 import { TraceFeed } from "./TraceFeed";
+import { useConsoleStream } from "./useConsoleStream";
 
-/** État de chargement de la page, sans état intermédiaire ambigu. */
-type View =
-  | { kind: "loading" }
-  | { kind: "error"; message: string }
-  | { kind: "ready"; status: StatusPayload };
-
-/** Page unique de la Console : le panneau Session lu depuis l'API. */
+/**
+ * Page unique de la Console : état vivant, panneaux et flux de traces.
+ *
+ * L'état vient du WebSocket (`hello` puis trames `status`) ; `GET /api/status`
+ * sert de repli initial et le bouton « Actualiser » le relit à la demande.
+ * Une reconnexion remplace l'état et le log par le `hello` courant.
+ */
 export function App() {
-  const [view, setView] = useState<View>({ kind: "loading" });
+  const stream = useConsoleStream();
+  const [fetched, setFetched] = useState<StatusData | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
-    setView({ kind: "loading" });
+    setError(null);
     fetchStatus(controller.signal)
-      .then((status) => setView({ kind: "ready", status }))
-      .catch((error: unknown) => {
+      .then((status) => setFetched(status))
+      .catch((reason: unknown) => {
         if (controller.signal.aborted) {
           return;
         }
         const detail =
-          error instanceof Error ? error.message : "erreur réseau inconnue";
-        setView({
-          kind: "error",
-          message: `Impossible de joindre l'API de la Console (${detail}).`,
-        });
+          reason instanceof Error ? reason.message : "erreur réseau inconnue";
+        setError(
+          `Impossible de joindre l'API de la Console (${detail}).`,
+        );
       });
     return () => controller.abort();
   }, [attempt]);
 
+  // Les trames `status` priment : elles sont plus récentes que le repli REST.
+  const status = stream.status ?? fetched;
   const summary =
-    view.kind === "ready"
-      ? sessionSummary(view.status.session, view.status.clients)
-      : null;
+    status !== null ? sessionSummary(status.session, status.clients) : null;
 
   return (
     <div className="app">
@@ -67,15 +71,15 @@ export function App() {
             ) : null}
           </div>
 
-          {view.kind === "loading" ? (
+          {status === null && error === null ? (
             <p className="notice">Chargement de l'état…</p>
           ) : null}
-          {view.kind === "error" ? (
+          {status === null && error !== null ? (
             <p className="notice notice--error" role="alert">
-              {view.message}
+              {error}
             </p>
           ) : null}
-          {summary !== null ? (
+          {summary !== null && status !== null ? (
             <dl className="facts">
               <div className="fact">
                 <dt>État</dt>
@@ -88,9 +92,7 @@ export function App() {
               <div className="fact">
                 <dt>Connexion</dt>
                 <dd className="mono">
-                  {view.kind === "ready" && view.status.session.connection_id
-                    ? view.status.session.connection_id
-                    : "—"}
+                  {status.session.connection_id || "—"}
                 </dd>
               </div>
               <div className="fact">
@@ -101,13 +103,26 @@ export function App() {
           ) : null}
         </section>
 
-        <TraceFeed />
+        {status !== null ? (
+          <div className="app__panels">
+            <ClientsPanel
+              clients={status.clients}
+              activeClientId={status.session.active_client_id}
+            />
+            <PluginsPanel plugins={status.plugins} />
+          </div>
+        ) : null}
+
+        {status !== null ? <ConfigPanel config={status.config} /> : null}
+
+        <TraceFeed feed={stream.feed} connection={stream.connection} />
+
         <EventForm />
       </main>
 
       <footer className="app__footer">
-        Instantané lu depuis <code>GET /api/status</code>, traces depuis{" "}
-        <code>GET /api/stream</code>, Événements via{" "}
+        État poussé par <code>GET /api/stream</code> (repli{" "}
+        <code>GET /api/status</code>), Événements via{" "}
         <code>POST /api/events</code>
       </footer>
     </div>

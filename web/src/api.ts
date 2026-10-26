@@ -1,21 +1,10 @@
 /** Accès à l'API JSON de la Console. */
 
-import type { ClientInfo, SessionStatus } from "./session";
-
-/** Plugin tel que l'instantané le décrit (non affiché en v1). */
-export interface PluginInfo {
-  name: string;
-  state: string;
-  tools: string[];
-}
+import { normalizeStatus, type StatusData } from "./status";
 
 /** Réponse de `GET /api/status`, enveloppe versionnée comprise. */
-export interface StatusPayload {
+export interface StatusPayload extends StatusData {
   v: number;
-  session: SessionStatus;
-  clients: ClientInfo[];
-  plugins: PluginInfo[];
-  config: Record<string, string>;
 }
 
 /** Lit l'instantané courant ; une réponse non-2xx devient une erreur lisible. */
@@ -27,5 +16,13 @@ export async function fetchStatus(signal?: AbortSignal): Promise<StatusPayload> 
   if (!response.ok) {
     throw new Error(`Le serveur a répondu ${response.status}.`);
   }
-  return (await response.json()) as StatusPayload;
+  const body: unknown = await response.json();
+  const version =
+    typeof body === "object" && body !== null && "v" in body
+      ? Number((body as { v?: unknown }).v)
+      : NaN;
+  return {
+    v: Number.isFinite(version) ? version : 0,
+    ...normalizeStatus(body),
+  };
 }

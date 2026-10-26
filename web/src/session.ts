@@ -53,6 +53,19 @@ export function shortClientId(clientId: string, maxLength = 8): string {
   return `${clientId.slice(0, maxLength)}…`;
 }
 
+/** Nom affiché d'un Client : son nom, son identifiant court à défaut. */
+export function clientDisplayName(client: ClientInfo): string {
+  return client.client_name || shortClientId(client.client_id);
+}
+
+/** Vrai si ce Client est le Client actif de la Session (jamais sans Session). */
+export function isActiveClient(
+  clientId: string,
+  activeClientId: string,
+): boolean {
+  return clientId !== "" && clientId === activeClientId;
+}
+
 /** Nom du Client actif, son identifiant court à défaut, « Aucun » sinon. */
 export function activeClientLabel(
   activeClientId: string,

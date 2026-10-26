@@ -13,6 +13,7 @@ vivant sans qu'aucun port du noyau ne soit créé pour la Console.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from typing import Callable, Mapping
@@ -23,6 +24,10 @@ from server.adapters.console.events import (
     EVENTS_PATH,
     MAX_BODY_BYTES,
     EventInjection,
+)
+from server.adapters.console.status import (
+    DEFAULT_STATUS_INTERVAL,
+    StatusBroadcaster,
 )
 from server.adapters.console.trace_buffer import TraceBuffer
 from server.adapters.trace import NullTraceSink
@@ -97,10 +102,17 @@ class ConsoleAdapter:
         static_dir: str | os.PathLike[str] = DEFAULT_STATIC_DIR,
         trace_buffer: TraceBuffer | None = None,
         trace_sink: TraceSink | None = None,
+        status_interval: float = DEFAULT_STATUS_INTERVAL,
     ) -> None:
         self._host = host
         self._port = port
         self._static_dir = Path(static_dir)
+        # Cadence du tick qui pousse les changements d'instantané. Le tick est
+        # une tâche de fond possédée par l'adaptateur : jamais sur le chemin
+        # d'une requête (ADR-0005, ADR-0016).
+        self._status_interval = status_interval
+        self._status_broadcaster: StatusBroadcaster | None = None
+        self._status_task: asyncio.Task[None] | None = None
         # Le tampon est alimenté par le fan-out de traces de la racine de
         # composition ; l'adaptateur ne fait que le lire. Un tampon vide par
         # défaut garde la surface utilisable (et testable) sans câblage.
@@ -143,14 +155,33 @@ class ConsoleAdapter:
         self._event_injection = EventInjection(
             push=push, trace_sink=self._trace_sink
         )
+        # Le diffuseur existe avant les routes : le handler le reçoit à la
+        # construction, puis la tâche de tick est lancée après la surface.
+        self._status_broadcaster = StatusBroadcaster(
+            snapshot, interval=self._status_interval
+        )
         app = web.Application(client_max_size=MAX_BODY_BYTES)
         self._register_routes(app)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self._host, self._port)
         await self._site.start()
+        # Le tick démarre après la surface : il lit l'instantané sans jamais
+        # s'intercaler dans une requête ni dans le traitement d'un Événement.
+        self._status_task = asyncio.create_task(
+            self._status_broadcaster.run(), name="console-status"
+        )
 
     async def stop(self) -> None:
+        # Arrêter le tick de fond avant de fermer les flux : plus aucun état
+        # n'est diffusé pendant le démontage.
+        if self._status_task is not None:
+            self._status_task.cancel()
+            await asyncio.gather(self._status_task, return_exceptions=True)
+            self._status_task = None
+        if self._status_broadcaster is not None:
+            self._status_broadcaster.close()
+            self._status_broadcaster = None
         # Fermer les abonnés d'abord : leur itération se termine et les
         # handlers WebSocket sortent avant que le runner ne coupe les sockets.
         self._trace_buffer.close()
@@ -177,7 +208,11 @@ class ConsoleAdapter:
 
         app.router.add_get(
             STREAM_PATH,
-            stream_handler(self._trace_buffer, self._current_snapshot),
+            stream_handler(
+                self._trace_buffer,
+                self._current_snapshot,
+                self._status_broadcaster,
+            ),
         )
         app.router.add_post(EVENTS_PATH, self._handle_event)
         # Tout chemin inconnu **sous /api** reste du JSON : un client de l'API

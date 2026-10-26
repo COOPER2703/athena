@@ -6,6 +6,8 @@
  * log : elle ne concatène jamais deux historiques.
  */
 
+import type { StatusData } from "./status";
+
 /** Une Trace telle que le contrat JSON la sérialise. */
 export interface TraceEntry {
   timestamp: number;
@@ -32,7 +34,14 @@ export interface TraceFrame {
   data: TraceEntry;
 }
 
-export type StreamFrame = HelloFrame | TraceFrame;
+/** Trame différentielle : l'instantané a changé côté serveur. */
+export interface StatusFrame {
+  v: number;
+  type: "status";
+  data: StatusData;
+}
+
+export type StreamFrame = HelloFrame | TraceFrame | StatusFrame;
 
 /** Kind réservé du marqueur unique de troncature côté serveur. */
 export const TRUNCATION_KIND = "TraceTruncated";

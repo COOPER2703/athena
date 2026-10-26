@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   activeClientLabel,
+  clientDisplayName,
   formatSessionState,
+  isActiveClient,
   sessionSummary,
   shortClientId,
 } from "./session";
@@ -34,8 +36,26 @@ describe("shortClientId", () => {
   });
 });
 
-describe("activeClientLabel", () => {
-  it("préfère le nom du Client actif", () => {
+describe("clientDisplayName", () => {
+  it("préfère le nom, sinon l'identifiant court", () => {
+    expect(clientDisplayName(clients[0]!)).toBe("desktop");
+    expect(clientDisplayName(clients[1]!)).toBe("c-2");
+  });
+});
+
+describe("isActiveClient", () => {
+  it("reconnaît le Client actif de la Session", () => {
+    expect(isActiveClient("c-1", "c-1")).toBe(true);
+    expect(isActiveClient("c-2", "c-1")).toBe(false);
+  });
+
+  it("ne désigne jamais un Client quand la Session n'en a pas", () => {
+    expect(isActiveClient("", "")).toBe(false);
+    expect(isActiveClient("c-1", "")).toBe(false);
+  });
+});
+
+describe("activeClientLabel", () => {  it("préfère le nom du Client actif", () => {
     expect(activeClientLabel("c-1", clients)).toBe("desktop");
   });
 
