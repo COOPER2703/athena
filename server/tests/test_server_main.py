@@ -62,6 +62,9 @@ def test_python_m_server_starts_and_shuts_down_cleanly_on_sigint(
         "ATHENA_MEMORY_DB": str(tmp_path / "memory.db"),
         "ATHENA_LOG_DIR": str(tmp_path / "logs"),
         "ATHENA_CONSOLE_ENABLED": "0",
+        # Le test vérifie le cycle de vie du serveur, pas le Webhook : ne pas
+        # dépendre du port fixe 8766 (occupé par une instance de dev).
+        "ATHENA_WEBHOOK_ENABLED": "0",
         "LOG_LEVEL": "INFO",
     }
     process = subprocess.Popen(

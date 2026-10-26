@@ -10,6 +10,7 @@ import pytest
 from conftest import wait_until
 from server.app.config import (
     AppConfig,
+    ConsoleConfig,
     GeminiConfig,
     MemoryConfig,
     PluginsConfig,
@@ -121,6 +122,7 @@ def test_build_app_resolves_plugin_secrets_from_the_dotenv_view(
         gemini=GeminiConfig(api_key="key"),
         memory=MemoryConfig(db_path=str(tmp_path / "memory.db")),
         webhook=WebhookConfig(enabled=False),
+        console=ConsoleConfig(enabled=False),
         plugins=PluginsConfig(
             directory=str(tmp_path / "plugins"),
             state_path=str(tmp_path / "plugins.json"),

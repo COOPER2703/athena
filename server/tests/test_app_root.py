@@ -20,6 +20,7 @@ from server.app.config import (
     GeminiConfig,
     PluginsConfig,
     ServerConfig,
+    WebhookConfig,
 )
 from server.app.root import App, build_app, load_announce_prompt, load_judge_prompt
 from server.app.secrets import EnvSecretResolver
@@ -775,6 +776,7 @@ def test_build_app_announces_the_kernel_and_plugin_tools_on_registration(
             gemini=GeminiConfig(api_key="test-key"),
             server=ServerConfig(host="127.0.0.1", port=port),
             console=ConsoleConfig(enabled=False),
+            webhook=WebhookConfig(enabled=False),
             plugins=PluginsConfig(
                 directory=str(plugins_dir), state_path=str(state_path)
             ),
@@ -865,6 +867,7 @@ def test_build_app_serves_the_configured_build_at_the_root(
             gemini=GeminiConfig(api_key="test-key"),
             server=ServerConfig(host="127.0.0.1", port=port),
             console=ConsoleConfig(port=console_port, static_dir=str(static_dir)),
+            webhook=WebhookConfig(enabled=False),
             plugins=PluginsConfig(
                 directory=str(tmp_path / "plugins"),
                 state_path=str(tmp_path / "plugins.json"),
@@ -917,6 +920,7 @@ def test_build_app_serves_plugins_and_safe_config_in_the_snapshot(
             ),
             server=ServerConfig(host="127.0.0.1", port=port),
             console=ConsoleConfig(port=console_port),
+            webhook=WebhookConfig(enabled=False),
             plugins=PluginsConfig(
                 directory=str(plugins_dir), state_path=str(state_path)
             ),
