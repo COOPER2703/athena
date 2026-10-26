@@ -105,9 +105,14 @@ export function TraceFeed() {
       if (
         socket !== null &&
         (socket.readyState === WebSocket.CONNECTING ||
-          socket.readyState === WebSocket.OPEN)
+          socket.readyState === WebSocket.OPEN ||
+          socket.readyState === WebSocket.CLOSING)
       ) {
         return;
+      }
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
       }
       failures = 0;
       connect();
