@@ -35,6 +35,7 @@ from server.core.events import (
     SessionRequested,
     TimerFired,
 )
+from server.core.plugins import PluginRegistry
 from server.core.ports import MemoryHit
 from server.core.tools import ToolRegistry
 from server.core.memory_tools import register_memory_tools
@@ -161,7 +162,13 @@ class FakeMemory:
 
 
 def _build(
-    memory=None, tools=None, announce_prompt="", judge=None, webhook=None
+    memory=None,
+    tools=None,
+    announce_prompt="",
+    judge=None,
+    webhook=None,
+    plugins=None,
+    plugin_loader=None,
 ) -> tuple[FakeAdapter, FakeAdapter, FakeClock, RecordingTraceSink, App]:
     transport = FakeAdapter()
     gemini = FakeAdapter()
@@ -178,6 +185,8 @@ def _build(
         announce_prompt=announce_prompt,
         judge=judge,
         webhook=webhook,
+        plugins=plugins,
+        plugin_loader=plugin_loader,
     )
     return transport, gemini, clock, sink, app
 
@@ -610,3 +619,47 @@ def test_build_app_wires_the_plugin_registry_and_loader(tmp_path: Path) -> None:
     assert app.tools is app.plugins.tools
     assert app.tools.owner_of("save_memory") == "core"
     assert app.tools.owner_of("forget_memory") == "core"
+
+
+class FakePluginLoader:
+    """Chargeur factice : retient le registre et la couture ``push_event``."""
+
+    def __init__(self) -> None:
+        self.registry: PluginRegistry | None = None
+        self.push: Callable[[str, str], None] | None = None
+
+    async def load(
+        self, registry: PluginRegistry, *, push_event: Callable[[str, str], None]
+    ) -> None:
+        self.registry = registry
+        self.push = push_event
+
+
+def test_plugin_loader_receives_the_registry_and_the_event_canal() -> None:
+    async def scenario() -> None:
+        loader = FakePluginLoader()
+        plugins = PluginRegistry()
+        transport, gemini, clock, sink, app = _build(
+            plugins=plugins, plugin_loader=loader
+        )
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: transport.started)
+            assert loader.registry is plugins
+            assert loader.push is not None
+
+            await transport.feed(ClientRegistered(client_id="c1"))
+            loader.push("fixture", "l'ampoule est allumée")
+            await wait_until(
+                lambda: any(entry.kind == "EventQueued" for entry in sink.entries)
+            )
+            assert sink.of_kind("EventQueued")[-1].payload["source"] == "fixture"
+
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+        finally:
+            if not runner.done():
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(scenario())
