@@ -13,41 +13,6 @@
   align-items: start;
 }
 
-.field {
-  display: grid;
-  gap: 0.3rem;
-  min-width: 0;
-}
-
-.field__label {
-  color: var(--muted);
-  font-size: 0.6875rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.field__input {
-  width: 100%;
-  padding: 0.4rem 0.55rem;
-  background: var(--bg);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  font-family: var(--sans);
-  font-size: 0.8125rem;
-  line-height: 1.5;
-  resize: vertical;
-}
-
-.field__input:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-.field__input:disabled {
-  opacity: 0.6;
-}
-
 .event-form__actions {
   display: flex;
   align-items: center;
