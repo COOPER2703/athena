@@ -5,7 +5,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TextIO
+from typing import Sequence, TextIO
 
 from server.core.ports import TraceEntry, TraceSink
 
@@ -167,12 +167,15 @@ def build_trace_sink(
     stream: TextIO | None = None,
     log_dir: str | Path | None = None,
     level: str = "info",
+    extra_sinks: Sequence[TraceSink] = (),
 ) -> FanOutTraceSink:
-    """Construit les consommateurs du flux : console et, si demandé, fichier.
+    """Construit les consommateurs du flux : console, fichier et extras.
 
-    Les deux consommateurs respectent la verbosité configurée (``LOG_LEVEL``) ;
-    ``debug_decisions`` l'élève à ``debug`` sans créer de second canal. Le
-    fichier conserve donc la même chronologie filtrée que la console.
+    Les consommateurs console et fichier respectent la verbosité configurée
+    (``LOG_LEVEL``) ; ``debug_decisions`` l'élève à ``debug`` sans créer de
+    second canal. Le fichier conserve donc la même chronologie filtrée que la
+    console. ``extra_sinks`` reçoit le flux complet, sans filtre de niveau :
+    c'est le cas du tampon de la Console web, qui filtre à la présentation.
     """
     min_level = "debug" if debug_decisions else level
     sinks: list[TraceSink] = [ConsoleTraceSink(stream, min_level=min_level)]
@@ -180,6 +183,7 @@ def build_trace_sink(
         sinks.append(
             FileTraceSink(Path(log_dir) / _DEFAULT_LOG_FILENAME, min_level=min_level)
         )
+    sinks.extend(extra_sinks)
     return FanOutTraceSink(*sinks)
 
 

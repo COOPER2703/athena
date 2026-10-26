@@ -31,6 +31,10 @@ DEFAULT_CONSOLE_PORT = 8767
 # de travail du serveur ; absent, la Console explique quoi lancer sans empêcher
 # l'API de répondre (le build n'est jamais committé).
 DEFAULT_CONSOLE_STATIC_DIR = "web/dist"
+# Nombre de Traces récentes rejouées à la connexion de la Console. Le tampon
+# est en mémoire, depuis le démarrage du serveur ; il conserve tous les niveaux
+# (le filtrage est une affaire de présentation).
+DEFAULT_CONSOLE_TRACE_BUFFER = 500
 DEFAULT_LOG_DIR = "logs"
 # Un plugin est un dossier déposé (ADR-0014) ; l'état d'activation et la
 # configuration non secrète vivent dans un fichier JSON séparé, à la racine du
@@ -176,10 +180,11 @@ class ConsoleConfig(BaseModel):
     reste sans authentification en v1. Elle est **activée par défaut**, comme
     le Webhook, et se désactive par ``ATHENA_CONSOLE_ENABLED=0``.
 
-    Défauts : ``enabled=True``, ``host="127.0.0.1"``, ``port=8767``, et
-    ``static_dir="web/dist"`` pour le build de la SPA. Les quatre sont
-    surchargeables par ``ATHENA_CONSOLE_ENABLED``, ``ATHENA_CONSOLE_HOST``,
-    ``ATHENA_CONSOLE_PORT`` et ``ATHENA_CONSOLE_STATIC_DIR``. Un
+    Défauts : ``enabled=True``, ``host="127.0.0.1"``, ``port=8767``,
+    ``static_dir="web/dist"`` pour le build de la SPA et ``trace_buffer=500``
+    pour l'historique rejoué à la connexion. Les cinq sont surchargeables par
+    ``ATHENA_CONSOLE_ENABLED``, ``ATHENA_CONSOLE_HOST``, ``ATHENA_CONSOLE_PORT``,
+    ``ATHENA_CONSOLE_STATIC_DIR`` et ``ATHENA_CONSOLE_TRACE_BUFFER``. Un
     ``static_dir`` absent n'est pas une erreur : la Console sert alors une page
     explicative et l'API répond normalement.
     """
@@ -190,6 +195,7 @@ class ConsoleConfig(BaseModel):
     host: str = Field(default=DEFAULT_CONSOLE_HOST, min_length=1)
     port: int = Field(default=DEFAULT_CONSOLE_PORT, ge=1, le=65535)
     static_dir: str = Field(default=DEFAULT_CONSOLE_STATIC_DIR, min_length=1)
+    trace_buffer: int = Field(default=DEFAULT_CONSOLE_TRACE_BUFFER, ge=1)
 
     @field_validator("enabled", mode="before")
     @classmethod
@@ -358,6 +364,9 @@ def load_config(
             port=merged.get("ATHENA_CONSOLE_PORT", str(DEFAULT_CONSOLE_PORT)),
             static_dir=merged.get(
                 "ATHENA_CONSOLE_STATIC_DIR", DEFAULT_CONSOLE_STATIC_DIR
+            ),
+            trace_buffer=merged.get(
+                "ATHENA_CONSOLE_TRACE_BUFFER", str(DEFAULT_CONSOLE_TRACE_BUFFER)
             ),
         ),
         plugins=PluginsConfig(

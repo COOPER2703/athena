@@ -19,6 +19,8 @@ from typing import Callable, Mapping
 
 from aiohttp import web
 
+from server.adapters.console.trace_buffer import TraceBuffer
+
 # Enveloppe versionnée du contrat JSON : les clients existants peuvent ignorer
 # les champs qu'ils ne connaissent pas, et un changement cassant incrémente
 # cette version (ADR-0002, contrat de la console).
@@ -86,13 +88,22 @@ class ConsoleAdapter:
         host: str = "127.0.0.1",
         port: int = 8767,
         static_dir: str | os.PathLike[str] = DEFAULT_STATIC_DIR,
+        trace_buffer: TraceBuffer | None = None,
     ) -> None:
         self._host = host
         self._port = port
         self._static_dir = Path(static_dir)
+        # Le tampon est alimenté par le fan-out de traces de la racine de
+        # composition ; l'adaptateur ne fait que le lire. Un tampon vide par
+        # défaut garde la surface utilisable (et testable) sans câblage.
+        self._trace_buffer = trace_buffer if trace_buffer is not None else TraceBuffer()
         self._snapshot: Callable[[], Mapping[str, object]] | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
+
+    @property
+    def trace_buffer(self) -> TraceBuffer:
+        return self._trace_buffer
 
     @property
     def port(self) -> int:
@@ -114,6 +125,9 @@ class ConsoleAdapter:
         await self._site.start()
 
     async def stop(self) -> None:
+        # Fermer les abonnés d'abord : leur itération se termine et les
+        # handlers WebSocket sortent avant que le runner ne coupe les sockets.
+        self._trace_buffer.close()
         if self._runner is not None:
             await self._runner.cleanup()
         self._runner = None
@@ -128,6 +142,15 @@ class ConsoleAdapter:
         au reste de l'adaptateur.
         """
         app.router.add_get(STATUS_PATH, self._handle_status)
+        # Le flux de traces est un WebSocket unidirectionnel. L'import est
+        # local pour éviter le cycle ``adapter`` ↔ ``stream`` (le module de
+        # flux réutilise l'enveloppe versionnée de l'adaptateur).
+        from server.adapters.console.stream import STREAM_PATH, stream_handler
+
+        app.router.add_get(
+            STREAM_PATH,
+            stream_handler(self._trace_buffer, self._current_snapshot),
+        )
         # Tout chemin inconnu **sous /api** reste du JSON : un client de l'API
         # ne reçoit jamais une page HTML ou du texte. Le repli est enregistré
         # après les routes exactes, qui gardent la priorité.
@@ -139,8 +162,10 @@ class ConsoleAdapter:
         app.router.add_get("/{tail:.*}", self._handle_spa)
 
     async def _handle_status(self, request: web.Request) -> web.Response:
-        snapshot = self._snapshot() if self._snapshot is not None else {}
-        return web.json_response({"v": ENVELOPE_VERSION, **snapshot})
+        return web.json_response({"v": ENVELOPE_VERSION, **self._current_snapshot()})
+
+    def _current_snapshot(self) -> Mapping[str, object]:
+        return self._snapshot() if self._snapshot is not None else {}
 
     async def _handle_unknown_api(self, request: web.Request) -> web.Response:
         return web.json_response({"error": "not found"}, status=404)
