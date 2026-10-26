@@ -8,11 +8,13 @@ from server.adapters.event_body import (
     INVALID_CONTENT_TYPE,
     INVALID_JSON_BODY,
     JSON_CONTENT_TYPE,
+    MAX_BODY_BYTES,
     Rejection,
+    emit_event_received,
     not_serving,
     validate_event,
 )
-from server.adapters.trace import NullTraceSink, emit
+from server.adapters.trace import NullTraceSink
 from server.core.ports import TraceSink
 
 _TRACE_SOURCE = "webhook"
@@ -23,9 +25,6 @@ EVENTS_PATH = "/events"
 # Source par défaut quand l'émetteur n'en fournit pas : le glossaire veut une
 # Source « identifiée par un nom fourni par l'émetteur », celui-ci peut l'omettre.
 DEFAULT_SOURCE = "webhook"
-# Garde grossière de mémoire : borne le corps avant même de le parser, bien
-# au-dessus de ``MAX_CONTENT_CHARS`` pour que le rejet fin (413) reste le nôtre.
-_MAX_BODY_BYTES = 64 * 1024
 
 
 class WebhookAdapter:
@@ -65,7 +64,7 @@ class WebhookAdapter:
     async def start(self, push: Callable[[str, str], None]) -> None:
         """Lie la surface HTTP et retient la couture ``push`` du noyau."""
         self._push = push
-        app = web.Application(client_max_size=_MAX_BODY_BYTES)
+        app = web.Application(client_max_size=MAX_BODY_BYTES)
         app.router.add_post(EVENTS_PATH, self._handle_event)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -94,12 +93,7 @@ class WebhookAdapter:
             return self._reject(not_serving("webhook"))
 
         self._push(outcome.source, outcome.content)
-        emit(
-            self._trace_sink,
-            _TRACE_SOURCE,
-            "event_received",
-            payload={"source": outcome.source, "chars": len(outcome.content)},
-        )
+        emit_event_received(self._trace_sink, _TRACE_SOURCE, outcome)
         return web.json_response({"status": "accepted"}, status=202)
 
     @staticmethod

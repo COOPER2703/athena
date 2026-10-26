@@ -22,10 +22,11 @@ from server.adapters.event_body import (
     INVALID_JSON_BODY,
     JSON_CONTENT_TYPE,
     Rejection,
+    emit_event_received,
     not_serving,
     validate_event,
 )
-from server.adapters.trace import NullTraceSink, emit
+from server.adapters.trace import NullTraceSink
 from server.core.ports import TraceSink
 
 EVENTS_PATH = "/api/events"
@@ -34,9 +35,6 @@ EVENTS_PATH = "/api/events"
 DEFAULT_SOURCE = "console"
 # Source de trace de la surface : ``event_received`` se lit donc ``console``.
 TRACE_SOURCE = "console"
-# Garde grossière de mémoire, identique au Webhook : bien au-dessus du plafond
-# de contenu pour que le rejet fin (413) reste rendu par la validation partagée.
-MAX_BODY_BYTES = 64 * 1024
 
 
 class EventInjection:
@@ -70,12 +68,7 @@ class EventInjection:
             return _reject(not_serving("console"))
 
         self._push(outcome.source, outcome.content)
-        emit(
-            self._trace_sink,
-            TRACE_SOURCE,
-            "event_received",
-            payload={"source": outcome.source, "chars": len(outcome.content)},
-        )
+        emit_event_received(self._trace_sink, TRACE_SOURCE, outcome)
         return web.json_response({"status": "accepted"}, status=202)
 
 
