@@ -15,7 +15,7 @@ from server.adapters.trace import emit
 from server.adapters.transport import WebSocketTransport
 from server.adapters.webhook import WebhookAdapter
 from server.app.clock import AsyncioClock
-from server.app.config import AppConfig
+from server.app.config import AppConfig, default_env_file, merged_environment
 from server.app.secrets import EnvSecretResolver, SecretResolver
 from server.app.trace import build_trace_sink, install_logging_bridge
 from server.core.consolidation import (
@@ -321,13 +321,20 @@ class App:
 
 
 def build_app(
-    config: AppConfig, *, secrets: SecretResolver | None = None
+    config: AppConfig,
+    *,
+    secrets: SecretResolver | None = None,
+    env: Mapping[str, str] | None = None,
+    env_file: str | Path | None = None,
 ) -> App:
     """Construit explicitement : config → trace → adaptateurs → Coordinator.
 
     ``secrets`` résout les secrets des plugins (variables
-    ``ATHENA_PLUGIN_<PLUGIN>_<SECRET>``) ; par défaut l'environnement du
-    processus. La racine de composition fournit aussi le ``TraceSink`` au
+    ``ATHENA_PLUGIN_<PLUGIN>_<SECRET>``) ; par défaut la même vue fusionnée que
+    le reste de la configuration : fichier ``.env`` (celui du répertoire
+    courant, ou ``env_file``) recouvert par l'environnement du processus. Un
+    jeton posé dans le ``.env`` est donc visible des plugins sans être passé par
+    ``AppConfig``. La racine de composition fournit aussi le ``TraceSink`` au
     chargeur, pour que les états de plugin entrent dans le flux unique.
     """
     trace_sink = build_trace_sink(
@@ -338,6 +345,17 @@ def build_app(
     install_logging_bridge(
         trace_sink,
         level="DEBUG" if config.debug_decisions else config.log_level,
+    )
+
+    plugin_secrets = (
+        secrets
+        if secrets is not None
+        else EnvSecretResolver(
+            merged_environment(
+                env,
+                env_file=env_file if env_file is not None else default_env_file(),
+            )
+        )
     )
 
     transport = WebSocketTransport(
@@ -403,7 +421,7 @@ def build_app(
     plugin_loader = PluginLoader(
         directory=config.plugins.directory,
         state_path=config.plugins.state_path,
-        secrets=secrets or EnvSecretResolver(),
+        secrets=plugin_secrets,
         trace_sink=trace_sink,
     )
 
