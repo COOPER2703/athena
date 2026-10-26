@@ -336,6 +336,75 @@ def test_required_config_reaches_the_plugin(tmp_path: Path) -> None:
     assert created.payload["config"] == {"url": "http://homeassistant.local:8123"}
 
 
+def test_a_string_config_field_accepts_any_text(tmp_path: Path) -> None:
+    _write_plugin(
+        tmp_path,
+        manifest=_manifest(config=[{"key": "room", "type": "string", "required": True}]),
+    )
+    _write_state(
+        tmp_path, enabled=[FIXTURE_NAME], config={FIXTURE_NAME: {"room": "salon"}}
+    )
+    sink = RecordingTraceSink()
+
+    _load(_loader(tmp_path, sink))
+
+    assert sink.of_kind("PluginCreated")[0].payload["config"] == {"room": "salon"}
+
+
+def test_an_invalid_url_config_value_fails_the_startup(tmp_path: Path) -> None:
+    """Une ``url`` sans schéma http(s) ni hôte est un défaut de configuration."""
+    _write_plugin(
+        tmp_path,
+        manifest=_manifest(config=[{"key": "url", "type": "url", "required": True}]),
+    )
+    _write_state(
+        tmp_path,
+        enabled=[FIXTURE_NAME],
+        config={FIXTURE_NAME: {"url": "homeassistant.local:8123"}},
+    )
+
+    with pytest.raises(PluginLoadError) as excinfo:
+        _load(_loader(tmp_path, RecordingTraceSink()))
+
+    message = str(excinfo.value)
+    assert FIXTURE_NAME in message
+    assert "url" in message
+
+
+def test_an_unknown_config_field_type_fails_the_startup(tmp_path: Path) -> None:
+    """Un type déclaré que le serveur ne sait pas valider est un défaut fatal."""
+    _write_plugin(
+        tmp_path,
+        manifest=_manifest(config=[{"key": "port", "type": "integer"}]),
+    )
+    _write_state(tmp_path, enabled=[FIXTURE_NAME])
+
+    with pytest.raises(PluginLoadError) as excinfo:
+        _load(_loader(tmp_path, RecordingTraceSink()))
+
+    message = str(excinfo.value)
+    assert FIXTURE_NAME in message
+    assert "integer" in message
+
+
+def test_an_unknown_platform_fails_the_startup(tmp_path: Path) -> None:
+    """Une plateforme inconnue est une faute de frappe, pas une plateforme future."""
+    _write_plugin(
+        tmp_path,
+        code=EXPLODING_CODE,
+        manifest=_manifest(platform="serverr"),
+    )
+    _write_state(tmp_path, enabled=[FIXTURE_NAME])
+
+    with pytest.raises(PluginLoadError) as excinfo:
+        _load(_loader(tmp_path, RecordingTraceSink()))
+
+    message = str(excinfo.value)
+    assert FIXTURE_NAME in message
+    assert "platform" in message
+    assert "serverr" in message
+
+
 def test_two_plugins_claiming_the_same_tool_fail_the_startup(tmp_path: Path) -> None:
     _write_plugin(tmp_path, "alpha", manifest=_manifest("alpha"))
     _write_plugin(tmp_path, "beta", manifest=_manifest("beta"))

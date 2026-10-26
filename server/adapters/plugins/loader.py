@@ -8,10 +8,12 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
+from urllib.parse import urlsplit
 
 from server.adapters.trace import emit
 from server.app.secrets import MissingSecretError, SecretResolver
 from server.core.plugins import (
+    KNOWN_PLATFORMS,
     SERVER_PLATFORM,
     ConfigField,
     PluginBinding,
@@ -29,6 +31,10 @@ _MANIFEST_FILE = "plugin.json"
 _API_VERSION = 1
 _SECRET_PREFIX = "ATHENA_PLUGIN"
 _REQUIRED_TEXT_FIELDS = ("name", "version", "description", "platform", "entrypoint")
+# Types de configuration que le chargeur sait valider (ADR-0014). En déclarer
+# un autre est un défaut fatal du manifeste : mieux vaut refuser que passer une
+# valeur non validée au plugin.
+_CONFIG_FIELD_TYPES = ("string", "url")
 _REDACTED = "***"
 
 
@@ -337,12 +343,20 @@ class PluginLoader:
             raise PluginLoadError(
                 f"plugin {name!r}: entrypoint {entrypoint!r} does not exist"
             )
+        platform = fields["platform"]
+        if platform not in KNOWN_PLATFORMS:
+            # Une valeur inconnue est une faute de frappe, pas une plateforme
+            # future : la refuser évite de croire un plugin chargé.
+            raise PluginLoadError(
+                f"plugin {name!r}: unknown platform {platform!r} "
+                f"(known: {', '.join(KNOWN_PLATFORMS)})"
+            )
         return PluginManifest(
             api_version=api_version,
             name=manifest_name,
             version=fields["version"],
             description=fields["description"],
-            platform=fields["platform"],
+            platform=platform,
             entrypoint=entrypoint,
             config=self._read_config_fields(name, data.get("config", [])),
             secrets=self._read_secret_fields(name, data.get("secrets", [])),
@@ -391,11 +405,13 @@ class PluginLoader:
                 raise PluginLoadError(
                     f"plugin {name!r}: 'type' for {key!r} must be a string"
                 )
-            fields.append(
-                ConfigField(
-                    key=key, type=value_type.strip(), required=required
+            value_type = value_type.strip()
+            if value_type not in _CONFIG_FIELD_TYPES:
+                raise PluginLoadError(
+                    f"plugin {name!r}: unknown type {value_type!r} for config key "
+                    f"{key!r} (supported: {', '.join(_CONFIG_FIELD_TYPES)})"
                 )
-            )
+            fields.append(ConfigField(key=key, type=value_type, required=required))
         return tuple(fields)
 
     @classmethod
@@ -408,7 +424,13 @@ class PluginLoader:
     def _resolve_config(
         self, manifest: PluginManifest, raw_config: Mapping[str, object]
     ) -> dict[str, str]:
-        """Configuration non secrète déclarée par le manifeste, valeurs en texte."""
+        """Configuration non secrète déclarée par le manifeste, valeurs en texte.
+
+        Chaque valeur non vide est validée selon le ``type`` déclaré ; une URL
+        sans schéma ``http``/``https`` ou sans hôte est un défaut fatal. Un
+        secret n'entre jamais ici (seuls les noms des secrets sont résolus
+        ailleurs), donc aucun message ne peut en exposer un.
+        """
         values: dict[str, str] = {}
         for field in manifest.config:
             raw = raw_config.get(field.key)
@@ -420,6 +442,11 @@ class PluginLoader:
                         f"{field.key!r} is missing from the plugins state file"
                     )
                 continue
+            if field.type == "url" and not _is_http_url(text):
+                raise PluginLoadError(
+                    f"plugin {manifest.name!r}: config key {field.key!r} must be "
+                    "an http(s) URL with a host"
+                )
             values[field.key] = text
         return values
 
@@ -559,6 +586,15 @@ class PluginLoader:
             )
 
         return trace
+
+
+def _is_http_url(text: str) -> bool:
+    """Vrai si ``text`` est une URL ``http``/``https`` avec un hôte non vide."""
+    try:
+        parts = urlsplit(text)
+        return parts.scheme in ("http", "https") and bool(parts.hostname)
+    except ValueError:
+        return False
 
 
 def secret_variable(plugin: str, key: str) -> str:
