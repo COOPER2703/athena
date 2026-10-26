@@ -17,6 +17,7 @@ from typing import Callable
 
 from aiohttp import web
 
+from server.adapters.console.contract import EVENTS_PATH
 from server.adapters.event_body import (
     INVALID_CONTENT_TYPE,
     INVALID_JSON_BODY,
@@ -29,7 +30,6 @@ from server.adapters.event_body import (
 from server.adapters.trace import NullTraceSink
 from server.core.ports import TraceSink
 
-EVENTS_PATH = "/api/events"
 # La Console est une surface d'injection distincte du Webhook : ses Événements
 # portent cette Source quand l'appelant n'en fournit pas.
 DEFAULT_SOURCE = "console"

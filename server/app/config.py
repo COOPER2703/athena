@@ -202,9 +202,14 @@ class ConsoleConfig(BaseModel):
     def _enabled(cls, value: object) -> object:
         return _coerce_bool(value, variable="ATHENA_CONSOLE_ENABLED")
 
-    @field_validator("host", "static_dir", mode="before")
+    @field_validator("host", mode="before")
     @classmethod
     def _strip_host(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("static_dir", mode="before")
+    @classmethod
+    def _strip_static_dir(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
 
 

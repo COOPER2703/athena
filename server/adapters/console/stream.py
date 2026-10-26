@@ -16,7 +16,7 @@ from typing import Callable, Mapping
 
 from aiohttp import web
 
-from server.adapters.console.adapter import ENVELOPE_VERSION
+from server.adapters.console.contract import ENVELOPE_VERSION, STREAM_PATH
 from server.adapters.console.status import (
     StatusBroadcaster,
     StatusSubscription,
@@ -28,14 +28,12 @@ from server.adapters.console.trace_buffer import (
 )
 from server.core.ports import TraceEntry
 
-STREAM_PATH = "/api/stream"
-
 
 def hello_frame(
     snapshot: Mapping[str, object],
     backlog: tuple[TraceEntry, ...],
 ) -> dict[str, object]:
-    """Trame unique d'ouverture : état gelé et historique récent."""
+    """Trame unique d'ouverture : instantané de lecture et historique récent."""
     return {
         "v": ENVELOPE_VERSION,
         "type": "hello",

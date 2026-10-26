@@ -20,27 +20,24 @@ from typing import Callable, Mapping
 
 from aiohttp import web
 
-from server.adapters.console.events import (
+from server.adapters.console.contract import (
+    API_PREFIX,
+    ENVELOPE_VERSION,
     EVENTS_PATH,
-    MAX_BODY_BYTES,
-    EventInjection,
+    STATUS_PATH,
+    STREAM_PATH,
 )
+from server.adapters.console.events import EventInjection
 from server.adapters.console.status import (
     DEFAULT_STATUS_INTERVAL,
     StatusBroadcaster,
 )
+from server.adapters.console.stream import stream_handler
 from server.adapters.console.trace_buffer import TraceBuffer
+from server.adapters.event_body import MAX_BODY_BYTES
 from server.adapters.trace import NullTraceSink
 from server.core.ports import TraceSink
 
-# Enveloppe versionnée du contrat JSON : les clients existants peuvent ignorer
-# les champs qu'ils ne connaissent pas, et un changement cassant incrémente
-# cette version (ADR-0002, contrat de la console).
-ENVELOPE_VERSION = 1
-# Préfixe réservé à l'API JSON. Le repli sous ce préfixe renvoie du JSON ; le
-# reste du serveur appartient à la SPA.
-API_PREFIX = "/api"
-STATUS_PATH = "/api/status"
 # Build de la SPA, produit par `make web`. Le répertoire n'existe pas
 # nécessairement : l'API ne dépend pas du front (ADR-0003).
 DEFAULT_STATIC_DIR = "web/dist"
@@ -121,7 +118,6 @@ class ConsoleAdapter:
         # d'un Événement y trace ``event_received`` comme le Webhook.
         self._trace_sink: TraceSink = trace_sink or NullTraceSink()
         self._snapshot: Callable[[], Mapping[str, object]] | None = None
-        self._push: Callable[[str, str], None] | None = None
         self._event_injection: EventInjection | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -151,7 +147,6 @@ class ConsoleAdapter:
         unique (ADR-0007). Sans couture, l'injection répond 503.
         """
         self._snapshot = snapshot
-        self._push = push
         self._event_injection = EventInjection(
             push=push, trace_sink=self._trace_sink
         )
@@ -190,22 +185,16 @@ class ConsoleAdapter:
         self._runner = None
         self._site = None
         self._snapshot = None
-        self._push = None
         self._event_injection = None
 
     def _register_routes(self, app: web.Application) -> None:
-        """Enregistre les routes de lecture.
+        """Enregistre les routes de lecture et d'injection.
 
-        Les routes exactes passent avant le repli ``/api/*`` : les tickets
-        suivants ajoutent ici ``/api/events`` et ``/api/stream``, sans toucher
-        au reste de l'adaptateur.
+        Les routes exactes passent avant le repli ``/api/*`` : tout chemin
+        inconnu sous ce préfixe reste du JSON, et le reste appartient à la SPA.
         """
         app.router.add_get(STATUS_PATH, self._handle_status)
-        # Le flux de traces est un WebSocket unidirectionnel. L'import est
-        # local pour éviter le cycle ``adapter`` ↔ ``stream`` (le module de
-        # flux réutilise l'enveloppe versionnée de l'adaptateur).
-        from server.adapters.console.stream import STREAM_PATH, stream_handler
-
+        # Flux de traces : WebSocket unidirectionnel, sur `/api/stream`.
         app.router.add_get(
             STREAM_PATH,
             stream_handler(
