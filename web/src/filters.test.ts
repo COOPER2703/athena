@@ -10,6 +10,7 @@ import {
   pauseView,
   resumeView,
   type TraceFilters,
+  viewAfterHello,
 } from "./filters";
 import type { TraceEntry } from "./trace";
 
@@ -148,5 +149,21 @@ describe("pause", () => {
   it("part de la vue vivante par défaut", () => {
     expect(LIVE_VIEW.paused).toBe(false);
     expect(displayedEntries(entries, EMPTY_FILTERS, LIVE_VIEW)).toEqual(entries);
+  });
+});
+
+describe("viewAfterHello", () => {
+  it("réinitialise la vue gelée tout en conservant la pause", () => {
+    const view = pauseView(entries);
+    const reconnected = [entry({ kind: "AprèsReconnexion" })];
+
+    const next = viewAfterHello(view, reconnected);
+
+    expect(next.paused).toBe(true);
+    expect(next.snapshot.map((item) => item.kind)).toEqual(["AprèsReconnexion"]);
+  });
+
+  it("laisse la vue vivante suivre le nouveau flux", () => {
+    expect(viewAfterHello(LIVE_VIEW, entries)).toBe(LIVE_VIEW);
   });
 });

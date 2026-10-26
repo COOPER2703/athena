@@ -8,6 +8,7 @@ import {
   displayedEntries,
   pauseView,
   resumeView,
+  viewAfterHello,
   type FeedView,
   type TraceFilters,
 } from "./filters";
@@ -15,6 +16,7 @@ import {
   formatPayload,
   formatTimestamp,
   connectionLabel,
+  traceLevelClass,
   type ConnectionStatus,
   type FeedState,
   type TraceEntry,
@@ -57,6 +59,13 @@ export function TraceFeed({
       list.scrollTop = list.scrollHeight;
     }
   }, [feed.entries, autoScroll, view.paused]);
+
+  // Une reconnexion remplace le flux : la vue gelée repart du nouveau backlog
+  // tout en conservant la pause demandée par l'utilisateur. Sans cela, elle
+  // garderait les traces du processus précédent après un redémarrage serveur.
+  useEffect(() => {
+    setView((current) => viewAfterHello(current, feed.entries));
+  }, [feed.generation]);
 
   return (
     <section className="panel trace-panel" aria-labelledby="traces-title">
@@ -172,6 +181,13 @@ export function TraceFeed({
         </p>
       ) : null}
 
+      {feed.browserDropped > 0 ? (
+        <p className="notice notice--warning" role="status">
+          Flux tronqué côté navigateur : {feed.browserDropped} entrée(s) plus
+          ancienne(s) non conservée(s).
+        </p>
+      ) : null}
+
       {view.paused ? (
         <p className="notice notice--warning" role="status">
           Affichage gelé{pending > 0 ? ` · ${pending} nouvelle(s) trace(s)` : ""}.
@@ -198,14 +214,10 @@ export function TraceFeed({
   );
 }
 
-function levelClass(level: string): string {
-  return level.toLowerCase().replace(/[^a-z]/g, "");
-}
-
 function TraceRow({ entry }: { entry: TraceEntry }) {
   const payload = formatPayload(entry.payload);
   return (
-    <article className={`trace trace--${levelClass(entry.level)}`}>
+    <article className={`trace trace--${traceLevelClass(entry.level)}`}>
       <span className="trace__time">{formatTimestamp(entry.timestamp)}</span>
       <span className="trace__level">{entry.level.toUpperCase()}</span>
       <span className="trace__source">[{entry.source}]</span>

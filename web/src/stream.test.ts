@@ -46,13 +46,20 @@ describe("applyStreamFrame", () => {
   it("un hello remplace l'état et le log d'une connexion précédente", () => {
     const previous = initialStreamState();
     previous.status = status("Idle");
-    previous.feed = { entries: [trace("Ancienne")], truncated: 3 };
+    previous.feed = {
+      entries: [trace("Ancienne")],
+      truncated: 3,
+      browserDropped: 2,
+      generation: 1,
+    };
 
     const next = applyStreamFrame(previous, hello([trace("Nouvelle")], status("SessionVisible", "c-2")));
 
     expect(next.status).toEqual(status("SessionVisible", "c-2"));
     expect(next.feed.entries.map((entry) => entry.kind)).toEqual(["Nouvelle"]);
     expect(next.feed.truncated).toBe(0);
+    expect(next.feed.browserDropped).toBe(0);
+    expect(next.feed.generation).toBe(2);
   });
 
   it("une trame status met l'état à jour sans toucher au flux", () => {
@@ -94,5 +101,45 @@ describe("applyStreamFrame", () => {
       type: "inconnu",
     } as unknown as TraceFrame);
     expect(next).toBe(state);
+  });
+
+  it("ignore une trame trace sans data plutôt que de faire planter le reducer", () => {
+    const state = applyStreamFrame(initialStreamState(), hello([], status("Idle")));
+
+    expect(applyStreamFrame(state, { v: 1, type: "trace" })).toBe(state);
+    expect(
+      applyStreamFrame(state, { v: 1, type: "trace", data: null }),
+    ).toBe(state);
+    expect(
+      applyStreamFrame(state, { v: 1, type: "trace", data: { kind: "X" } }),
+    ).toBe(state);
+  });
+
+  it("ignore une trame status malformée sans toucher au flux", () => {
+    const state = applyStreamFrame(initialStreamState(), hello([], status("Idle")));
+
+    expect(applyStreamFrame(state, { v: 1, type: "status" })).toBe(state);
+    expect(
+      applyStreamFrame(state, { v: 1, type: "status", data: null }),
+    ).toBe(state);
+  });
+
+  it("ignore un hello malformé et garde l'état affiché", () => {
+    const state = applyStreamFrame(initialStreamState(), hello([], status("Idle")));
+
+    expect(
+      applyStreamFrame(state, {
+        v: 1,
+        type: "hello",
+        data: { snapshot: 42, backlog: [] },
+      }),
+    ).toBe(state);
+    expect(
+      applyStreamFrame(state, {
+        v: 1,
+        type: "hello",
+        data: { snapshot: {}, backlog: [{ kind: "sans forme" }] },
+      }),
+    ).toBe(state);
   });
 });
