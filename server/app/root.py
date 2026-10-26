@@ -4,6 +4,8 @@ import asyncio
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping, Protocol
 
+from server import __version__
+from server.adapters.console import ConsoleAdapter
 from server.adapters.gemini import GeminiEventJudge, GeminiLiveAdapter
 from server.adapters.memory import (
     GeminiFactExtractor,
@@ -122,6 +124,19 @@ class WebhookServer(Protocol):
     async def stop(self) -> None: ...
 
 
+class ConsoleServer(Protocol):
+    """Couture de la Console web : sert l'instantané de lecture.
+
+    ``snapshot`` est le ``App.snapshot`` injecté à ``start`` : l'adaptateur ne
+    connaît ni le Coordinator ni ``SessionState``, et l'instantané est construit
+    par la racine de composition au moment de la requête (ADR-0016).
+    """
+
+    async def start(self, snapshot: Callable[[], Mapping[str, object]]) -> None: ...
+
+    async def stop(self) -> None: ...
+
+
 class App:
     """Racine de composition : possède les adaptateurs et la boucle de propriété.
 
@@ -152,6 +167,8 @@ class App:
         recall_max_distance: float = 0.6,
         scheduler: ConsolidationScheduler | None = None,
         webhook: WebhookServer | None = None,
+        console: ConsoleServer | None = None,
+        snapshot_config: Mapping[str, object] | None = None,
     ) -> None:
         self._transport = transport
         self._gemini = gemini
@@ -160,6 +177,11 @@ class App:
         self._memory = memory
         self._scheduler = scheduler
         self._webhook = webhook
+        self._console = console
+        # Instantané non sensible de la configuration : la racine de
+        # composition choisit explicitement les clés exposées, pour qu'aucun
+        # secret ne puisse s'inviter dans l'instantané par accident.
+        self._snapshot_config = dict(snapshot_config or {})
         self._plugins = plugins
         # Le registre des Tools est celui du Plugin Registry quand il existe :
         # les Tools du noyau y sont déjà enregistrés (propriétaire ``core``) et
@@ -195,6 +217,59 @@ class App:
     def plugins(self) -> PluginRegistry | None:
         return self._plugins
 
+    @property
+    def console(self) -> ConsoleServer | None:
+        return self._console
+
+    def snapshot(self) -> Mapping[str, object]:
+        """Instantané de lecture de l'état du noyau, prêt pour le JSON.
+
+        Construit **à la demande** par la racine de composition, jamais poussé
+        par le noyau : la Console lit un état gelé et ne peut pas atteindre le
+        Coordinator (ADR-0016). Aucun secret : ``config`` ne porte que les
+        valeurs explicitement injectées par ``build_app``.
+        """
+        clients = getattr(self._transport, "clients", {})
+        return {
+            "session": {
+                "state": self._coordinator.state.value,
+                "session_id": self._coordinator.session_id,
+                "connection_id": self._coordinator.connection_id,
+                "active_client_id": self._coordinator.owner_client_id,
+            },
+            "clients": [
+                {
+                    "client_id": client.client_id,
+                    "client_name": client.client_name,
+                    "platform": client.platform,
+                }
+                for client in sorted(
+                    clients.values(), key=lambda item: item.client_name
+                )
+            ],
+            "plugins": self._plugin_summaries(),
+            "config": dict(self._snapshot_config),
+        }
+
+    def _plugin_summaries(self) -> list[Mapping[str, object]]:
+        """Plugins connus, état de chargement et Tools attribués au propriétaire."""
+        plugins = self._plugins
+        if plugins is None:
+            return []
+        tools_by_owner: dict[str, list[str]] = {}
+        for spec in plugins.tools.specs():
+            owner = plugins.tools.owner_of(spec.name)
+            if owner is not None:
+                tools_by_owner.setdefault(owner, []).append(spec.name)
+        return [
+            {
+                "name": name,
+                "state": state,
+                "tools": sorted(tools_by_owner.get(name, [])),
+            }
+            for name, state in sorted(plugins.states.items())
+        ]
+
     async def run(self) -> None:
         """Démarre les adaptateurs puis traite les Événements jusqu'à l'arrêt.
 
@@ -207,6 +282,8 @@ class App:
         await self._transport.start()
         if self._webhook is not None:
             await self._webhook.start(self.push_event)
+        if self._console is not None:
+            await self._console.start(self.snapshot)
         self._emit("started", payload={"state": self._coordinator.state.value})
 
         pumps = [
@@ -230,6 +307,8 @@ class App:
             await self._transport.stop()
             if self._webhook is not None:
                 await self._webhook.stop()
+            if self._console is not None:
+                await self._console.stop()
             self._clock.close()
             self._emit("stopped")
             close = getattr(self._trace_sink, "close", None)
@@ -454,6 +533,13 @@ def build_app(
             trace_sink=trace_sink,
         )
 
+    console: ConsoleAdapter | None = None
+    if config.console.enabled:
+        console = ConsoleAdapter(
+            host=config.console.host,
+            port=config.console.port,
+        )
+
     return App(
         transport=transport,
         gemini=gemini,
@@ -472,4 +558,13 @@ def build_app(
         recall_max_distance=config.memory.recall_max_distance,
         scheduler=scheduler,
         webhook=webhook,
+        console=console,
+        snapshot_config={
+            "model": config.gemini.model,
+            "voice": config.gemini.voice,
+            "user_id": config.memory.user_id,
+            "memory_db": config.memory.db_path,
+            "log_dir": config.log_dir,
+            "version": __version__,
+        },
     )
