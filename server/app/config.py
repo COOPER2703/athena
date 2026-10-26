@@ -11,9 +11,55 @@ from server.adapters.memory.embedder import DEFAULT_EMBED_MODEL
 from server.app.secrets import EnvSecretResolver, SecretResolver
 
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-live-preview"
-DEFAULT_GEMINI_VOICE = "Zephyr"
+DEFAULT_GEMINI_VOICE = "Leda"
+# Modèle de jugement : Flash-Lite, disponible sur l'échelle gratuite. Le défaut
+# précédent (`gemini-3.8-flash`) épuisait le quota gratuit (20 requêtes/jour),
+# répondait en ~30-50 s et renvoyait 503/429 : le juge échouait alors en faute
+# fermée, donc plus aucune Session automatique ne se lançait.
+DEFAULT_JUDGE_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_MEMORY_DB = "athena_memory.db"
-DEFAULT_CONSOLIDATION_MODEL = "gemini-2.0-flash"
+# Modèle de Consolidation : Flash-Lite, disponible sur l'échelle gratuite. Le
+# précédent défaut (`gemini-2.0-flash`) a été retiré et renvoyait 404.
+DEFAULT_CONSOLIDATION_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_WEBHOOK_HOST = "127.0.0.1"
+DEFAULT_WEBHOOK_PORT = 8766
+# La Console web est une surface d'observation (ADR-0003) : port dédié,
+# loopback par défaut, sans authentification en v1, comme le Webhook.
+DEFAULT_CONSOLE_HOST = "127.0.0.1"
+DEFAULT_CONSOLE_PORT = 8767
+# Build de la SPA servi par la Console. Le répertoire est relatif au répertoire
+# de travail du serveur ; absent, la Console explique quoi lancer sans empêcher
+# l'API de répondre (le build n'est jamais committé).
+DEFAULT_CONSOLE_STATIC_DIR = "web/dist"
+# Nombre de Traces récentes rejouées à la connexion de la Console. Le tampon
+# est en mémoire, depuis le démarrage du serveur ; il conserve tous les niveaux
+# (le filtrage est une affaire de présentation).
+DEFAULT_CONSOLE_TRACE_BUFFER = 500
+DEFAULT_LOG_DIR = "logs"
+# Un plugin est un dossier déposé (ADR-0014) ; l'état d'activation et la
+# configuration non secrète vivent dans un fichier JSON séparé, à la racine du
+# dépôt par défaut. Les deux chemins sont surchargeables pour les tests et les
+# déploiements.
+DEFAULT_PLUGINS_DIR = "plugins"
+DEFAULT_PLUGINS_STATE = "plugins.json"
+
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"", "0", "false", "no", "off"}
+
+
+def _coerce_bool(value: object, *, variable: str) -> bool:
+    """Coerce une valeur d'environnement en booléen, avec un message explicite."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_VALUES:
+            return True
+        if normalized in _FALSE_VALUES:
+            return False
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    raise ValueError(f"Expected a boolean for {variable}, got {value!r}")
 
 
 class LogLevel(StrEnum):
@@ -43,6 +89,7 @@ class GeminiConfig(BaseModel):
     api_key: str
     model: str = DEFAULT_GEMINI_MODEL
     voice: str = DEFAULT_GEMINI_VOICE
+    judge_model: str = Field(default=DEFAULT_JUDGE_MODEL, min_length=1)
 
 
 class MemoryConfig(BaseModel):
@@ -100,6 +147,92 @@ class MemoryConfig(BaseModel):
         return value
 
 
+class WebhookConfig(BaseModel):
+    """Paramètres de l'adaptateur Webhook HTTP (ADR-0011).
+
+    Lié à ``127.0.0.1`` par défaut : la surface n'est ouverte qu'à la machine
+    locale, sans authentification. L'exposition au LAN (jeton partagé) est hors
+    périmètre de ce lot.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = True
+    host: str = Field(default=DEFAULT_WEBHOOK_HOST, min_length=1)
+    port: int = Field(default=DEFAULT_WEBHOOK_PORT, ge=1, le=65535)
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _enabled(cls, value: object) -> object:
+        return _coerce_bool(value, variable="ATHENA_WEBHOOK_ENABLED")
+
+    @field_validator("host", mode="before")
+    @classmethod
+    def _strip_host(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+class ConsoleConfig(BaseModel):
+    """Paramètres de la Console web (ADR-0003, ADR-0016).
+
+    Surface d'observation servie sur son propre port, **liée à ``127.0.0.1``
+    par défaut** : elle n'est joignable que depuis la machine du serveur et
+    reste sans authentification en v1. Elle est **activée par défaut**, comme
+    le Webhook, et se désactive par ``ATHENA_CONSOLE_ENABLED=0``.
+
+    Défauts : ``enabled=True``, ``host="127.0.0.1"``, ``port=8767``,
+    ``static_dir="web/dist"`` pour le build de la SPA et ``trace_buffer=500``
+    pour l'historique rejoué à la connexion. Les cinq sont surchargeables par
+    ``ATHENA_CONSOLE_ENABLED``, ``ATHENA_CONSOLE_HOST``, ``ATHENA_CONSOLE_PORT``,
+    ``ATHENA_CONSOLE_STATIC_DIR`` et ``ATHENA_CONSOLE_TRACE_BUFFER``. Un
+    ``static_dir`` absent n'est pas une erreur : la Console sert alors une page
+    explicative et l'API répond normalement.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = True
+    host: str = Field(default=DEFAULT_CONSOLE_HOST, min_length=1)
+    port: int = Field(default=DEFAULT_CONSOLE_PORT, ge=1, le=65535)
+    static_dir: str = Field(default=DEFAULT_CONSOLE_STATIC_DIR, min_length=1)
+    trace_buffer: int = Field(default=DEFAULT_CONSOLE_TRACE_BUFFER, ge=1)
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _enabled(cls, value: object) -> object:
+        return _coerce_bool(value, variable="ATHENA_CONSOLE_ENABLED")
+
+    @field_validator("host", mode="before")
+    @classmethod
+    def _strip_host(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("static_dir", mode="before")
+    @classmethod
+    def _strip_static_dir(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+class PluginsConfig(BaseModel):
+    """Emplacements des plugins serveur (ADR-0014).
+
+    ``directory`` est le répertoire scanné au démarrage ; ``state_path`` le
+    fichier d'état qui porte la liste d'activation explicite et la
+    configuration non secrète. Un chemin absent ne fait pas échouer le
+    démarrage : il signifie simplement « aucun plugin ».
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    directory: str = Field(default=DEFAULT_PLUGINS_DIR, min_length=1)
+    state_path: str = Field(default=DEFAULT_PLUGINS_STATE, min_length=1)
+
+    @field_validator("directory", "state_path", mode="before")
+    @classmethod
+    def _strip_path(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
 class AppConfig(BaseModel):
     """Configuration validée au démarrage, injectée par constructeur."""
 
@@ -108,7 +241,11 @@ class AppConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     gemini: GeminiConfig
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    webhook: WebhookConfig = Field(default_factory=WebhookConfig)
+    console: ConsoleConfig = Field(default_factory=ConsoleConfig)
+    plugins: PluginsConfig = Field(default_factory=PluginsConfig)
     log_level: LogLevel = LogLevel.INFO
+    log_dir: str = Field(default=DEFAULT_LOG_DIR, min_length=1)
     debug_decisions: bool = False
 
     @field_validator("log_level", mode="before")
@@ -118,20 +255,17 @@ class AppConfig(BaseModel):
             return value.strip().upper()
         return value
 
+    @field_validator("log_dir", mode="before")
+    @classmethod
+    def _strip_log_dir(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
     @field_validator("debug_decisions", mode="before")
     @classmethod
-    def _coerce_bool(cls, value: object) -> object:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"1", "true", "yes", "on"}:
-                return True
-            if normalized in {"", "0", "false", "no", "off"}:
-                return False
-        if isinstance(value, int) and value in (0, 1):
-            return bool(value)
-        raise ValueError(f"Expected a boolean for ATHENA_DEBUG_DECISIONS, got {value!r}")
+    def _debug_decisions(cls, value: object) -> object:
+        return _coerce_bool(value, variable="ATHENA_DEBUG_DECISIONS")
 
 
 def parse_dotenv(path: str | Path) -> dict[str, str]:
@@ -156,6 +290,28 @@ def parse_dotenv(path: str | Path) -> dict[str, str]:
     return values
 
 
+def default_env_file() -> Path:
+    """Fichier ``.env`` conventionnel : à la racine du répertoire courant."""
+    return Path.cwd() / ".env"
+
+
+def merged_environment(
+    env: Mapping[str, str] | None = None,
+    *,
+    env_file: str | Path | None = None,
+) -> dict[str, str]:
+    """Vue fusionnée de la configuration : fichier ``.env`` puis environnement.
+
+    L'environnement du processus prime sur le fichier, exactement comme pour
+    ``load_config``. Sert aussi aux secrets de plugin : un jeton posé dans le
+    ``.env`` doit être visible du plugin, comme ``GEMINI_API_KEY`` l'est du
+    reste de la configuration.
+    """
+    file_values = parse_dotenv(env_file) if env_file is not None else {}
+    process_env = os.environ if env is None else env
+    return {**file_values, **process_env}
+
+
 def load_config(
     env: Mapping[str, str] | None = None,
     *,
@@ -168,9 +324,7 @@ def load_config(
     ``SecretResolver`` injecté (ou un résolveur d'environnement par défaut) :
     une variable manquante lève ``MissingSecretError``.
     """
-    file_values = parse_dotenv(env_file) if env_file is not None else {}
-    process_env = os.environ if env is None else env
-    merged: dict[str, str] = {**file_values, **process_env}
+    merged = merged_environment(env, env_file=env_file)
 
     resolver: SecretResolver = (
         secrets if secrets is not None else EnvSecretResolver(merged)
@@ -186,6 +340,7 @@ def load_config(
             api_key=api_key,
             model=merged.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
             voice=merged.get("GEMINI_VOICE", DEFAULT_GEMINI_VOICE),
+            judge_model=merged.get("GEMINI_JUDGE_MODEL", DEFAULT_JUDGE_MODEL),
         ),
         memory=MemoryConfig(
             user_id=merged.get("ATHENA_USER_ID", "owner"),
@@ -203,6 +358,27 @@ def load_config(
             ),
             consolidation_hours=merged.get("ATHENA_CONSOLIDATION_HOURS", "0,12"),
         ),
+        webhook=WebhookConfig(
+            enabled=merged.get("ATHENA_WEBHOOK_ENABLED", "1"),
+            host=merged.get("ATHENA_WEBHOOK_HOST", DEFAULT_WEBHOOK_HOST),
+            port=merged.get("ATHENA_WEBHOOK_PORT", str(DEFAULT_WEBHOOK_PORT)),
+        ),
+        console=ConsoleConfig(
+            enabled=merged.get("ATHENA_CONSOLE_ENABLED", "1"),
+            host=merged.get("ATHENA_CONSOLE_HOST", DEFAULT_CONSOLE_HOST),
+            port=merged.get("ATHENA_CONSOLE_PORT", str(DEFAULT_CONSOLE_PORT)),
+            static_dir=merged.get(
+                "ATHENA_CONSOLE_STATIC_DIR", DEFAULT_CONSOLE_STATIC_DIR
+            ),
+            trace_buffer=merged.get(
+                "ATHENA_CONSOLE_TRACE_BUFFER", str(DEFAULT_CONSOLE_TRACE_BUFFER)
+            ),
+        ),
+        plugins=PluginsConfig(
+            directory=merged.get("ATHENA_PLUGINS_DIR", DEFAULT_PLUGINS_DIR),
+            state_path=merged.get("ATHENA_PLUGINS_STATE", DEFAULT_PLUGINS_STATE),
+        ),
         log_level=merged.get("LOG_LEVEL", "INFO"),
+        log_dir=merged.get("ATHENA_LOG_DIR", DEFAULT_LOG_DIR),
         debug_decisions=merged.get("ATHENA_DEBUG_DECISIONS", "0"),
     )

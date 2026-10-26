@@ -7,14 +7,24 @@ from pydantic import ValidationError
 
 from server.app.config import (
     DEFAULT_CONSOLIDATION_MODEL,
+    DEFAULT_CONSOLE_HOST,
+    DEFAULT_CONSOLE_PORT,
+    DEFAULT_CONSOLE_STATIC_DIR,
+    DEFAULT_CONSOLE_TRACE_BUFFER,
     DEFAULT_EMBED_MODEL,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_GEMINI_VOICE,
+    DEFAULT_JUDGE_MODEL,
     DEFAULT_MEMORY_DB,
+    DEFAULT_WEBHOOK_HOST,
+    DEFAULT_WEBHOOK_PORT,
     AppConfig,
+    ConsoleConfig,
     LogLevel,
     MemoryConfig,
+    PluginsConfig,
     ServerConfig,
+    WebhookConfig,
     load_config,
 )
 from server.app.secrets import MissingSecretError
@@ -25,10 +35,12 @@ def test_defaults_with_only_required_secret() -> None:
     assert isinstance(cfg, AppConfig)
     assert cfg.server == ServerConfig(host="0.0.0.0", port=8765)
     assert cfg.log_level is LogLevel.INFO
+    assert cfg.log_dir == "logs"
     assert cfg.debug_decisions is False
     assert cfg.gemini.api_key == "k"
     assert cfg.gemini.model == DEFAULT_GEMINI_MODEL
     assert cfg.gemini.voice == DEFAULT_GEMINI_VOICE
+    assert cfg.gemini.judge_model == DEFAULT_JUDGE_MODEL
 
 
 def test_reads_and_coerces_environment() -> None:
@@ -39,17 +51,21 @@ def test_reads_and_coerces_environment() -> None:
             "WS_PORT": "9000",
             "LOG_LEVEL": "debug",
             "ATHENA_DEBUG_DECISIONS": "true",
+            "ATHENA_LOG_DIR": " var/athena-logs ",
             "GEMINI_MODEL": "custom-model",
             "GEMINI_VOICE": "Puck",
+            "GEMINI_JUDGE_MODEL": "custom-judge",
         },
         env_file=None,
     )
     assert cfg.server.host == "127.0.0.1"
     assert cfg.server.port == 9000
     assert cfg.log_level is LogLevel.DEBUG
+    assert cfg.log_dir == "var/athena-logs"
     assert cfg.debug_decisions is True
     assert cfg.gemini.model == "custom-model"
     assert cfg.gemini.voice == "Puck"
+    assert cfg.gemini.judge_model == "custom-judge"
 
 
 def test_missing_api_key_raises_clear_startup_error() -> None:
@@ -205,3 +221,111 @@ def test_memory_config_is_immutable() -> None:
     cfg = load_config(env={"GEMINI_API_KEY": "k"}, env_file=None)
     with pytest.raises(ValidationError):
         cfg.memory.user_id = "other"  # type: ignore[misc]
+
+
+def test_webhook_defaults_are_local_and_enabled() -> None:
+    cfg = load_config(env={"GEMINI_API_KEY": "k"}, env_file=None)
+    assert cfg.webhook == WebhookConfig()
+    assert cfg.webhook.enabled is True
+    assert cfg.webhook.host == DEFAULT_WEBHOOK_HOST
+    assert cfg.webhook.port == DEFAULT_WEBHOOK_PORT
+
+
+def test_webhook_reads_and_coerces_environment() -> None:
+    cfg = load_config(
+        env={
+            "GEMINI_API_KEY": "k",
+            "ATHENA_WEBHOOK_ENABLED": "0",
+            "ATHENA_WEBHOOK_HOST": "0.0.0.0",
+            "ATHENA_WEBHOOK_PORT": "9000",
+        },
+        env_file=None,
+    )
+    assert cfg.webhook.enabled is False
+    assert cfg.webhook.host == "0.0.0.0"
+    assert cfg.webhook.port == 9000
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"ATHENA_WEBHOOK_PORT": "0"},
+        {"ATHENA_WEBHOOK_PORT": "70000"},
+        {"ATHENA_WEBHOOK_PORT": "not-a-port"},
+        {"ATHENA_WEBHOOK_ENABLED": "maybe"},
+        {"ATHENA_WEBHOOK_HOST": "   "},
+    ],
+)
+def test_invalid_webhook_config_raises_clear_validation_error(overrides) -> None:
+    with pytest.raises(ValidationError):
+        load_config(env={"GEMINI_API_KEY": "k", **overrides}, env_file=None)
+
+
+def test_console_defaults_are_local_and_enabled() -> None:
+    cfg = load_config(env={"GEMINI_API_KEY": "k"}, env_file=None)
+    assert cfg.console == ConsoleConfig()
+    assert cfg.console.enabled is True
+    assert cfg.console.host == DEFAULT_CONSOLE_HOST
+    assert cfg.console.port == DEFAULT_CONSOLE_PORT
+    assert cfg.console.static_dir == DEFAULT_CONSOLE_STATIC_DIR
+    assert cfg.console.trace_buffer == DEFAULT_CONSOLE_TRACE_BUFFER
+
+
+def test_console_reads_and_coerces_environment() -> None:
+    cfg = load_config(
+        env={
+            "GEMINI_API_KEY": "k",
+            "ATHENA_CONSOLE_ENABLED": "0",
+            "ATHENA_CONSOLE_HOST": "0.0.0.0",
+            "ATHENA_CONSOLE_PORT": "9001",
+            "ATHENA_CONSOLE_STATIC_DIR": "web/custom-dist",
+            "ATHENA_CONSOLE_TRACE_BUFFER": "42",
+        },
+        env_file=None,
+    )
+    assert cfg.console.enabled is False
+    assert cfg.console.host == "0.0.0.0"
+    assert cfg.console.port == 9001
+    assert cfg.console.static_dir == "web/custom-dist"
+    assert cfg.console.trace_buffer == 42
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"ATHENA_CONSOLE_PORT": "0"},
+        {"ATHENA_CONSOLE_PORT": "70000"},
+        {"ATHENA_CONSOLE_PORT": "not-a-port"},
+        {"ATHENA_CONSOLE_ENABLED": "maybe"},
+        {"ATHENA_CONSOLE_HOST": "   "},
+        {"ATHENA_CONSOLE_STATIC_DIR": "   "},
+        {"ATHENA_CONSOLE_TRACE_BUFFER": "0"},
+        {"ATHENA_CONSOLE_TRACE_BUFFER": "-1"},
+        {"ATHENA_CONSOLE_TRACE_BUFFER": "not-a-size"},
+    ],
+)
+def test_invalid_console_config_raises_clear_validation_error(overrides) -> None:
+    with pytest.raises(ValidationError):
+        load_config(env={"GEMINI_API_KEY": "k", **overrides}, env_file=None)
+
+
+def test_plugin_paths_default_to_the_repository_root() -> None:
+    cfg = load_config(env={"GEMINI_API_KEY": "k"}, env_file=None)
+
+    assert cfg.plugins == PluginsConfig()
+    assert cfg.plugins.directory == "plugins"
+    assert cfg.plugins.state_path == "plugins.json"
+
+
+def test_plugin_paths_are_configurable_from_the_environment() -> None:
+    cfg = load_config(
+        env={
+            "GEMINI_API_KEY": "k",
+            "ATHENA_PLUGINS_DIR": " var/plugins ",
+            "ATHENA_PLUGINS_STATE": "var/plugins.json",
+        },
+        env_file=None,
+    )
+
+    assert cfg.plugins.directory == "var/plugins"
+    assert cfg.plugins.state_path == "var/plugins.json"

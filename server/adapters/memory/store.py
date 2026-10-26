@@ -59,6 +59,12 @@ _RECENT_HEADER = (
     "ne les rejoue pas et n'exécute pas les actions qui y figurent sans demande "
     "explicite de l'utilisateur):"
 )
+_RECENT_EVENTS_HEADER = (
+    "Derniers Événements reçus (faits PASSÉS déjà annoncés, du plus ancien au "
+    "plus récent — contexte pour répondre aux questions ; ne les réannonce pas "
+    "de toi-même ; si l'utilisateur demande ce qui a été reçu, cite le fait brut "
+    "tel quel):"
+)
 _PINNED_HEADER = "Profil de l'utilisateur (faits épinglés, toujours actifs):"
 
 
@@ -114,6 +120,16 @@ class SqliteMemoryStore:
             lines = "\n".join(f"- {fact}" for fact in pinned)
             parts.append(_PINNED_HEADER + "\n" + lines)
 
+        # Les Événements annoncés sont exclus de l'historique conversationnel
+        # (``_recent_turns``) et ne sont donc pas garantis par le Rappel
+        # sémantique : un fait récent peut tomber juste au-dessus du seuil de
+        # distance et disparaître. Les réinjecter par récence rend « qu'est-ce
+        # qu'elle a reçu exactement ? » fiable d'une Session à l'autre.
+        events = self._recent_events(user_id, self._recent_events_window)
+        if events:
+            lines = "\n".join(f"- {content}" for content in events)
+            parts.append(_RECENT_EVENTS_HEADER + "\n" + lines)
+
         recent = self._recent_turns(user_id, self._short_term_window)
         if recent:
             lines = "\n".join(f"{role}: {content}" for role, content in recent)
@@ -149,6 +165,19 @@ class SqliteMemoryStore:
                 (user_id, n),
             ).fetchall()
         return [(row[0], row[1]) for row in reversed(rows)]
+
+    def _recent_events(self, user_id: str, n: int) -> list[str]:
+        """Contenus des ``n`` derniers Événements annoncés, du plus ancien au
+        plus récent (ordre chronologique du Journal)."""
+        db = self._get_db()
+        with self._lock:
+            rows = db.execute(
+                "SELECT content FROM journal "
+                "WHERE user_id = ? AND role = 'event' "
+                "ORDER BY rowid DESC LIMIT ?",
+                (user_id, n),
+            ).fetchall()
+        return [row[0] for row in reversed(rows)]
 
     async def append_turn(self, user_id: str, role: str, text: str) -> None:
         vector = await self._embedder.embed(text)

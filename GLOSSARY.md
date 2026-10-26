@@ -26,9 +26,9 @@ signal de fin ou un timeout. La gestion des Sessions est une responsabilité du 
 _Avoid_: Conversation, call, chat
 
 **Connexion Live**:
-Le lien serveur ↔ Gemini Live, ouvert par le noyau pour juger un Événement même si Athena
-finit par se taire. Une Connexion Live peut exister sans Session ; une Session n'existe
-que lorsque de l'audio est effectivement échangé.
+Le lien serveur ↔ Gemini Live, ouvert par le noyau pour tenir une Session ou faire prononcer
+une Annonce. Une Connexion Live peut exister sans Session ; une Session n'existe que lorsque
+de l'audio est effectivement échangé.
 _Avoid_: Session Gemini, session serveur, session interne, session cachée
 
 **Repos**:
@@ -108,10 +108,35 @@ Le transport HTTP par lequel une application externe pousse un Événement dans 
 d'événements. N'est pas un concept du noyau, seulement un moyen d'accès.
 _Avoid_: endpoint, callback, hook
 
+### Console
+
+**Console web**:
+La surface d'observation du serveur : une page unique servie en HTTP/JSON et WebSocket sur
+un port dédié, liée à `127.0.0.1` par défaut, sans authentification en v1. Elle lit un
+**instantané de lecture** de l'état (Session, Clients, Plugins, configuration non sensible)
+et le flux de **Traces** rejoué depuis le **Tampon de traces**. Ce n'est **pas un Client** :
+elle ne parle pas le Protocole partagé, ne s'enregistre pas, ne reçoit pas d'audio et ne
+démarre pas de Session (ADR-0003, ADR-0016).
+_Avoid_: dashboard, UI, interface web, client web
+
+**Trace**:
+Une entrée du flux d'observation : horodatage, Source, `kind`, niveau et payload. La Console
+la rejoue depuis le Tampon de traces ou la pousse en direct, telle quelle ; son niveau sert
+au filtrage et à la présentation, jamais à décider de sa conservation.
+_Avoid_: log, ligne de log, événement de log
+
+**Tampon de traces**:
+Le consommateur borné du flux unique de Traces, distinct du Journal : il garde les plus
+récentes pour les rejouer à la connexion d'un client, puis lui distribue le direct. Au-delà
+de sa borne, il perd les plus anciennes et le signale par un marqueur unique plutôt que de
+laisser croire à un historique complet. Sa borne navigateur est distincte et rendue visible
+côté page.
+_Avoid_: cache de logs, historique complet, buffer serveur
+
 **Session automatique**:
-Une Session ouverte par le noyau sans Wake word, lorsque le LLM décide d'annoncer un
-Événement. Le noyau ouvre d'abord une Connexion Live pour juger ; si le LLM se tait, la
-Connexion Live est refermée sans qu'aucune Session n'apparaisse côté Client.
+Une Session ouverte par le noyau sans Wake word, lorsqu'un Événement est jugé digne d'être
+annoncé. Le jugement se fait en texte, hors Session ; la Connexion Live n'est ouverte que
+pour faire prononcer l'Annonce, et aucune Session n'apparaît si Athena ne parle pas.
 _Avoid_: session proactive, session auto, session serveur, session système
 
 **Annonce proactive**:
@@ -147,10 +172,16 @@ _Avoid_: Silencieux, muet
 ### Domotique
 
 **Intent**:
-Une commande sémantique Assist de Home Assistant (`HassTurnOn`, `HassLightSet`, …).
-Athena expose les Intents à Gemini comme des Tools ; la résolution des noms, zones et
-alias se fait dans Home Assistant, jamais dans le plugin.
+Une commande sémantique Assist de Home Assistant (`HassTurnOn`, `HassLightSet`, …). La
+résolution des noms, zones et alias se fait dans Home Assistant, jamais dans le plugin.
 _Avoid_: Command, action, service, appel REST
+
+**Tool Assist**:
+Un Tool exposé par l'API Assist de Home Assistant. La plupart sont des Intents ; d'autres
+lisent l'état de la maison (`GetLiveContext`, `HassGetState`) ou lancent un script. Le
+plugin `homeassistant` les expose tels quels : Athena ne filtre pas les Tools Assist aux
+seuls Intents et ne les renomme pas.
+_Avoid_: Tool HA, outil domotique, function
 
 **Exposition Assist**:
 Le périmètre des entités pilotables par Athena, défini dans Home Assistant par son
@@ -232,24 +263,41 @@ _Avoid_: save_memory proactif, sauvegarde automatique, mémorisation implicite
 
 ### Plugins
 
-Un plugin est un module externe exposant des Tools à Gemini. Le noyau (session, mémoire)
-n'est pas un plugin.
+Un plugin est un module externe qui expose des Tools à Gemini et peut fournir une
+instruction d'usage. Le noyau (session, mémoire) n'est pas un plugin.
 
 **Plugin**:
 Un module chargé par le serveur ou un Client, exposant des Tools à Gemini. Chaque plugin a
 une seule plateforme (server, desktop, android, ios). Peut être activé, désactivé ou
-supprimé.
+supprimé. Un plugin activé est du code de confiance : il tourne dans le serveur avec ses
+privilèges.
 _Avoid_: Extension, addon, module
 
 **Plugin Registry**:
-Le catalogue central des plugins disponibles avec leur plateforme, source de vérité pour
-les plugins du système.
-_Avoid_: Plugin list, plugin catalog
+Le catalogue des plugins installés sur le serveur et de leur état (activé, désactivé, en
+échec). Il n'existe pas de catalogue de plugins disponibles : installer un plugin, c'est le
+rendre présent sur le serveur.
+_Avoid_: Plugin list, plugin catalog, marketplace
 
 **Plugin Manifest**:
-La description d'un plugin : nom, version, description, plateforme, configuration et
-secrets requis.
+La description d'un plugin : nom, version, description, plateforme, configuration requise
+et noms des secrets requis. Il ne contient jamais de valeur de secret, ne liste pas les
+Tools que le plugin expose — ils sont découverts à l'exécution — et ne déclare pas les
+Sources qu'il émet : une Source est nommée au moment où l'Événement est poussé.
 _Avoid_: Plugin config, plugin metadata
+
+**Instruction de plugin**:
+Le texte qu'un plugin fournit pour expliquer à Gemini comment utiliser ses Tools. Le noyau
+le compose dans le prompt système de toute Session où les Tools de ce plugin sont déclarés.
+Se distingue des descriptions de Tools : c'est une politique d'usage, pas un schéma.
+_Avoid_: Prompt de plugin, system prompt du plugin, instructions HA
+
+**Tool de plugin**:
+Un Tool exposé par un plugin. Son nom, sa description et son schéma viennent de la
+plateforme que le plugin relie ; Athena ne les renomme pas et ne leur ajoute aucun préfixe.
+Le noyau l'exécute par le même round-trip qu'un Tool du noyau, mais l'exécution sort du
+serveur, vers la plateforme.
+_Avoid_: Tool externe, tool intégré, wrapper
 
 ### Développement assisté
 
@@ -320,14 +368,15 @@ _Avoid_: Raison, cause, status
 
 - **Client ↔ Serveur**: Communication WebSocket via le Protocole partagé. Le client envoie
   audio et résultats de Tools, le serveur envoie audio et appels de Tools.
-- **Serveur → Gemini**: Connexion Live ouverte pour juger un Événement ou tenir une Session.
+- **Serveur → Gemini**: Connexion Live ouverte pour tenir une Session ou faire prononcer une
+  Annonce ; le jugement d'un Événement, lui, se fait via un modèle texte hors Session.
 - **Noyau → Session**: Le noyau gère le cycle de vie des Sessions (start, end, timeout).
 - **Adaptateurs → Noyau (Canal d'événements)**: Les adaptateurs y déposent leurs entrées
   (audio, cycle de vie, horloge) ; le noyau les traite immédiatement, quel que soit son état.
 - **Source → Noyau (Canal d'événements)**: Les plugins et applications externes poussent des
-  Événements neutres ; le noyau les met en attente hors Repos et les juge au Repos, puis
-  ouvre une Connexion Live : le LLM juge, et une Session automatique n'est ouverte qu'au
-  moment de l'Annonce proactive.
+  Événements neutres ; le noyau les met en attente hors Repos et les juge au Repos par un
+  modèle texte, puis n'ouvre une Connexion Live que pour faire prononcer l'Annonce : une
+  Session automatique n'apparaît qu'au moment de l'Annonce proactive.
 - **Événement → Session**: Un Événement n'est jamais injecté dans une Session active ; il
   attend la fin de la Session et est jugé au Repos.
 - **Connexion Live → Session**: Une Connexion Live ne devient une Session que si Athena

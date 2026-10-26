@@ -41,6 +41,31 @@ def test_register_returns_registered_and_enqueues_event() -> None:
     asyncio.run(scenario())
 
 
+def test_server_tools_provider_is_read_at_each_registration() -> None:
+    """Un fournisseur relu à chaque ``Register`` suit les Tools apparus depuis."""
+
+    async def scenario() -> None:
+        names = ["save_memory"]
+        async with running_transport(server_tools=lambda: list(names)) as transport:
+            async with (
+                websockets.connect(_url(transport)) as first_ws,
+                websockets.connect(_url(transport)) as second_ws,
+            ):
+                first = await register(
+                    first_ws, transport, client_name="desktop"
+                )
+                assert first.server_tools == ["save_memory"]
+
+                names.append("hass__turn_on")
+
+                second = await register(
+                    second_ws, transport, client_name="tablet"
+                )
+                assert second.server_tools == ["save_memory", "hass__turn_on"]
+
+    asyncio.run(scenario())
+
+
 def test_register_falls_back_to_client_id_and_unknown_platform() -> None:
     async def scenario() -> None:
         async with running_transport() as transport:

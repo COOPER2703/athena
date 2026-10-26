@@ -4,7 +4,26 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Mapping, NamedTuple, Protocol, Sequence
 
+from plugin_api import ToolSpec
 from protocol import SessionEndReason
+
+# ``ToolSpec`` appartient au contrat public (``plugin_api``) ; il est ré-exporté
+# ici pour que les imports existants du noyau continuent de marcher.
+
+
+class MissingSecretError(RuntimeError):
+    """Levée quand un secret requis est introuvable dans sa source."""
+
+
+class SecretResolver(Protocol):
+    """Port de résolution des secrets.
+
+    Les adaptateurs reçoivent la valeur déjà résolue et ne lisent jamais
+    l'environnement eux-mêmes (ADR-0001). Le port vit dans le noyau pour qu'un
+    adaptateur n'ait pas à importer la racine de composition.
+    """
+
+    def resolve(self, name: str) -> str: ...
 
 
 class ClientLink(Protocol):
@@ -21,15 +40,6 @@ class ClientLink(Protocol):
     ) -> None: ...
 
 
-@dataclass(frozen=True, slots=True)
-class ToolSpec:
-    """Pure description of a Tool a model may call (registry seam, issue #28)."""
-
-    name: str
-    description: str
-    parameters: Mapping[str, object]
-
-
 class LlmSocket(Protocol):
     async def open(
         self,
@@ -44,7 +54,9 @@ class LlmSocket(Protocol):
 
     async def send_memory(self, session_id: str, text: str) -> None: ...
 
-    async def send_judge_batch(self, session_id: str, text: str) -> None: ...
+    async def send_announcement(
+        self, session_id: str, text: str, facts: str = ""
+    ) -> None: ...
 
     async def send_tool_result(
         self,
@@ -53,6 +65,39 @@ class LlmSocket(Protocol):
         name: str,
         result: Mapping[str, object],
     ) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class Judgment:
+    """Verdict d'un jugement d'Événements (texte, non-live).
+
+    ``announce`` décide si le lot mérite une Annonce proactive ; ``message`` est
+    la phrase à prononcer, vide quand ``announce`` est faux.
+
+    ``failed`` distingue un verdict **rendu** (le juge a bien décidé, y compris
+    « se taire ») d'un verdict **manquant** (panne réseau, réponse malformée).
+    Les deux donnent ``announce=False`` — c'est la faute fermée — mais un échec
+    ne doit jamais être confondu avec un fait jugé banal dans le trail : il est
+    tracé comme tel (ADR-0012).
+    """
+
+    announce: bool
+    message: str = ""
+    failed: bool = False
+
+
+class EventJudge(Protocol):
+    """Juge un lot d'Événements hors Session (ADR-0007, amendé).
+
+    Le verdict vient d'un modèle **texte**, jamais du modèle Live vocal : un
+    modèle Live répond toujours à un tour utilisateur, il ne sait pas « se
+    taire ». L'adaptateur possède l'appel réseau et ne lève jamais : un échec de
+    jugement renvoie ``Judgment(announce=False, failed=True)`` (faute fermée :
+    dans le doute, on ne dérange pas l'utilisateur). ``failed`` doit refléter un
+    verdict manquant, jamais un verdict rendu.
+    """
+
+    async def judge(self, facts: Sequence[str]) -> Judgment: ...
 
 
 class Clock(Protocol):

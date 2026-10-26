@@ -14,7 +14,7 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
-    SendJudgeBatchToLlm,
+    SendAnnouncementToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
     StartIdleTimer,
@@ -40,15 +40,18 @@ from server.core.events import (
     ShutdownRequested,
     TimerFired,
 )
-from server.core.ports import MemoryStore, ToolSpec
+from server.core.plugins import PluginRegistry
+from server.core.ports import EventJudge, Judgment, MemoryStore, ToolSpec
 from server.core.state import SessionState
 from server.core.tools import ToolRegistry
 
 _TRACE_SOURCE = "core"
 IDLE_TIMEOUT = 30.0
-# Verdict de jugement par timeout seul (ADR-0007) : plus court que l'inactivité
-# d'une Session, pour libérer vite l'unique Connexion Live quand le LLM se tait.
-JUDGE_TIMEOUT = 5.0
+# Filet de sécurité de l'Annonce (ADR-0007, amendé) : une Connexion Live n'est
+# ouverte que si le jugement **texte** a décidé d'annoncer, mais si le modèle ne
+# produit aucun son, elle est refermée vite — plus court que l'inactivité d'une
+# Session — sans qu'aucune Session n'apparaisse.
+ANNOUNCE_TIMEOUT = 5.0
 # Fenêtre de regroupement **paresseuse et fixe** (ADR-0007) : ouverte au premier
 # Événement reçu au Repos, elle dure 5 s sans être relancée par les arrivées
 # suivantes, puis juge le lot entier en un seul tour.
@@ -98,8 +101,10 @@ class Coordinator:
         memory: MemoryStore | None = None,
         user_id: str = "owner",
         system_prompt: str = "",
-        judge_prompt: str = "",
+        announce_prompt: str = "",
+        judge: EventJudge | None = None,
         tools: ToolRegistry | None = None,
+        plugins: PluginRegistry | None = None,
         recall_k: int = 5,
         recall_window_turns: int = 3,
         recall_max_distance: float = 0.6,
@@ -107,8 +112,13 @@ class Coordinator:
         self._memory = memory
         self._user_id = user_id
         self._system_prompt = system_prompt
-        self._judge_prompt = judge_prompt
-        self._tools = tools  # Tool registry seam (issue #28).
+        self._announce_prompt = announce_prompt
+        self._judge = judge
+        # Le Plugin Registry possède le registre de Tools unique (noyau + plugins)
+        # et les instructions de plugin ; ``tools`` reste le seam des tests qui
+        # n'injectent qu'un registre nu (issue #28).
+        self._plugins = plugins
+        self._tools = plugins.tools if plugins is not None else tools
         self._recall_k = recall_k
         self._recall_window_turns = recall_window_turns
         self._recall_max_distance = recall_max_distance
@@ -149,6 +159,20 @@ class Coordinator:
     def session_id(self) -> str:
         return self._session_id
 
+    @property
+    def owner_client_id(self) -> str:
+        """Client propriétaire de la Session en cours, vide hors Session.
+
+        Lecture seule : la Console web lit cette valeur à travers l'instantané
+        de la racine de composition (ADR-0016). Le nom évite volontairement
+        ``active_client_id``, réservé aux garde-fous des adaptateurs.
+
+        Une Connexion Live n'est pas encore une Session : tant que la Session
+        n'est pas visible, aucun Client n'est actif et la valeur reste vide
+        (GLOSSARY, Connexion Live et Client actif).
+        """
+        return self._client_id if self._visible else ""
+
     async def handle(self, event: Event) -> list[Command]:
         commands = await self._dispatch(event)
         # Modèle unifié : dès que le noyau est au Repos avec des Événements en
@@ -186,7 +210,7 @@ class Coordinator:
         if isinstance(event, ShutdownRequested):
             return self._on_shutdown_requested(event)
         if isinstance(event, TimerFired):
-            return self._on_timer_fired(event)
+            return await self._on_timer_fired(event)
         if isinstance(event, EventReceived):
             return self._on_event_received(event)
         raise TypeError(f"Unsupported event: {type(event).__name__}")
@@ -354,17 +378,68 @@ class Coordinator:
             ),
         ]
 
-    def _start_judgment(self) -> list[Command]:
-        """Ouvre l'unique Connexion Live de jugement et transmet le lot.
+    async def _judge_batch(self) -> list[Command]:
+        """Juge le lot hors Session (modèle **texte**), puis décide d'annoncer.
 
-        Instruction de jugement dédiée, **sans Rappel mémoire ni Tools** ; le lot
-        est transmis comme contenu de tour par une commande distincte de
-        l'injection de mémoire (ADR-0007). La Connexion est marquée ``auto`` :
-        si le LLM parle, elle devient une Session automatique annoncée au Client
-        de référence ; s'il se tait, le timeout de jugement dédié la referme.
+        Le verdict ne vient jamais du modèle Live : un modèle Live vocal répond
+        toujours à un tour utilisateur, il ne sait pas « se taire ». Un modèle
+        texte rend ``announce``/``message`` ; la Connexion Live n'est ouverte que
+        pour faire parler l'Annonce. Un lot tu est simplement consommé : il
+        n'entre pas au Journal (ADR-0007). Sans juge injecté, on se tait (faute
+        fermée : dans le doute, ne pas déranger).
         """
         batch = self._event_queue
         self._event_queue = []
+        if not batch:
+            return self._decision("EventJudge")
+        facts = [self._format_fact(event) for event in batch]
+        verdict = (
+            await self._judge.judge(facts)
+            if self._judge is not None
+            else Judgment(announce=False, failed=True)
+        )
+        if verdict.failed:
+            # Verdict manquant (panne du juge, réponse malformée) : faute fermée,
+            # mais tracée **distinctement** d'un fait jugé banal, pour qu'une
+            # panne silencieuse (quota, réseau) ne se lise pas comme « tout est
+            # banal » (ADR-0012).
+            return [
+                self._trace(
+                    "EventJudgmentFailed",
+                    from_state=SessionState.IDLE,
+                    to_state=SessionState.IDLE,
+                    client_id=self._registered_client_id,
+                    extra={"events": len(batch)},
+                    level="error",
+                )
+            ]
+        if not verdict.announce:
+            return [
+                self._trace(
+                    "EventJudged",
+                    from_state=SessionState.IDLE,
+                    to_state=SessionState.IDLE,
+                    client_id=self._registered_client_id,
+                    extra={"events": len(batch), "announce": False},
+                )
+            ]
+        return await self._start_announcement(batch, verdict.message)
+
+    async def _start_announcement(
+        self, batch: list[EventReceived], message: str
+    ) -> list[Command]:
+        """Ouvre l'unique Connexion Live et lui fait prononcer l'Annonce.
+
+        La Session automatique est une **Session ordinaire** : même prompt
+        système, mêmes instructions de plugin, même Activation mémoire et mêmes
+        Tools qu'une Session ouverte par un Wake word (ADR-0013) ; l'instruction
+        d'Annonce s'y ajoute pour qu'Athena sache qu'un Événement a ouvert la
+        Session. Le message du juge est la phrase à prononcer ; les faits bruts
+        du lot sont transmis au Live comme contexte (``facts``), sans être
+        prononcés, pour qu'Athena puisse détailler l'Événement à la demande. La
+        Connexion est marquée ``auto`` : son premier son devient une Session
+        automatique annoncée au Client de référence.
+        """
         self._judged_batch = batch
         self._session_counter += 1
         self._connection_id = f"s{self._session_counter}"
@@ -375,26 +450,53 @@ class Coordinator:
         self._judging = True
         self._state = SessionState.LIVE_CONNECTING
         self._recent_utterances = []
-        self._injected_memories = set()
+
+        # Activation, comme une Session ordinaire : le prompt système, les
+        # instructions de plugin et le contexte mémoire (profil épinglé, tours
+        # récents) font partie de l'instruction, l'instruction d'Annonce s'y
+        # intercale. Les faits bruts du lot y étant aussi, semer le
+        # dédoublonnage du Rappel avec eux évite de les réinjecter au premier
+        # tour utilisateur.
+        context = ""
+        injected: set[str] = set()
+        if self._memory is not None:
+            context = await self._memory.session_context(self._user_id)
+            injected = set(await self._memory.pinned_facts(self._user_id))
+        self._injected_memories = injected | {
+            self._format_fact(event) for event in batch
+        }
+        instruction = self._compose_instruction(
+            self._system_prompt,
+            self._plugin_instruction(),
+            self._announce_prompt,
+            context,
+        )
+
+        rendered = self._render_batch(batch)
+        text = message.strip()
+        # Les faits bruts ne sont transmis comme contexte séparé que si le juge
+        # a fourni une phrase : sans phrase, le lot est le tour à prononcer.
+        facts = rendered if text else ""
         return [
             OpenLiveConnection(
                 connection_id=self._connection_id,
-                instruction=self._judge_prompt,
-                tools=(),
+                instruction=instruction,
+                tools=self._open_tools(),
             ),
             StartIdleTimer(
-                connection_id=self._connection_id, timeout=JUDGE_TIMEOUT
+                connection_id=self._connection_id, timeout=ANNOUNCE_TIMEOUT
             ),
-            SendJudgeBatchToLlm(
+            SendAnnouncementToLlm(
                 connection_id=self._connection_id,
-                text=self._render_batch(batch),
+                text=text or rendered,
+                facts=facts,
             ),
             self._trace(
                 "EventJudge",
                 from_state=SessionState.IDLE,
                 to_state=self._state,
                 client_id=self._client_id,
-                extra={"events": len(batch)},
+                extra={"events": len(batch), "announce": True},
             ),
         ]
 
@@ -449,17 +551,21 @@ class Coordinator:
         self._recent_utterances = []
         self._injected_memories = set()
 
-        # Activation (D3): assemble the generic prompt and the memory context the
-        # Session opens with. The instruction is frozen here, at connect time.
-        # Pinned profile facts are part of that instruction, so seed the recall
-        # dedup with them: recall must not re-inject what is already in context.
+        # Activation (D3): assemble the generic prompt, the plugin instructions
+        # and the memory context the Session opens with. The instruction is
+        # frozen here, at connect time. Pinned profile facts are part of that
+        # instruction, so seed the recall dedup with them: recall must not
+        # re-inject what is already in context.
         context = ""
         if self._memory is not None:
             context = await self._memory.session_context(self._user_id)
             self._injected_memories = set(
                 await self._memory.pinned_facts(self._user_id)
             )
-        instruction = (self._system_prompt + "\n\n" + context).strip()
+        plugin_instruction = self._plugin_instruction()
+        instruction = self._compose_instruction(
+            self._system_prompt, plugin_instruction, context
+        )
 
         commands.append(
             OpenLiveConnection(
@@ -488,6 +594,8 @@ class Coordinator:
                     "user_id": self._user_id,
                     "has_context": bool(context),
                     "context_chars": len(context),
+                    "has_plugin_instruction": bool(plugin_instruction),
+                    "plugin_instruction_chars": len(plugin_instruction),
                 },
             )
         )
@@ -497,6 +605,27 @@ class Coordinator:
         if self._tools is None:
             return ()
         return self._tools.specs()
+
+    def _plugin_instruction(self) -> str:
+        """Instruction d'usage des plugins activés, vide sans plugin.
+
+        Le registre la compose déjà dans un ordre déterministe (nom du plugin) :
+        le noyau ne fait que l'insérer dans le prompt, il ne la réécrit pas.
+        """
+        if self._plugins is None:
+            return ""
+        return self._plugins.instruction()
+
+    @staticmethod
+    def _compose_instruction(*sections: str) -> str:
+        """Assemble l'instruction d'une Connexion Live, sections vides omises.
+
+        Ordre fixé par l'appelant : prompt système → instructions de plugin →
+        instruction d'Annonce → contexte mémoire. Les sections non vides sont
+        séparées par une ligne vide ; sans aucune section, l'instruction est la
+        chaîne vide (jamais des sauts de ligne).
+        """
+        return "\n\n".join(section for section in sections if section).strip()
 
     def _on_client_audio(self, event: ClientAudio) -> list[Command]:
         if self._state in (SessionState.LIVE_ACTIVE, SessionState.SESSION_VISIBLE):
@@ -653,11 +782,15 @@ class Coordinator:
         return _MEMORY_HEADER + "\n" + "\n".join(lines), trace
 
     async def _on_llm_tool_call(self, event: LlmToolCall) -> list[Command]:
-        """Exécute un Tool du noyau et renvoie son résultat au modèle.
+        """Exécute un Tool (noyau ou plugin) et renvoie son résultat au modèle.
 
         Un nom inconnu (ou l'absence de registre) produit un résultat d'erreur
-        tracé : le round-trip ne lève jamais, la Session reste vivante.
+        tracé : le round-trip ne lève jamais, la Session reste vivante. Chaque
+        trace porte le plugin propriétaire (``core`` pour un Tool du noyau,
+        ``null`` pour un nom inconnu), pour attribuer appels et erreurs dans le
+        flux de trace (ADR-0014).
         """
+        plugin = self._tool_owner(event.name)
         commands: list[Command] = [
             self._trace(
                 "ToolCall",
@@ -665,7 +798,11 @@ class Coordinator:
                 to_state=self._state,
                 client_id=self._client_id,
                 level="debug",
-                extra={"tool_id": event.tool_id, "name": event.name},
+                extra={
+                    "tool_id": event.tool_id,
+                    "name": event.name,
+                    "plugin": plugin,
+                },
             )
         ]
         if self._tools is None:
@@ -693,11 +830,18 @@ class Coordinator:
                 extra={
                     "tool_id": event.tool_id,
                     "name": event.name,
+                    "plugin": plugin,
                     "status": str(result.get("status", "ok")),
                 },
             )
         )
         return commands
+
+    def _tool_owner(self, name: str) -> str | None:
+        """Plugin propriétaire d'un Tool, ``None`` quand le nom est inconnu."""
+        if self._tools is None:
+            return None
+        return self._tools.owner_of(name)
 
     def _on_llm_closed(self, event: LlmClosed) -> list[Command]:
         if not self._owns(event.connection_id):
@@ -738,15 +882,15 @@ class Coordinator:
         self._window_open = False
         return commands
 
-    def _on_timer_fired(self, event: TimerFired) -> list[Command]:
+    async def _on_timer_fired(self, event: TimerFired) -> list[Command]:
         if event.connection_id == EVENT_WINDOW_TIMER_ID:
-            return self._on_event_window_fired()
+            return await self._on_event_window_fired()
         if self._owns(event.connection_id) and self._state is not SessionState.IDLE:
             return self._teardown(SessionEndReason.TIMEOUT, "Timeout")
         return self._decision("TimerFired")
 
-    def _on_event_window_fired(self) -> list[Command]:
-        """Échéance de la fenêtre : juge le lot entier en un seul tour.
+    async def _on_event_window_fired(self) -> list[Command]:
+        """Échéance de la fenêtre : juge le lot entier, puis annonce si retenu.
 
         Si le noyau a quitté le Repos entre-temps (l'utilisateur a pris la
         parole), la fenêtre se referme sans juger et la File reste intacte :
@@ -757,7 +901,7 @@ class Coordinator:
         self._window_open = False
         if self._state is not SessionState.IDLE:
             return self._decision("EventWindowFired")
-        return self._start_judgment()
+        return await self._judge_batch()
 
     def _rearm_timer(self) -> StartIdleTimer:
         return StartIdleTimer(connection_id=self._connection_id, timeout=IDLE_TIMEOUT)

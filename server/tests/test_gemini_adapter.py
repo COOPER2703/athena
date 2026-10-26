@@ -12,7 +12,7 @@ from server.core.commands import (
     CloseLiveConnection,
     OpenLiveConnection,
     SendAudioToLlm,
-    SendJudgeBatchToLlm,
+    SendAnnouncementToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
     StartIdleTimer,
@@ -366,6 +366,69 @@ def test_maps_audio_transcriptions_and_traces_tool_calls() -> None:
     asyncio.run(scenario())
 
 
+def test_streamed_output_transcription_is_emitted_as_one_turn() -> None:
+    async def scenario() -> None:
+        fragments = ["Bonjour", " je", " vais", " bien."]
+        responses = [
+            SimpleNamespace(
+                server_content=SimpleNamespace(
+                    input_transcription=None,
+                    output_transcription=SimpleNamespace(text=fragment),
+                )
+            )
+            for fragment in fragments
+        ]
+        live_connect = FakeLiveConnect(session=FakeSession(responses=responses))
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmTranscription(
+            text="Bonjour je vais bien.", role=Role.ASSISTANT
+        )
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_streamed_output_transcription_is_not_merged_across_turns() -> None:
+    async def scenario() -> None:
+        def turn(text: str) -> list[Any]:
+            return [
+                SimpleNamespace(
+                    server_content=SimpleNamespace(
+                        input_transcription=None,
+                        output_transcription=SimpleNamespace(text=text),
+                    )
+                )
+            ]
+
+        live_connect = FakeLiveConnect(
+            session=PerTurnSession([turn("premier"), turn("second")])
+        )
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmTranscription(
+            text="premier", role=Role.ASSISTANT
+        )
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmTranscription(
+            text="second", role=Role.ASSISTANT
+        )
+
+        await adapter.execute(CloseLiveConnection(connection_id="s1"))
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
+
+    asyncio.run(scenario())
+
+
 def test_audio_and_transcription_in_one_message_are_both_emitted() -> None:
     async def scenario() -> None:
         response = SimpleNamespace(
@@ -588,7 +651,7 @@ def test_send_audio_after_terminal_event_is_ignored() -> None:
     asyncio.run(scenario())
 
 
-def test_send_judge_batch_sends_the_batch_as_a_completed_turn() -> None:
+def test_send_announcement_sends_the_message_as_a_completed_turn() -> None:
     async def scenario() -> None:
         session = FakeSession(block=True)
         live_connect = FakeLiveConnect(session=session)
@@ -605,19 +668,19 @@ def test_send_judge_batch_sends_the_batch_as_a_completed_turn() -> None:
         assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
 
         await adapter.execute(
-            SendJudgeBatchToLlm(
-                connection_id="s1", text="[ÉVÉNEMENTS]\n- [matrix] porte"
+            SendAnnouncementToLlm(
+                connection_id="s1", text="La porte d'entrée vient de s'ouvrir."
             )
         )
 
         assert len(session.sent_client_content) == 1
         call = session.sent_client_content[0]
         assert call["turns"].role == "user"
-        assert call["turns"].parts[0].text == "[ÉVÉNEMENTS]\n- [matrix] porte"
-        # Verdict par timeout seul : le lot complète le tour pour que le modèle
-        # puisse parler ; rien d'autre n'est attendu du signal de fin de tour.
+        assert call["turns"].parts[0].text == "La porte d'entrée vient de s'ouvrir."
+        # Le tour est complété pour que le modèle prononce l'Annonce ; le verdict
+        # (parler ou se taire) vient du jugement texte, pas du signal de fin.
         assert call["turn_complete"] is True
-        assert sink.of_kind("judge_batch_sent")
+        assert sink.of_kind("announcement_sent")
 
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(adapter.recv(), 0.05)
@@ -625,7 +688,50 @@ def test_send_judge_batch_sends_the_batch_as_a_completed_turn() -> None:
     asyncio.run(scenario())
 
 
-def test_send_judge_batch_without_open_connection_is_ignored() -> None:
+def test_send_announcement_injects_the_facts_then_speaks_the_message() -> None:
+    """Les faits bruts entrent en contexte (tour non complété) puis la phrase du
+    juge complète le tour : l'Annonce parle, et l'Événement reste disponible
+    pour le suivi."""
+    async def scenario() -> None:
+        session = FakeSession(block=True)
+        live_connect = FakeLiveConnect(session=session)
+        sink = RecordingTraceSink()
+        adapter = GeminiLiveAdapter(
+            api_key="test-key",
+            model="gemini-live",
+            voice="Aoede",
+            live_connect=live_connect,
+            trace_sink=sink,
+        )
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        await adapter.execute(
+            SendAnnouncementToLlm(
+                connection_id="s1",
+                text="La porte est ouverte.",
+                facts="[ÉVÉNEMENTS]\n- [maison] La porte d'entrée vient de s'ouvrir",
+            )
+        )
+
+        assert len(session.sent_client_content) == 2
+        context, spoken = session.sent_client_content
+        assert context["turns"].role == "user"
+        assert (
+            context["turns"].parts[0].text
+            == "[ÉVÉNEMENTS]\n- [maison] La porte d'entrée vient de s'ouvrir"
+        )
+        assert context["turn_complete"] is False
+        assert spoken["turns"].parts[0].text == "La porte est ouverte."
+        assert spoken["turn_complete"] is True
+        assert sink.of_kind("announcement_facts_sent")
+        assert sink.of_kind("announcement_sent")
+
+    asyncio.run(scenario())
+
+
+def test_send_announcement_without_open_connection_is_ignored() -> None:
     async def scenario() -> None:
         live_connect = FakeLiveConnect(session=FakeSession())
         sink = RecordingTraceSink()
@@ -638,10 +744,10 @@ def test_send_judge_batch_without_open_connection_is_ignored() -> None:
         )
 
         await adapter.execute(
-            SendJudgeBatchToLlm(connection_id="s1", text="[ÉVÉNEMENTS]\n- [m] x")
+            SendAnnouncementToLlm(connection_id="s1", text="La porte s'ouvre.")
         )
 
-        assert sink.of_kind("send_judge_batch_ignored")
+        assert sink.of_kind("send_announcement_ignored")
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(adapter.recv(), 0.05)
 

@@ -1,13 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from typing import TypeVar
+import socket
+from pathlib import Path
+from typing import Callable, TypeVar
 
-from conftest import RecordingTraceSink, wait_until
-from protocol import SessionEndReason
-from server.app.config import AppConfig, GeminiConfig
-from server.app.root import App, build_app, load_judge_prompt
+import aiohttp
+import websockets
+
+from conftest import FakeJudge, RecordingTraceSink, wait_until
+from protocol import Register, Registered, SessionEndReason, decode, encode
+from server import __version__
+from server.adapters.console import ConsoleAdapter
+from server.app.config import (
+    AppConfig,
+    ConsoleConfig,
+    GeminiConfig,
+    PluginsConfig,
+    ServerConfig,
+    WebhookConfig,
+)
+from server.app.root import App, build_app, load_announce_prompt, load_judge_prompt
+from server.app.secrets import EnvSecretResolver
 from server.core.commands import (
     AnnounceSessionEnded,
     AnnounceSessionStarted,
@@ -17,7 +33,7 @@ from server.core.commands import (
     OpenLiveConnection,
     SendAudioToClient,
     SendAudioToLlm,
-    SendJudgeBatchToLlm,
+    SendAnnouncementToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
     StartIdleTimer,
@@ -34,13 +50,14 @@ from server.core.events import (
     SessionRequested,
     TimerFired,
 )
+from server.core.plugins import PluginRegistry
 from server.core.ports import MemoryHit
 from server.core.tools import ToolRegistry
 from server.core.memory_tools import register_memory_tools
 from server.core.coordinator import (
     EVENT_WINDOW_TIMER_ID,
     EVENT_WINDOW_TIMEOUT,
-    JUDGE_TIMEOUT,
+    ANNOUNCE_TIMEOUT,
 )
 
 _CommandT = TypeVar("_CommandT", bound=Command)
@@ -55,6 +72,9 @@ class FakeAdapter:
         self.tool_results: list[tuple[str, str, str, object]] = []
         self.started = False
         self.stopped = False
+        # Le transport réel expose les Clients branchés : la racine de
+        # composition les lit directement pour l'instantané de la Console.
+        self.clients: dict[str, object] = {}
 
     async def start(self) -> None:
         self.started = True
@@ -107,6 +127,22 @@ class FakeClock:
         self.closed = True
 
 
+class FakeWebhook:
+    """Adaptateur Webhook factice : retient le push et son cycle de vie."""
+
+    def __init__(self) -> None:
+        self.push: Callable[[str, str], None] | None = None
+        self.started = False
+        self.stopped = False
+
+    async def start(self, push: Callable[[str, str], None]) -> None:
+        self.push = push
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
 class FakeMemory:
     def __init__(self, hits: list[MemoryHit] | None = None) -> None:
         self._hits = list(hits or [])
@@ -143,7 +179,15 @@ class FakeMemory:
         return False
 
 
-def _build(memory=None, tools=None, judge_prompt="") -> tuple[FakeAdapter, FakeAdapter, FakeClock, RecordingTraceSink, App]:
+def _build(
+    memory=None,
+    tools=None,
+    announce_prompt="",
+    judge=None,
+    webhook=None,
+    plugins=None,
+    plugin_loader=None,
+) -> tuple[FakeAdapter, FakeAdapter, FakeClock, RecordingTraceSink, App]:
     transport = FakeAdapter()
     gemini = FakeAdapter()
     clock = FakeClock()
@@ -156,7 +200,11 @@ def _build(memory=None, tools=None, judge_prompt="") -> tuple[FakeAdapter, FakeA
         memory=memory,
         user_id="alice",
         tools=tools,
-        judge_prompt=judge_prompt,
+        announce_prompt=announce_prompt,
+        judge=judge,
+        webhook=webhook,
+        plugins=plugins,
+        plugin_loader=plugin_loader,
     )
     return transport, gemini, clock, sink, app
 
@@ -412,24 +460,39 @@ def test_shutdown_requested_is_traced_even_when_idle() -> None:
     asyncio.run(scenario())
 
 
-def test_build_app_installs_logging_bridge_debug_only_when_flag_on() -> None:
+def test_build_app_installs_logging_bridge_debug_only_when_flag_on(
+    tmp_path: Path,
+) -> None:
     root = logging.getLogger()
     original_handlers = root.handlers[:]
     original_level = root.level
     gemini = GeminiConfig(api_key="test-key")
     try:
-        build_app(AppConfig(gemini=gemini, debug_decisions=True))
+        build_app(
+            AppConfig(
+                gemini=gemini, debug_decisions=True, log_dir=str(tmp_path)
+            )
+        )
         assert root.level == logging.DEBUG
 
-        build_app(AppConfig(gemini=gemini, debug_decisions=False, log_level="WARNING"))
+        build_app(
+            AppConfig(
+                gemini=gemini,
+                debug_decisions=False,
+                log_level="WARNING",
+                log_dir=str(tmp_path),
+            )
+        )
         assert root.level == logging.WARNING
     finally:
         root.handlers[:] = original_handlers
         root.setLevel(original_level)
 
 
-def test_build_app_wires_the_kernel_memory_tools() -> None:
-    app = build_app(AppConfig(gemini=GeminiConfig(api_key="test-key")))
+def test_build_app_wires_the_kernel_memory_tools(tmp_path: Path) -> None:
+    app = build_app(
+        AppConfig(gemini=GeminiConfig(api_key="test-key"), log_dir=str(tmp_path))
+    )
 
     assert app.tools is not None
     assert {spec.name for spec in app.tools.specs()} == {"save_memory", "forget_memory"}
@@ -477,9 +540,12 @@ def test_save_memory_tool_call_reaches_the_store_and_the_model() -> None:
     asyncio.run(scenario())
 
 
-def test_pushed_event_at_rest_opens_a_judgment_connection_and_routes_the_batch() -> None:
+def test_pushed_event_at_rest_judges_then_opens_an_announcement_connection() -> None:
     async def scenario() -> None:
-        transport, gemini, clock, sink, app = _build(judge_prompt="JUGE")
+        judge = FakeJudge(message="La porte est ouverte")
+        transport, gemini, clock, sink, app = _build(
+            announce_prompt="JUGE", judge=judge
+        )
         runner = asyncio.create_task(app.run())
         try:
             await wait_until(lambda: transport.started)
@@ -501,12 +567,15 @@ def test_pushed_event_at_rest_opens_a_judgment_connection_and_routes_the_batch()
             opened = gemini.of_type(OpenLiveConnection)[0]
             assert opened.instruction == "JUGE"
             assert opened.tools == ()
+            # Le jugement est **texte** : les faits étiquetés arrivent au juge,
+            # et seule la Connexion d'Annonce ouvre pour faire parler le verdict.
+            assert judge.calls[-1] == ["[matrix] porte ouverte"]
 
-            await wait_until(lambda: gemini.of_type(SendJudgeBatchToLlm))
-            batch = gemini.of_type(SendJudgeBatchToLlm)[0]
-            assert batch.connection_id == opened.connection_id
-            assert batch.text == "[ÉVÉNEMENTS]\n- [matrix] porte ouverte"
-            assert clock.scheduled[-1] == (opened.connection_id, JUDGE_TIMEOUT)
+            await wait_until(lambda: gemini.of_type(SendAnnouncementToLlm))
+            announcement = gemini.of_type(SendAnnouncementToLlm)[0]
+            assert announcement.connection_id == opened.connection_id
+            assert announcement.text == "La porte est ouverte"
+            assert clock.scheduled[-1] == (opened.connection_id, ANNOUNCE_TIMEOUT)
 
             app.request_shutdown()
             await asyncio.wait_for(runner, 1.0)
@@ -524,3 +593,366 @@ def test_load_judge_prompt_reads_the_versioned_file() -> None:
     assert prompt.strip()
     assert prompt == load_judge_prompt()
 
+
+def test_load_announce_prompt_reads_the_versioned_file() -> None:
+    prompt = load_announce_prompt()
+
+    assert prompt.strip()
+    assert prompt == load_announce_prompt()
+
+
+def test_run_serves_the_webhook_and_binds_push_event() -> None:
+    async def scenario() -> None:
+        hook = FakeWebhook()
+        transport, gemini, clock, sink, app = _build(webhook=hook)
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: hook.started)
+            await transport.feed(ClientRegistered(client_id="c1"))
+
+            assert hook.push is not None
+            hook.push("matrix", "porte ouverte")
+            await wait_until(lambda: any(e.kind == "EventQueued" for e in sink.entries))
+
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+            assert hook.stopped
+        finally:
+            if not runner.done():
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+
+def test_build_app_wires_the_plugin_registry_and_loader(tmp_path: Path) -> None:
+    app = build_app(
+        AppConfig(gemini=GeminiConfig(api_key="test-key"), log_dir=str(tmp_path))
+    )
+
+    assert app.plugins is not None
+    # Un seul registre de Tools : celui du Plugin Registry, où le noyau est
+    # propriétaire de ses Tools et où les plugins s'ajoutent au démarrage.
+    assert app.tools is app.plugins.tools
+    assert app.tools.owner_of("save_memory") == "core"
+    assert app.tools.owner_of("forget_memory") == "core"
+
+
+class FakePluginLoader:
+    """Chargeur factice : retient le registre et la couture ``push_event``."""
+
+    def __init__(self) -> None:
+        self.registry: PluginRegistry | None = None
+        self.push: Callable[[str, str], None] | None = None
+        self.pending: tuple[str, ...] = ()
+
+    async def load(
+        self, registry: PluginRegistry, *, push_event: Callable[[str, str], None]
+    ) -> None:
+        self.registry = registry
+        self.push = push_event
+
+
+def test_plugin_loader_receives_the_registry_and_the_event_canal() -> None:
+    async def scenario() -> None:
+        loader = FakePluginLoader()
+        plugins = PluginRegistry()
+        transport, gemini, clock, sink, app = _build(
+            plugins=plugins, plugin_loader=loader
+        )
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: transport.started)
+            assert loader.registry is plugins
+            assert loader.push is not None
+
+            await transport.feed(ClientRegistered(client_id="c1"))
+            loader.push("fixture", "l'ampoule est allumée")
+            await wait_until(
+                lambda: any(entry.kind == "EventQueued" for entry in sink.entries)
+            )
+            assert sink.of_kind("EventQueued")[-1].payload["source"] == "fixture"
+
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+        finally:
+            if not runner.done():
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+FIXTURE_PLUGIN_CODE = '''
+from plugin_api import PluginBinding, ToolBinding, ToolSpec
+
+
+async def handle(arguments):
+    return {"status": "ok"}
+
+
+def create(context):
+    return PluginBinding(
+        name="fixture",
+        tools=(
+            ToolBinding(
+                spec=ToolSpec(
+                    name="fixture__echo",
+                    description="Écho du plugin",
+                    parameters={"type": "object", "properties": {}},
+                ),
+                handler=handle,
+            ),
+        ),
+        instruction="Utilise fixture__echo pour répéter.",
+    )
+'''
+
+
+def _install_fixture_plugin(tmp_path: Path) -> tuple[Path, Path]:
+    plugins_dir = tmp_path / "plugins"
+    plugin_dir = plugins_dir / "fixture"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "api_version": 1,
+                "name": "fixture",
+                "version": "0.1.0",
+                "description": "Plugin de fixture",
+                "platform": "server",
+                "entrypoint": "plugin.py",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (plugin_dir / "plugin.py").write_text(
+        FIXTURE_PLUGIN_CODE, encoding="utf-8"
+    )
+    state_path = tmp_path / "plugins.json"
+    state_path.write_text(
+        json.dumps({"enabled": ["fixture"], "config": {}}), encoding="utf-8"
+    )
+    return plugins_dir, state_path
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+async def _connect_when_ready(url: str) -> websockets.ClientConnection:
+    """Attend que le transport serveur écoute, puis ouvre la connexion."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 1.0
+    while True:
+        try:
+            return await websockets.connect(url)
+        except OSError:
+            if loop.time() > deadline:
+                raise
+            await asyncio.sleep(0.01)
+
+
+def test_build_app_announces_the_kernel_and_plugin_tools_on_registration(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``Registered.server_tools`` suit le registre construit par ``build_app``."""
+
+    async def scenario() -> None:
+        plugins_dir, state_path = _install_fixture_plugin(tmp_path)
+        # La mémoire et l'embedder ne sont pas le sujet : on évite de charger
+        # un modèle réel pour n'ouvrir qu'une connexion de transport.
+        monkeypatch.setattr(
+            "server.app.root.SentenceTransformerEmbedder", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            "server.app.root.SqliteMemoryStore", lambda *a, **k: FakeMemory()
+        )
+        port = _free_port()
+        config = AppConfig(
+            gemini=GeminiConfig(api_key="test-key"),
+            server=ServerConfig(host="127.0.0.1", port=port),
+            console=ConsoleConfig(enabled=False),
+            webhook=WebhookConfig(enabled=False),
+            plugins=PluginsConfig(
+                directory=str(plugins_dir), state_path=str(state_path)
+            ),
+            log_dir=str(tmp_path),
+        )
+        app = build_app(config, secrets=EnvSecretResolver({}), env={}, env_file=None)
+        runner = asyncio.create_task(app.run())
+        try:
+            async with await _connect_when_ready(
+                f"ws://127.0.0.1:{port}"
+            ) as ws:
+                await ws.send(
+                    encode(Register(client_name="desktop", platform="linux"))
+                )
+                response = decode(await asyncio.wait_for(ws.recv(), 1.0))
+                assert isinstance(response, Registered)
+                assert response.server_tools == [
+                    "save_memory",
+                    "forget_memory",
+                    "fixture__echo",
+                ]
+        finally:
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+
+    asyncio.run(scenario())
+
+
+def test_build_app_does_not_wire_a_disabled_console(tmp_path: Path) -> None:
+    app = build_app(
+        AppConfig(
+            gemini=GeminiConfig(api_key="test-key"),
+            console=ConsoleConfig(enabled=False),
+            log_dir=str(tmp_path),
+        )
+    )
+
+    assert app.console is None
+
+
+def test_build_app_wires_an_enabled_console(tmp_path: Path) -> None:
+    app = build_app(
+        AppConfig(
+            gemini=GeminiConfig(api_key="test-key"),
+            console=ConsoleConfig(port=_free_port()),
+            log_dir=str(tmp_path),
+        )
+    )
+
+    assert isinstance(app.console, ConsoleAdapter)
+
+
+async def _snapshot_when_ready(url: str) -> dict:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 2.0
+    while True:
+        try:
+            async with aiohttp.ClientSession() as http:
+                async with http.get(url) as response:
+                    assert response.status == 200
+                    return await response.json()
+        except aiohttp.ClientConnectorError:
+            if loop.time() > deadline:
+                raise
+            await asyncio.sleep(0.01)
+
+
+def test_build_app_serves_the_configured_build_at_the_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Câblage réel : le répertoire statique de la configuration est servi."""
+
+    async def scenario() -> None:
+        monkeypatch.setattr(
+            "server.app.root.SentenceTransformerEmbedder", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            "server.app.root.SqliteMemoryStore", lambda *a, **k: FakeMemory()
+        )
+        static_dir = tmp_path / "dist"
+        static_dir.mkdir()
+        (static_dir / "index.html").write_text(
+            "<!doctype html><div id=\"root\"></div>", encoding="utf-8"
+        )
+        port = _free_port()
+        console_port = _free_port()
+        config = AppConfig(
+            gemini=GeminiConfig(api_key="test-key"),
+            server=ServerConfig(host="127.0.0.1", port=port),
+            console=ConsoleConfig(port=console_port, static_dir=str(static_dir)),
+            webhook=WebhookConfig(enabled=False),
+            plugins=PluginsConfig(
+                directory=str(tmp_path / "plugins"),
+                state_path=str(tmp_path / "plugins.json"),
+            ),
+            log_dir=str(tmp_path),
+        )
+        app = build_app(config, secrets=EnvSecretResolver({}), env={}, env_file=None)
+        runner = asyncio.create_task(app.run())
+        try:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 2.0
+            while True:
+                try:
+                    async with aiohttp.ClientSession() as http:
+                        async with http.get(
+                            f"http://127.0.0.1:{console_port}/"
+                        ) as response:
+                            assert response.status == 200
+                            assert 'id="root"' in await response.text()
+                            break
+                except aiohttp.ClientConnectorError:
+                    if loop.time() > deadline:
+                        raise
+                    await asyncio.sleep(0.01)
+        finally:
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+
+    asyncio.run(scenario())
+
+
+def test_build_app_serves_plugins_and_safe_config_in_the_snapshot(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Câblage réel : build_app injecte l'instantané, sans secret."""
+
+    async def scenario() -> None:
+        plugins_dir, state_path = _install_fixture_plugin(tmp_path)
+        monkeypatch.setattr(
+            "server.app.root.SentenceTransformerEmbedder", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            "server.app.root.SqliteMemoryStore", lambda *a, **k: FakeMemory()
+        )
+        port = _free_port()
+        console_port = _free_port()
+        config = AppConfig(
+            gemini=GeminiConfig(
+                api_key="test-key", model="gemini-live", voice="Aoede"
+            ),
+            server=ServerConfig(host="127.0.0.1", port=port),
+            console=ConsoleConfig(port=console_port),
+            webhook=WebhookConfig(enabled=False),
+            plugins=PluginsConfig(
+                directory=str(plugins_dir), state_path=str(state_path)
+            ),
+            log_dir=str(tmp_path),
+        )
+        app = build_app(config, secrets=EnvSecretResolver({}), env={}, env_file=None)
+        runner = asyncio.create_task(app.run())
+        try:
+            snapshot = await _snapshot_when_ready(
+                f"http://127.0.0.1:{console_port}/api/status"
+            )
+
+            assert snapshot["v"] == 1
+            assert snapshot["plugins"] == [
+                {
+                    "name": "fixture",
+                    "state": "activated",
+                    "tools": ["fixture__echo"],
+                }
+            ]
+            assert snapshot["config"] == {
+                "model": "gemini-live",
+                "voice": "Aoede",
+                "user_id": "owner",
+                "memory_db": "athena_memory.db",
+                "log_dir": str(tmp_path),
+                "version": __version__,
+            }
+            assert "api_key" not in snapshot["config"]
+            assert "test-key" not in json.dumps(snapshot)
+        finally:
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+
+    asyncio.run(scenario())
