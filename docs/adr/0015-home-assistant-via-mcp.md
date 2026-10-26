@@ -6,10 +6,11 @@ parle ni REST ni WebSocket à Home Assistant pour piloter : elle découvre les *
 et les appelle.
 
 Les Tools sont exposés **tels quels** — noms, descriptions, schémas — sans filtrage ni
-renommage. HA les préfixe déjà (`homeassistant__HassTurnOn`), donc Athena n'ajoute aucun
-préfixe. L'**Instruction de plugin** est récupérée via `prompts/get` : c'est le prompt
-Assist, qui explique l'usage des Tools (noms de zones, alias) et qu'aucune description de
-Tool ne porte.
+renommage. HA les préfixe déjà (`intent__HassTurnOn`), donc Athena n'ajoute aucun préfixe :
+les Tools propres au composant HA sont `homeassistant__*`, les scripts `script__*`, et ces
+noms dépendent de la version de Home Assistant. L'**Instruction de plugin** est récupérée
+via `prompts/get` : c'est le prompt Assist, qui explique l'usage des Tools (noms de zones,
+alias) et qu'aucune description de Tool ne porte.
 
 ## Considérations
 
