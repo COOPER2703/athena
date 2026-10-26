@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Callable, Iterable, Mapping, Sequence
 
 import websockets
 from websockets.asyncio.server import Server, ServerConnection, serve
@@ -33,6 +33,11 @@ from server.core.ports import TraceSink
 
 _TRACE_SOURCE = "transport"
 
+# Une liste statique (tests, usages simples) ou un fournisseur relu à chaque
+# enregistrement, pour que ``Registered.server_tools`` suive le registre (les
+# Tools d'un plugin apparu après une retente dégradée compris).
+ServerTools = Sequence[str] | Callable[[], Iterable[str]]
+
 
 @dataclass(frozen=True, slots=True)
 class ClientConnection:
@@ -59,12 +64,12 @@ class WebSocketTransport:
         *,
         host: str = "0.0.0.0",
         port: int = 8765,
-        server_tools: list[str] | None = None,
+        server_tools: ServerTools | None = None,
         trace_sink: TraceSink | None = None,
     ) -> None:
         self._host = host
         self._port = port
-        self._server_tools = list(server_tools or [])
+        self._server_tools = server_tools
         self._trace_sink: TraceSink = trace_sink or NullTraceSink()
         self._clients: dict[str, ClientConnection] = {}
         self._events: asyncio.Queue[Event] = asyncio.Queue()
@@ -214,7 +219,9 @@ class WebSocketTransport:
         self._clients[client_id] = connection
         await self._send(
             websocket,
-            Registered(client_id=client_id, server_tools=self._server_tools),
+            Registered(
+                client_id=client_id, server_tools=self._server_tool_names()
+            ),
         )
         await self._events.put(
             ClientRegistered(
@@ -279,6 +286,20 @@ class WebSocketTransport:
             await websocket.send(encode(message))
         except websockets.ConnectionClosed:
             self._emit("send_failed", payload={}, level="warning")
+
+    def _server_tool_names(self) -> list[str]:
+        """Noms des Tools serveur déclarés au moment de l'enregistrement.
+
+        Un fournisseur est rappelé à chaque ``Register`` : les Tools d'un plugin
+        apparu après une retente dégradée sont donc annoncés sans redémarrage.
+        Une liste statique reste acceptée pour les tests et les usages simples.
+        """
+        provided = self._server_tools
+        if provided is None:
+            return []
+        if callable(provided):
+            return list(provided())
+        return list(provided)
 
     def _emit(
         self,

@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import socket
 from pathlib import Path
 from typing import Callable, TypeVar
 
+import websockets
+
 from conftest import FakeJudge, RecordingTraceSink, wait_until
-from protocol import SessionEndReason
-from server.app.config import AppConfig, GeminiConfig
+from protocol import Register, Registered, SessionEndReason, decode, encode
+from server.app.config import (
+    AppConfig,
+    GeminiConfig,
+    PluginsConfig,
+    ServerConfig,
+)
 from server.app.root import App, build_app, load_announce_prompt, load_judge_prompt
+from server.app.secrets import EnvSecretResolver
 from server.core.commands import (
     AnnounceSessionEnded,
     AnnounceSessionStarted,
@@ -661,5 +671,125 @@ def test_plugin_loader_receives_the_registry_and_the_event_canal() -> None:
             if not runner.done():
                 runner.cancel()
                 await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+FIXTURE_PLUGIN_CODE = '''
+from server.core.plugins import PluginBinding, ToolBinding
+from server.core.ports import ToolSpec
+
+
+async def handle(arguments):
+    return {"status": "ok"}
+
+
+def create(context):
+    return PluginBinding(
+        name="fixture",
+        tools=(
+            ToolBinding(
+                spec=ToolSpec(
+                    name="fixture__echo",
+                    description="Écho du plugin",
+                    parameters={"type": "object", "properties": {}},
+                ),
+                handler=handle,
+            ),
+        ),
+        instruction="Utilise fixture__echo pour répéter.",
+    )
+'''
+
+
+def _install_fixture_plugin(tmp_path: Path) -> tuple[Path, Path]:
+    plugins_dir = tmp_path / "plugins"
+    plugin_dir = plugins_dir / "fixture"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "api_version": 1,
+                "name": "fixture",
+                "version": "0.1.0",
+                "description": "Plugin de fixture",
+                "platform": "server",
+                "entrypoint": "plugin.py",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (plugin_dir / "plugin.py").write_text(
+        FIXTURE_PLUGIN_CODE, encoding="utf-8"
+    )
+    state_path = tmp_path / "plugins.json"
+    state_path.write_text(
+        json.dumps({"enabled": ["fixture"], "config": {}}), encoding="utf-8"
+    )
+    return plugins_dir, state_path
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+async def _connect_when_ready(url: str) -> websockets.ClientConnection:
+    """Attend que le transport serveur écoute, puis ouvre la connexion."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 1.0
+    while True:
+        try:
+            return await websockets.connect(url)
+        except OSError:
+            if loop.time() > deadline:
+                raise
+            await asyncio.sleep(0.01)
+
+
+def test_build_app_announces_the_kernel_and_plugin_tools_on_registration(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``Registered.server_tools`` suit le registre construit par ``build_app``."""
+
+    async def scenario() -> None:
+        plugins_dir, state_path = _install_fixture_plugin(tmp_path)
+        # La mémoire et l'embedder ne sont pas le sujet : on évite de charger
+        # un modèle réel pour n'ouvrir qu'une connexion de transport.
+        monkeypatch.setattr(
+            "server.app.root.SentenceTransformerEmbedder", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            "server.app.root.SqliteMemoryStore", lambda *a, **k: FakeMemory()
+        )
+        port = _free_port()
+        config = AppConfig(
+            gemini=GeminiConfig(api_key="test-key"),
+            server=ServerConfig(host="127.0.0.1", port=port),
+            plugins=PluginsConfig(
+                directory=str(plugins_dir), state_path=str(state_path)
+            ),
+            log_dir=str(tmp_path),
+        )
+        app = build_app(config, secrets=EnvSecretResolver({}), env={}, env_file=None)
+        runner = asyncio.create_task(app.run())
+        try:
+            async with await _connect_when_ready(
+                f"ws://127.0.0.1:{port}"
+            ) as ws:
+                await ws.send(
+                    encode(Register(client_name="desktop", platform="linux"))
+                )
+                response = decode(await asyncio.wait_for(ws.recv(), 1.0))
+                assert isinstance(response, Registered)
+                assert response.server_tools == [
+                    "save_memory",
+                    "forget_memory",
+                    "fixture__echo",
+                ]
+        finally:
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
 
     asyncio.run(scenario())

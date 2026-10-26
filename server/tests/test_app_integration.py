@@ -13,7 +13,7 @@ from server.adapters.gemini import GeminiLiveAdapter
 from server.adapters.plugins import PluginLoader
 from server.adapters.transport import WebSocketTransport
 from server.app.clock import AsyncioClock
-from server.app.root import App
+from server.app.root import App, server_tool_names
 from server.app.secrets import EnvSecretResolver
 from server.core.plugins import PluginRegistry
 
@@ -379,6 +379,8 @@ def test_pushed_event_opens_a_proactive_auto_session_for_the_registered_client()
     asyncio.run(scenario())
 
 
+FIXTURE_INSTRUCTION = "Utilise fixture__echo pour répéter."
+
 PLUGIN_CODE = '''
 from server.core.plugins import PluginBinding, ToolBinding
 from server.core.ports import ToolSpec
@@ -388,6 +390,7 @@ PARAMETERS = {
     "properties": {"value": {"type": "string"}},
 }
 DESCRIPTION = "Écho du plugin de fixture"
+INSTRUCTION = "Utilise fixture__echo pour répéter."
 
 
 async def handle(arguments):
@@ -407,6 +410,7 @@ def create(context):
                 handler=handle,
             ),
         ),
+        instruction=INSTRUCTION,
     )
 '''
 
@@ -470,6 +474,12 @@ class _ToolLiveConnect:
         tools = self.configs[-1].tools or []
         return [decl for tool in tools for decl in (tool.function_declarations or [])]
 
+    def instruction(self) -> str:
+        content = self.configs[-1].system_instruction
+        if content is None:
+            return ""
+        return "\n".join(part.text or "" for part in content.parts)
+
 
 def _install_fixture_plugin(tmp_path, code: str = PLUGIN_CODE) -> tuple:
     plugins_dir = tmp_path / "plugins"
@@ -502,7 +512,13 @@ def test_plugin_tool_is_declared_called_and_answered_on_the_live_connection(
     async def scenario() -> None:
         plugins_dir, state_path = _install_fixture_plugin(tmp_path)
         sink = RecordingTraceSink()
-        transport = WebSocketTransport(host="127.0.0.1", port=0, trace_sink=sink)
+        plugins = PluginRegistry()
+        transport = WebSocketTransport(
+            host="127.0.0.1",
+            port=0,
+            server_tools=server_tool_names(plugins),
+            trace_sink=sink,
+        )
         live = _ToolLiveConnect()
         gemini = GeminiLiveAdapter(
             api_key="test-key",
@@ -511,7 +527,6 @@ def test_plugin_tool_is_declared_called_and_answered_on_the_live_connection(
             live_connect=live,
             trace_sink=sink,
         )
-        plugins = PluginRegistry()
         loader = PluginLoader(
             directory=plugins_dir,
             state_path=state_path,
@@ -541,13 +556,22 @@ def test_plugin_tool_is_declared_called_and_answered_on_the_live_connection(
             assert sink.of_kind("PluginState")[0].payload["state"] == "activated"
 
             async with websockets.connect(_url(transport)) as ws:
-                await register(ws, transport, drain=False)
+                registered = await register(ws, transport, drain=False)
+                # ``Registered.server_tools`` liste ce que la Connexion Live
+                # déclarera : le Tool du plugin est déjà chargé et déclaré.
+                assert registered.server_tools == ["fixture__echo"]
                 await ws.send(encode(SessionStart()))
                 await wait_until(lambda: bool(live.sessions))
 
                 # Les Tools du plugin sont déclarés tels quels : nom,
                 # description et schéma d'origine, sans préfixe Athena.
                 [declaration] = live.declarations()
+                assert registered.server_tools == [
+                    declared.name for declared in live.declarations()
+                ]
+                # L'Instruction de plugin est composée dans le prompt système
+                # de la même Connexion que les Tools qu'elle décrit.
+                assert FIXTURE_INSTRUCTION in live.instruction()
                 assert declaration.name == "fixture__echo"
                 assert declaration.description == "Écho du plugin de fixture"
                 assert dict(declaration.parameters_json_schema) == {
@@ -623,7 +647,13 @@ def test_a_failed_plugin_is_retried_and_its_tools_arrive_on_the_next_connection(
             tmp_path, code=FLAKY_PLUGIN_CODE
         )
         sink = RecordingTraceSink()
-        transport = WebSocketTransport(host="127.0.0.1", port=0, trace_sink=sink)
+        plugins = PluginRegistry()
+        transport = WebSocketTransport(
+            host="127.0.0.1",
+            port=0,
+            server_tools=server_tool_names(plugins),
+            trace_sink=sink,
+        )
         live = _ToolLiveConnect()
         gemini = GeminiLiveAdapter(
             api_key="test-key",
@@ -632,7 +662,6 @@ def test_a_failed_plugin_is_retried_and_its_tools_arrive_on_the_next_connection(
             live_connect=live,
             trace_sink=sink,
         )
-        plugins = PluginRegistry()
         loader = PluginLoader(
             directory=plugins_dir,
             state_path=state_path,
@@ -658,12 +687,17 @@ def test_a_failed_plugin_is_retried_and_its_tools_arrive_on_the_next_connection(
             assert "ConnectionError" in failed.payload["reason"]
             assert plugins.tools.specs() == ()
 
-            # Première Connexion Live : le plugin est absent des Tools déclarés.
+            # Première Connexion Live : le plugin est absent des Tools déclarés,
+            # donc ``Registered.server_tools`` ne l'annonce pas non plus.
             async with websockets.connect(_url(transport)) as ws_a:
-                await register(ws_a, transport, client_name="a", drain=False)
+                registered_a = await register(
+                    ws_a, transport, client_name="a", drain=False
+                )
+                assert registered_a.server_tools == []
                 await ws_a.send(encode(SessionStart()))
                 await wait_until(lambda: bool(live.sessions))
                 assert live.declarations() == []
+                assert live.instruction() == ""
 
             # La déconnexion rend le noyau Idle, puis la retente de fond répare.
             await wait_until(
@@ -683,14 +717,22 @@ def test_a_failed_plugin_is_retried_and_its_tools_arrive_on_the_next_connection(
             assert plugins.tools.owner_of("fixture__echo") == "fixture"
             assert not runner.done()
 
-            # Connexion Live suivante, sans redémarrage : le Tool est là et sert.
+            # Connexion Live suivante, sans redémarrage : le Tool est là et sert,
+            # et l'enregistrement du Client l'annonce au passage.
             async with websockets.connect(_url(transport)) as ws_b:
-                await register(ws_b, transport, client_name="b", drain=False)
+                registered_b = await register(
+                    ws_b, transport, client_name="b", drain=False
+                )
+                assert registered_b.server_tools == ["fixture__echo"]
                 await ws_b.send(encode(SessionStart()))
                 await wait_until(lambda: len(live.sessions) == 2)
 
                 [declaration] = live.declarations()
                 assert declaration.name == "fixture__echo"
+                assert registered_b.server_tools == [
+                    declared.name for declared in live.declarations()
+                ]
+                assert FIXTURE_INSTRUCTION in live.instruction()
 
                 live.session.call_tool("t1", "fixture__echo", {"value": "bonjour"})
                 await wait_until(lambda: bool(live.session.function_responses))

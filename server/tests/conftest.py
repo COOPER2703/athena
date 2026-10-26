@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Callable
+from typing import AsyncIterator, Callable, Iterable
 
 from websockets.asyncio.client import ClientConnection
 
@@ -76,7 +76,7 @@ async def wait_until(predicate: Callable[[], bool], timeout: float = 1.0) -> Non
 async def running_transport(
     *,
     sink: RecordingTraceSink | None = None,
-    server_tools: list[str] | None = None,
+    server_tools: list[str] | Callable[[], Iterable[str]] | None = None,
 ) -> AsyncIterator[WebSocketTransport]:
     transport = WebSocketTransport(
         host="127.0.0.1",

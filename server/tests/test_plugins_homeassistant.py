@@ -100,6 +100,12 @@ class _ToolLiveConnect:
         tools = self.configs[-1].tools or []
         return [decl for tool in tools for decl in (tool.function_declarations or [])]
 
+    def instruction(self) -> str:
+        content = self.configs[-1].system_instruction
+        if content is None:
+            return ""
+        return "\n".join(part.text or "" for part in content.parts)
+
 
 @contextlib.asynccontextmanager
 async def _running_app(
@@ -279,6 +285,9 @@ def test_homeassistant_tools_are_declared_and_called_like_home_assistant(
                 async with _live_session(transport, live) as session:
                     declared = _declared(live)
                     assert set(declared) == {spec.name for spec in TOOL_SPECS}
+                    # Le prompt Assist, lu via ``prompts/get``, est composé dans
+                    # le prompt système de la Session qui déclare ses Tools.
+                    assert ASSIST_INSTRUCTION in live.instruction()
                     for spec in TOOL_SPECS:
                         assert declared[spec.name].description == spec.description
                         assert (
@@ -377,6 +386,9 @@ def test_absent_instruction_is_traced_but_tools_are_still_served(
 
                 async with _live_session(transport, live) as session:
                     assert set(_declared(live)) == {spec.name for spec in TOOL_SPECS}
+                    # Sans instruction, le prompt reste vide mais les Tools
+                    # sont bien servis : l'absence n'est jamais bloquante.
+                    assert live.instruction() == ""
                     assert await _call(session, TURN_ON_TOOL, {"name": "Salon"}) == {
                         "status": "ok",
                         "message": "Turned on Salon",

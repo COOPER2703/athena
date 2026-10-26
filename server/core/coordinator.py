@@ -40,6 +40,7 @@ from server.core.events import (
     ShutdownRequested,
     TimerFired,
 )
+from server.core.plugins import PluginRegistry
 from server.core.ports import EventJudge, Judgment, MemoryStore, ToolSpec
 from server.core.state import SessionState
 from server.core.tools import ToolRegistry
@@ -103,6 +104,7 @@ class Coordinator:
         announce_prompt: str = "",
         judge: EventJudge | None = None,
         tools: ToolRegistry | None = None,
+        plugins: PluginRegistry | None = None,
         recall_k: int = 5,
         recall_window_turns: int = 3,
         recall_max_distance: float = 0.6,
@@ -112,7 +114,11 @@ class Coordinator:
         self._system_prompt = system_prompt
         self._announce_prompt = announce_prompt
         self._judge = judge
-        self._tools = tools  # Tool registry seam (issue #28).
+        # Le Plugin Registry possède le registre de Tools unique (noyau + plugins)
+        # et les instructions de plugin ; ``tools`` reste le seam des tests qui
+        # n'injectent qu'un registre nu (issue #28).
+        self._plugins = plugins
+        self._tools = plugins.tools if plugins is not None else tools
         self._recall_k = recall_k
         self._recall_window_turns = recall_window_turns
         self._recall_max_distance = recall_max_distance
@@ -411,14 +417,14 @@ class Coordinator:
         """Ouvre l'unique Connexion Live et lui fait prononcer l'Annonce.
 
         La Session automatique est une **Session ordinaire** : même prompt
-        système, même Activation mémoire et mêmes Tools qu'une Session ouverte
-        par un Wake word (ADR-0013) ; l'instruction d'Annonce s'y ajoute pour
-        qu'Athena sache qu'un Événement a ouvert la Session. Le message du juge
-        est la phrase à prononcer ; les faits bruts du lot sont transmis au Live
-        comme contexte (``facts``), sans être prononcés, pour qu'Athena puisse
-        détailler l'Événement à la demande. La Connexion est marquée ``auto`` :
-        son premier son devient une Session automatique annoncée au Client de
-        référence.
+        système, mêmes instructions de plugin, même Activation mémoire et mêmes
+        Tools qu'une Session ouverte par un Wake word (ADR-0013) ; l'instruction
+        d'Annonce s'y ajoute pour qu'Athena sache qu'un Événement a ouvert la
+        Session. Le message du juge est la phrase à prononcer ; les faits bruts
+        du lot sont transmis au Live comme contexte (``facts``), sans être
+        prononcés, pour qu'Athena puisse détailler l'Événement à la demande. La
+        Connexion est marquée ``auto`` : son premier son devient une Session
+        automatique annoncée au Client de référence.
         """
         self._judged_batch = batch
         self._session_counter += 1
@@ -431,10 +437,12 @@ class Coordinator:
         self._state = SessionState.LIVE_CONNECTING
         self._recent_utterances = []
 
-        # Activation, comme une Session ordinaire : le contexte mémoire
-        # (profil épinglé, tours récents) fait partie de l'instruction. Les
-        # faits bruts du lot y étant aussi, semer le dédoublonnage du Rappel
-        # avec eux évite de les réinjecter au premier tour utilisateur.
+        # Activation, comme une Session ordinaire : le prompt système, les
+        # instructions de plugin et le contexte mémoire (profil épinglé, tours
+        # récents) font partie de l'instruction, l'instruction d'Annonce s'y
+        # intercale. Les faits bruts du lot y étant aussi, semer le
+        # dédoublonnage du Rappel avec eux évite de les réinjecter au premier
+        # tour utilisateur.
         context = ""
         injected: set[str] = set()
         if self._memory is not None:
@@ -443,11 +451,12 @@ class Coordinator:
         self._injected_memories = injected | {
             self._format_fact(event) for event in batch
         }
-        instruction = "\n\n".join(
-            part
-            for part in (self._system_prompt, self._announce_prompt, context)
-            if part
-        ).strip()
+        instruction = self._compose_instruction(
+            self._system_prompt,
+            self._plugin_instruction(),
+            self._announce_prompt,
+            context,
+        )
 
         rendered = self._render_batch(batch)
         text = message.strip()
@@ -528,17 +537,21 @@ class Coordinator:
         self._recent_utterances = []
         self._injected_memories = set()
 
-        # Activation (D3): assemble the generic prompt and the memory context the
-        # Session opens with. The instruction is frozen here, at connect time.
-        # Pinned profile facts are part of that instruction, so seed the recall
-        # dedup with them: recall must not re-inject what is already in context.
+        # Activation (D3): assemble the generic prompt, the plugin instructions
+        # and the memory context the Session opens with. The instruction is
+        # frozen here, at connect time. Pinned profile facts are part of that
+        # instruction, so seed the recall dedup with them: recall must not
+        # re-inject what is already in context.
         context = ""
         if self._memory is not None:
             context = await self._memory.session_context(self._user_id)
             self._injected_memories = set(
                 await self._memory.pinned_facts(self._user_id)
             )
-        instruction = (self._system_prompt + "\n\n" + context).strip()
+        plugin_instruction = self._plugin_instruction()
+        instruction = self._compose_instruction(
+            self._system_prompt, plugin_instruction, context
+        )
 
         commands.append(
             OpenLiveConnection(
@@ -567,6 +580,8 @@ class Coordinator:
                     "user_id": self._user_id,
                     "has_context": bool(context),
                     "context_chars": len(context),
+                    "has_plugin_instruction": bool(plugin_instruction),
+                    "plugin_instruction_chars": len(plugin_instruction),
                 },
             )
         )
@@ -576,6 +591,27 @@ class Coordinator:
         if self._tools is None:
             return ()
         return self._tools.specs()
+
+    def _plugin_instruction(self) -> str:
+        """Instruction d'usage des plugins activés, vide sans plugin.
+
+        Le registre la compose déjà dans un ordre déterministe (nom du plugin) :
+        le noyau ne fait que l'insérer dans le prompt, il ne la réécrit pas.
+        """
+        if self._plugins is None:
+            return ""
+        return self._plugins.instruction()
+
+    @staticmethod
+    def _compose_instruction(*sections: str) -> str:
+        """Assemble l'instruction d'une Connexion Live, sections vides omises.
+
+        Ordre fixé par l'appelant : prompt système → instructions de plugin →
+        instruction d'Annonce → contexte mémoire. Les sections non vides sont
+        séparées par une ligne vide ; sans aucune section, l'instruction est la
+        chaîne vide (jamais des sauts de ligne).
+        """
+        return "\n\n".join(section for section in sections if section).strip()
 
     def _on_client_audio(self, event: ClientAudio) -> list[Command]:
         if self._state in (SessionState.LIVE_ACTIVE, SessionState.SESSION_VISIBLE):

@@ -68,6 +68,20 @@ def load_announce_prompt(path: str | Path | None = None) -> str:
     return Path(path or _ANNOUNCE_PROMPT_PATH).read_text(encoding="utf-8")
 
 
+def server_tool_names(plugins: PluginRegistry) -> Callable[[], list[str]]:
+    """Fournisseur des noms de Tools serveur (noyau + plugins).
+
+    Le transport le rappelle à chaque ``Register`` : ``Registered.server_tools``
+    reflète donc le registre au moment de la connexion, y compris les Tools d'un
+    plugin activé par la retente après un démarrage dégradé.
+    """
+
+    def names() -> list[str]:
+        return [spec.name for spec in plugins.tools.specs()]
+
+    return names
+
+
 def _trace_consolidation(
     trace_sink: TraceSink, report: ConsolidationReport
 ) -> None:
@@ -162,6 +176,7 @@ class App:
             announce_prompt=announce_prompt,
             judge=judge,
             tools=self._tools,
+            plugins=plugins,
             recall_k=recall_k,
             recall_window_turns=recall_window_turns,
             recall_max_distance=recall_max_distance,
@@ -358,9 +373,17 @@ def build_app(
         )
     )
 
+    # Tools du noyau et Tools de plugin partagent un seul registre : celui du
+    # Plugin Registry. Les Tools du noyau y entrent au propriétaire ``core``,
+    # les plugins activés s'y ajoutent au démarrage. Le registre est construit
+    # avant le transport pour que ``Registered.server_tools`` le lise à chaque
+    # enregistrement, plugin chargé ou non.
+    plugins = PluginRegistry()
+
     transport = WebSocketTransport(
         host=config.server.host,
         port=config.server.port,
+        server_tools=server_tool_names(plugins),
         trace_sink=trace_sink,
     )
     gemini = GeminiLiveAdapter(
@@ -408,10 +431,8 @@ def build_app(
         on_run=lambda report: _trace_consolidation(trace_sink, report),
     )
 
-    # Tools du noyau et Tools de plugin partagent un seul registre : celui du
-    # Plugin Registry. Les Tools du noyau y entrent au propriétaire ``core``,
-    # les plugins activés s'y ajoutent au démarrage.
-    plugins = PluginRegistry()
+    # Les Tools du noyau entrent au propriétaire ``core`` ; les plugins activés
+    # s'y ajoutent au démarrage.
     register_memory_tools(
         plugins.tools,
         memory,
