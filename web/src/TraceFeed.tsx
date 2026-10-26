@@ -44,9 +44,10 @@ export function TraceFeed() {
         return;
       }
       setStatus(failures === 0 ? "connecting" : "reconnecting");
-      socket = new WebSocket(streamUrl());
+      const ws = new WebSocket(streamUrl());
+      socket = ws;
 
-      socket.addEventListener("open", () => {
+      ws.addEventListener("open", () => {
         if (disposed) {
           return;
         }
@@ -54,7 +55,7 @@ export function TraceFeed() {
         setStatus("connected");
       });
 
-      socket.addEventListener("message", (event) => {
+      ws.addEventListener("message", (event) => {
         if (disposed) {
           return;
         }
@@ -71,8 +72,12 @@ export function TraceFeed() {
         }
       });
 
-      socket.addEventListener("close", () => {
+      ws.addEventListener("close", () => {
         if (disposed) {
+          return;
+        }
+        if (typeof navigator !== "undefined" && !navigator.onLine) {
+          setStatus("disconnected");
           return;
         }
         setStatus("reconnecting");
@@ -81,15 +86,40 @@ export function TraceFeed() {
         timer = setTimeout(connect, delay);
       });
 
-      socket.addEventListener("error", () => {
+      ws.addEventListener("error", () => {
         // `close` suit toujours : la reconnexion est planifiée là-bas.
-        socket?.close();
+        ws.close();
       });
     };
 
+    const handleOffline = () => {
+      setStatus("disconnected");
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      socket?.close();
+    };
+
+    const handleOnline = () => {
+      if (
+        socket !== null &&
+        (socket.readyState === WebSocket.CONNECTING ||
+          socket.readyState === WebSocket.OPEN)
+      ) {
+        return;
+      }
+      failures = 0;
+      connect();
+    };
+
+    window.addEventListener("offline", handleOffline);
+    window.addEventListener("online", handleOnline);
     connect();
     return () => {
       disposed = true;
+      window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("online", handleOnline);
       if (timer !== null) {
         clearTimeout(timer);
       }
