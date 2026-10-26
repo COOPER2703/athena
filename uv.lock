@@ -232,7 +232,7 @@ requires-dist = [
     { name = "google-genai", specifier = ">=2.12.1" },
     { name = "grpcio-tools", marker = "extra == 'dev'", specifier = "==1.84.0" },
     { name = "httpx2", specifier = ">=2.16.0" },
-    { name = "mcp", specifier = ">=2.3.0" },
+    { name = "mcp", specifier = ">=2.3.0,<3" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "protobuf", specifier = "==7.35.1" },
     { name = "pyaudio", specifier = ">=0.2.14" },

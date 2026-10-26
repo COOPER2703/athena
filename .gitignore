@@ -9,3 +9,4 @@ __pycache__/
 athena_memory.db
 node_modules/
 web/dist/
+plugins.json
