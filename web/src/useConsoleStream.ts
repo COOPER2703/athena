@@ -58,12 +58,16 @@ export function useConsoleStream(): ConsoleStream {
         if (disposed) {
           return;
         }
-        let frame: StreamFrame;
+        let parsed: unknown;
         try {
-          frame = JSON.parse(String(event.data)) as StreamFrame;
+          parsed = JSON.parse(String(event.data));
         } catch {
           return;
         }
+        if (typeof parsed !== "object" || parsed === null) {
+          return;
+        }
+        const frame = parsed as StreamFrame;
         setStream((state) => applyStreamFrame(state, frame));
       });
 

@@ -102,7 +102,7 @@ export function normalizeStatus(raw: unknown): StatusData {
  * jamais avec l'état d'une connexion précédente.
  */
 export function statusFromHello(frame: HelloLike): StatusData {
-  return normalizeStatus(frame.data.snapshot);
+  return normalizeStatus(frame.data?.snapshot);
 }
 
 /** Libellés français des états du Plugin Registry. */
