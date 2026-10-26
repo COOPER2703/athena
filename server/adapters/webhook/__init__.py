@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from server.adapters.event_body import MAX_CONTENT_CHARS
 from server.adapters.webhook.adapter import (
     DEFAULT_SOURCE,
     EVENTS_PATH,
-    MAX_CONTENT_CHARS,
     WebhookAdapter,
 )
 
