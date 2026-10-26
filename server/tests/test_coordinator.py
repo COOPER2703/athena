@@ -369,12 +369,18 @@ def test_activation_traces_absence_of_context():
 
 
 class FakeTools:
-    def __init__(self, specs: tuple[ToolSpec, ...] = ()) -> None:
+    def __init__(
+        self, specs: tuple[ToolSpec, ...] = (), owners: dict[str, str] | None = None
+    ) -> None:
         self._specs = specs
+        self._owners = owners or {}
         self.executed: list[tuple[str, object]] = []
 
     def specs(self) -> tuple[ToolSpec, ...]:
         return self._specs
+
+    def owner_of(self, name: str) -> str | None:
+        return self._owners.get(name)
 
     async def execute(self, name, arguments):
         self.executed.append((name, arguments))
@@ -451,3 +457,55 @@ def test_tool_call_without_registry_is_a_traced_error_without_crashing():
     assert results and results[0].result["status"] == "error"
     assert any(isinstance(c, Trace) for c in commands)
 
+
+
+def test_tool_call_traces_name_the_owning_plugin():
+    registry = FakeTools(
+        specs=(ToolSpec(name="echo", description="écho", parameters={}),),
+        owners={"echo": "homeassistant"},
+    )
+    coordinator = Coordinator(tools=registry)
+    drive(coordinator, [SessionRequested(client_id="c1"), LlmOpened()])
+
+    commands = asyncio.run(
+        coordinator.handle(LlmToolCall(tool_id="t1", name="echo", arguments={}))
+    )
+
+    traces = [c for c in commands if isinstance(c, Trace)]
+    call = next(t for t in traces if t.kind == "ToolCall")
+    result = next(t for t in traces if t.kind == "ToolResult")
+    assert call.payload["plugin"] == "homeassistant"
+    assert result.payload["plugin"] == "homeassistant"
+
+
+def test_tool_call_traces_unknown_tools_with_no_plugin():
+    coordinator = Coordinator(tools=FakeTools(owners={"echo": "core"}))
+    drive(coordinator, [SessionRequested(client_id="c1"), LlmOpened()])
+
+    commands = asyncio.run(
+        coordinator.handle(LlmToolCall(tool_id="t9", name="ghost", arguments={}))
+    )
+
+    traces = [c for c in commands if isinstance(c, Trace)]
+    call = next(t for t in traces if t.kind == "ToolCall")
+    result = next(t for t in traces if t.kind == "ToolResult")
+    assert call.payload["plugin"] is None
+    assert result.payload["plugin"] is None
+    assert result.payload["status"] == "error"
+
+
+def test_kernel_tool_traces_say_core():
+    registry = FakeTools(
+        specs=(ToolSpec(name="echo", description="écho", parameters={}),),
+        owners={"echo": "core"},
+    )
+    coordinator = Coordinator(tools=registry)
+    drive(coordinator, [SessionRequested(client_id="c1"), LlmOpened()])
+
+    commands = asyncio.run(
+        coordinator.handle(LlmToolCall(tool_id="t1", name="echo", arguments={}))
+    )
+
+    traces = [c for c in commands if isinstance(c, Trace)]
+    assert next(t for t in traces if t.kind == "ToolCall").payload["plugin"] == "core"
+    assert next(t for t in traces if t.kind == "ToolResult").payload["plugin"] == "core"

@@ -1,21 +1,14 @@
 from __future__ import annotations
 
 import os
-from typing import Mapping, Protocol
+from typing import Mapping
 
+from server.core.ports import MissingSecretError, SecretResolver
 
-class MissingSecretError(RuntimeError):
-    """Levée quand un secret requis est introuvable dans sa source."""
-
-
-class SecretResolver(Protocol):
-    """Port de résolution des secrets.
-
-    Les adaptateurs reçoivent la valeur déjà résolue et ne lisent jamais
-    l'environnement eux-mêmes (ADR-0001).
-    """
-
-    def resolve(self, name: str) -> str: ...
+# Le port vit dans le noyau (``server.core.ports``) pour qu'aucun adaptateur
+# n'importe cette racine de composition (ADR-0001). Il est ré-exporté ici pour
+# que les imports existants continuent de marcher.
+__all__ = ["EnvSecretResolver", "MissingSecretError", "SecretResolver"]
 
 
 class EnvSecretResolver:

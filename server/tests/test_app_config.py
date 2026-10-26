@@ -17,6 +17,7 @@ from server.app.config import (
     AppConfig,
     LogLevel,
     MemoryConfig,
+    PluginsConfig,
     ServerConfig,
     WebhookConfig,
     load_config,
@@ -253,3 +254,25 @@ def test_webhook_reads_and_coerces_environment() -> None:
 def test_invalid_webhook_config_raises_clear_validation_error(overrides) -> None:
     with pytest.raises(ValidationError):
         load_config(env={"GEMINI_API_KEY": "k", **overrides}, env_file=None)
+
+
+def test_plugin_paths_default_to_the_repository_root() -> None:
+    cfg = load_config(env={"GEMINI_API_KEY": "k"}, env_file=None)
+
+    assert cfg.plugins == PluginsConfig()
+    assert cfg.plugins.directory == "plugins"
+    assert cfg.plugins.state_path == "plugins.json"
+
+
+def test_plugin_paths_are_configurable_from_the_environment() -> None:
+    cfg = load_config(
+        env={
+            "GEMINI_API_KEY": "k",
+            "ATHENA_PLUGINS_DIR": " var/plugins ",
+            "ATHENA_PLUGINS_STATE": "var/plugins.json",
+        },
+        env_file=None,
+    )
+
+    assert cfg.plugins.directory == "var/plugins"
+    assert cfg.plugins.state_path == "var/plugins.json"

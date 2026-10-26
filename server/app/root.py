@@ -10,11 +10,13 @@ from server.adapters.memory import (
     SentenceTransformerEmbedder,
     SqliteMemoryStore,
 )
+from server.adapters.plugins import PluginLoader
 from server.adapters.trace import emit
 from server.adapters.transport import WebSocketTransport
 from server.adapters.webhook import WebhookAdapter
 from server.app.clock import AsyncioClock
-from server.app.config import AppConfig
+from server.app.config import AppConfig, default_env_file, merged_environment
+from server.app.secrets import EnvSecretResolver, SecretResolver
 from server.app.trace import build_trace_sink, install_logging_bridge
 from server.core.consolidation import (
     Consolidation,
@@ -41,6 +43,7 @@ from server.core.commands import (
 from server.core.coordinator import Coordinator
 from server.core.events import Event, EventReceived, ShutdownRequested
 from server.core.memory_tools import register_memory_tools
+from server.core.plugins import PluginRegistry
 from server.core.ports import EventJudge, MemoryStore, TraceSink
 from server.core.tools import ToolRegistry
 
@@ -63,6 +66,20 @@ def load_judge_prompt(path: str | Path | None = None) -> str:
 def load_announce_prompt(path: str | Path | None = None) -> str:
     """Read the versioned announcement instruction of the Announce connection."""
     return Path(path or _ANNOUNCE_PROMPT_PATH).read_text(encoding="utf-8")
+
+
+def server_tool_names(plugins: PluginRegistry) -> Callable[[], list[str]]:
+    """Fournisseur des noms de Tools serveur (noyau + plugins).
+
+    Le transport le rappelle à chaque ``Register`` : ``Registered.server_tools``
+    reflète donc le registre au moment de la connexion, y compris les Tools d'un
+    plugin activé par la retente après un démarrage dégradé.
+    """
+
+    def names() -> list[str]:
+        return [spec.name for spec in plugins.tools.specs()]
+
+    return names
 
 
 def _trace_consolidation(
@@ -127,6 +144,9 @@ class App:
         announce_prompt: str = "",
         judge: EventJudge | None = None,
         tools: ToolRegistry | None = None,
+        plugins: PluginRegistry | None = None,
+        plugin_loader: PluginLoader | None = None,
+        plugin_retry_interval: float = 5.0,
         recall_k: int = 5,
         recall_window_turns: int = 3,
         recall_max_distance: float = 0.6,
@@ -140,14 +160,23 @@ class App:
         self._memory = memory
         self._scheduler = scheduler
         self._webhook = webhook
-        self._tools = tools
+        self._plugins = plugins
+        # Le registre des Tools est celui du Plugin Registry quand il existe :
+        # les Tools du noyau y sont déjà enregistrés (propriétaire ``core``) et
+        # les Tools de plugin s'y ajoutent au démarrage.
+        self._tools = plugins.tools if plugins is not None else tools
+        self._plugin_loader = plugin_loader
+        # Cadence de la retente des plugins en échec, possédée par l'App : une
+        # seule tâche de fond, jamais sur le chemin d'un Événement (ADR-0005).
+        self._plugin_retry_interval = plugin_retry_interval
         self._coordinator = Coordinator(
             memory=memory,
             user_id=user_id,
             system_prompt=system_prompt,
             announce_prompt=announce_prompt,
             judge=judge,
-            tools=tools,
+            tools=self._tools,
+            plugins=plugins,
             recall_k=recall_k,
             recall_window_turns=recall_window_turns,
             recall_max_distance=recall_max_distance,
@@ -162,8 +191,18 @@ class App:
     def tools(self) -> ToolRegistry | None:
         return self._tools
 
+    @property
+    def plugins(self) -> PluginRegistry | None:
+        return self._plugins
+
     async def run(self) -> None:
-        """Démarre les adaptateurs puis traite les Événements jusqu'à l'arrêt."""
+        """Démarre les adaptateurs puis traite les Événements jusqu'à l'arrêt.
+
+        Les plugins sont chargés en premier : un défaut de plugin activé fait
+        échouer le démarrage avant que le transport ne serve quoi que ce soit,
+        et avant la trace ``started``.
+        """
+        await self._load_plugins()
         await self._warmup_memory()
         await self._transport.start()
         if self._webhook is not None:
@@ -178,6 +217,10 @@ class App:
         if self._scheduler is not None:
             # Background task: never on the event-handling path (ADR-0009).
             pumps.append(asyncio.create_task(self._scheduler.run()))
+        if self._has_pending_plugins():
+            # Une panne de plateforme se répare seule : la retente tourne en
+            # tâche de fond et les Tools arrivent à la Connexion Live suivante.
+            pumps.append(asyncio.create_task(self._retry_plugins()))
         try:
             await self._core_loop()
         finally:
@@ -197,6 +240,31 @@ class App:
         warmup = getattr(self._memory, "warmup", None)
         if warmup is not None:
             await warmup()
+
+    async def _load_plugins(self) -> None:
+        """Charge les plugins activés dans le registre, avant tout service."""
+        if self._plugin_loader is None or self._plugins is None:
+            return
+        await self._plugin_loader.load(self._plugins, push_event=self.push_event)
+
+    def _has_pending_plugins(self) -> bool:
+        loader = self._plugin_loader
+        return loader is not None and bool(loader.pending)
+
+    async def _retry_plugins(self) -> None:
+        """Retente en tâche de fond les plugins dont ``create`` a échoué.
+
+        La boucle appartient à l'App (ADR-0005) : elle attend l'intervalle, fait
+        une tentative par plugin en échec, et s'arrête dès qu'il n'en reste
+        aucun. Elle est annulée par le ``finally`` de ``run`` comme les pompes.
+        """
+        loader = self._plugin_loader
+        registry = self._plugins
+        if loader is None or registry is None:  # pragma: no cover - défensif
+            return
+        while loader.pending:
+            await asyncio.sleep(self._plugin_retry_interval)
+            await loader.retry_pending(registry, push_event=self.push_event)
 
     def request_shutdown(self) -> None:
         """Dépose ``ShutdownRequested`` dans le flux, appelable depuis un signal."""
@@ -267,8 +335,23 @@ class App:
         emit(self._trace_sink, _TRACE_SOURCE, kind, payload=payload, level=level)
 
 
-def build_app(config: AppConfig) -> App:
-    """Construit explicitement : config → trace → adaptateurs → Coordinator."""
+def build_app(
+    config: AppConfig,
+    *,
+    secrets: SecretResolver | None = None,
+    env: Mapping[str, str] | None = None,
+    env_file: str | Path | None = None,
+) -> App:
+    """Construit explicitement : config → trace → adaptateurs → Coordinator.
+
+    ``secrets`` résout les secrets des plugins (variables
+    ``ATHENA_PLUGIN_<PLUGIN>_<SECRET>``) ; par défaut la même vue fusionnée que
+    le reste de la configuration : fichier ``.env`` (celui du répertoire
+    courant, ou ``env_file``) recouvert par l'environnement du processus. Un
+    jeton posé dans le ``.env`` est donc visible des plugins sans être passé par
+    ``AppConfig``. La racine de composition fournit aussi le ``TraceSink`` au
+    chargeur, pour que les états de plugin entrent dans le flux unique.
+    """
     trace_sink = build_trace_sink(
         debug_decisions=config.debug_decisions,
         log_dir=config.log_dir,
@@ -279,9 +362,28 @@ def build_app(config: AppConfig) -> App:
         level="DEBUG" if config.debug_decisions else config.log_level,
     )
 
+    plugin_secrets = (
+        secrets
+        if secrets is not None
+        else EnvSecretResolver(
+            merged_environment(
+                env,
+                env_file=env_file if env_file is not None else default_env_file(),
+            )
+        )
+    )
+
+    # Tools du noyau et Tools de plugin partagent un seul registre : celui du
+    # Plugin Registry. Les Tools du noyau y entrent au propriétaire ``core``,
+    # les plugins activés s'y ajoutent au démarrage. Le registre est construit
+    # avant le transport pour que ``Registered.server_tools`` le lise à chaque
+    # enregistrement, plugin chargé ou non.
+    plugins = PluginRegistry()
+
     transport = WebSocketTransport(
         host=config.server.host,
         port=config.server.port,
+        server_tools=server_tool_names(plugins),
         trace_sink=trace_sink,
     )
     gemini = GeminiLiveAdapter(
@@ -329,12 +431,19 @@ def build_app(config: AppConfig) -> App:
         on_run=lambda report: _trace_consolidation(trace_sink, report),
     )
 
-    tools = ToolRegistry()
+    # Les Tools du noyau entrent au propriétaire ``core`` ; les plugins activés
+    # s'y ajoutent au démarrage.
     register_memory_tools(
-        tools,
+        plugins.tools,
         memory,
         config.memory.user_id,
         forget_max_distance=config.memory.recall_max_distance,
+    )
+    plugin_loader = PluginLoader(
+        directory=config.plugins.directory,
+        state_path=config.plugins.state_path,
+        secrets=plugin_secrets,
+        trace_sink=trace_sink,
     )
 
     webhook: WebhookAdapter | None = None
@@ -355,7 +464,9 @@ def build_app(config: AppConfig) -> App:
         system_prompt=load_system_prompt(),
         announce_prompt=load_announce_prompt(),
         judge=judge,
-        tools=tools,
+        tools=plugins.tools,
+        plugins=plugins,
+        plugin_loader=plugin_loader,
         recall_k=config.memory.recall_k,
         recall_window_turns=config.memory.recall_window_turns,
         recall_max_distance=config.memory.recall_max_distance,

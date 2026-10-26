@@ -4,7 +4,26 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Mapping, NamedTuple, Protocol, Sequence
 
+from plugin_api import ToolSpec
 from protocol import SessionEndReason
+
+# ``ToolSpec`` appartient au contrat public (``plugin_api``) ; il est ré-exporté
+# ici pour que les imports existants du noyau continuent de marcher.
+
+
+class MissingSecretError(RuntimeError):
+    """Levée quand un secret requis est introuvable dans sa source."""
+
+
+class SecretResolver(Protocol):
+    """Port de résolution des secrets.
+
+    Les adaptateurs reçoivent la valeur déjà résolue et ne lisent jamais
+    l'environnement eux-mêmes (ADR-0001). Le port vit dans le noyau pour qu'un
+    adaptateur n'ait pas à importer la racine de composition.
+    """
+
+    def resolve(self, name: str) -> str: ...
 
 
 class ClientLink(Protocol):
@@ -19,15 +38,6 @@ class ClientLink(Protocol):
     async def send_tool_call(
         self, client_id: str, tool_id: str, name: str, arguments_json: bytes
     ) -> None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class ToolSpec:
-    """Pure description of a Tool a model may call (registry seam, issue #28)."""
-
-    name: str
-    description: str
-    parameters: Mapping[str, object]
 
 
 class LlmSocket(Protocol):
