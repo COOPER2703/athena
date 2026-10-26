@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { fetchStatus, type StatusPayload } from "./api";
+import { EventForm } from "./EventForm";
 import { sessionSummary } from "./session";
 import { TraceFeed } from "./TraceFeed";
 
@@ -101,11 +102,13 @@ export function App() {
         </section>
 
         <TraceFeed />
+        <EventForm />
       </main>
 
       <footer className="app__footer">
         Instantané lu depuis <code>GET /api/status</code>, traces depuis{" "}
-        <code>GET /api/stream</code>
+        <code>GET /api/stream</code>, Événements via{" "}
+        <code>POST /api/events</code>
       </footer>
     </div>
   );

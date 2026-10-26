@@ -19,7 +19,14 @@ from typing import Callable, Mapping
 
 from aiohttp import web
 
+from server.adapters.console.events import (
+    EVENTS_PATH,
+    MAX_BODY_BYTES,
+    EventInjection,
+)
 from server.adapters.console.trace_buffer import TraceBuffer
+from server.adapters.trace import NullTraceSink
+from server.core.ports import TraceSink
 
 # Enveloppe versionnée du contrat JSON : les clients existants peuvent ignorer
 # les champs qu'ils ne connaissent pas, et un changement cassant incrémente
@@ -89,6 +96,7 @@ class ConsoleAdapter:
         port: int = 8767,
         static_dir: str | os.PathLike[str] = DEFAULT_STATIC_DIR,
         trace_buffer: TraceBuffer | None = None,
+        trace_sink: TraceSink | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -97,7 +105,12 @@ class ConsoleAdapter:
         # composition ; l'adaptateur ne fait que le lire. Un tampon vide par
         # défaut garde la surface utilisable (et testable) sans câblage.
         self._trace_buffer = trace_buffer if trace_buffer is not None else TraceBuffer()
+        # Le flux d'observation est le flux unique (ADR-0004) : l'injection
+        # d'un Événement y trace ``event_received`` comme le Webhook.
+        self._trace_sink: TraceSink = trace_sink or NullTraceSink()
         self._snapshot: Callable[[], Mapping[str, object]] | None = None
+        self._push: Callable[[str, str], None] | None = None
+        self._event_injection: EventInjection | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
 
@@ -114,10 +127,23 @@ class ConsoleAdapter:
             raise RuntimeError("Console not started")
         return sockets[0].getsockname()[1]
 
-    async def start(self, snapshot: Callable[[], Mapping[str, object]]) -> None:
-        """Lie la surface HTTP et retient la couture ``snapshot``."""
+    async def start(
+        self,
+        snapshot: Callable[[], Mapping[str, object]],
+        push: Callable[[str, str], None] | None = None,
+    ) -> None:
+        """Lie la surface HTTP, l'instantané et la couture ``push``.
+
+        ``push`` est le ``App.push_event`` injecté : comme le Webhook, la Console
+        ne possède aucune file propre, elle dépose dans le Canal d'événements
+        unique (ADR-0007). Sans couture, l'injection répond 503.
+        """
         self._snapshot = snapshot
-        app = web.Application()
+        self._push = push
+        self._event_injection = EventInjection(
+            push=push, trace_sink=self._trace_sink
+        )
+        app = web.Application(client_max_size=MAX_BODY_BYTES)
         self._register_routes(app)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -133,6 +159,8 @@ class ConsoleAdapter:
         self._runner = None
         self._site = None
         self._snapshot = None
+        self._push = None
+        self._event_injection = None
 
     def _register_routes(self, app: web.Application) -> None:
         """Enregistre les routes de lecture.
@@ -151,6 +179,7 @@ class ConsoleAdapter:
             STREAM_PATH,
             stream_handler(self._trace_buffer, self._current_snapshot),
         )
+        app.router.add_post(EVENTS_PATH, self._handle_event)
         # Tout chemin inconnu **sous /api** reste du JSON : un client de l'API
         # ne reçoit jamais une page HTML ou du texte. Le repli est enregistré
         # après les routes exactes, qui gardent la priorité.
@@ -166,6 +195,11 @@ class ConsoleAdapter:
 
     def _current_snapshot(self) -> Mapping[str, object]:
         return self._snapshot() if self._snapshot is not None else {}
+
+    async def _handle_event(self, request: web.Request) -> web.Response:
+        """Délègue l'injection à la route dédiée (mêmes règles que le Webhook)."""
+        assert self._event_injection is not None
+        return await self._event_injection.handle(request)
 
     async def _handle_unknown_api(self, request: web.Request) -> web.Response:
         return web.json_response({"error": "not found"}, status=404)

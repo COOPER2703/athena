@@ -126,14 +126,20 @@ class WebhookServer(Protocol):
 
 
 class ConsoleServer(Protocol):
-    """Couture de la Console web : sert l'instantané de lecture.
+    """Couture de la Console web : instantané de lecture et injection d'Événement.
 
     ``snapshot`` est le ``App.snapshot`` injecté à ``start`` : l'adaptateur ne
     connaît ni le Coordinator ni ``SessionState``, et l'instantané est construit
-    par la racine de composition au moment de la requête (ADR-0016).
+    par la racine de composition au moment de la requête (ADR-0016). ``push``
+    est le même ``App.push_event`` que celui du Webhook : l'Événement injecté
+    entre dans le Canal d'événements unique, sans file propre à la Console.
     """
 
-    async def start(self, snapshot: Callable[[], Mapping[str, object]]) -> None: ...
+    async def start(
+        self,
+        snapshot: Callable[[], Mapping[str, object]],
+        push: Callable[[str, str], None] | None = None,
+    ) -> None: ...
 
     async def stop(self) -> None: ...
 
@@ -284,7 +290,7 @@ class App:
         if self._webhook is not None:
             await self._webhook.start(self.push_event)
         if self._console is not None:
-            await self._console.start(self.snapshot)
+            await self._console.start(self.snapshot, self.push_event)
         self._emit("started", payload={"state": self._coordinator.state.value})
 
         pumps = [
@@ -548,6 +554,7 @@ def build_app(
             port=config.console.port,
             static_dir=config.console.static_dir,
             trace_buffer=console_trace_buffer,
+            trace_sink=trace_sink,
         )
 
     return App(
