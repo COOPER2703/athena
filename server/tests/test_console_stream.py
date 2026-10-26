@@ -17,9 +17,11 @@ import aiohttp
 
 from conftest import wait_until
 from server.adapters.console import ConsoleAdapter
+from server.adapters.console.stream import trace_frame
 from server.adapters.console.trace_buffer import (
     TRUNCATION_KIND,
     TraceBuffer,
+    truncation_entry,
 )
 from server.app.config import (
     AppConfig,
@@ -180,7 +182,10 @@ def test_backlog_to_live_is_atomic_without_gap_or_duplicate() -> None:
                         "LiveC",
                         "LiveD",
                     ]
-                    assert [frame["data"]["timestamp"] for frame in frames] == [3.0, 4.0]
+                    assert [frame["data"]["timestamp"] for frame in frames] == [
+                        3.0,
+                        4.0,
+                    ]
         finally:
             await adapter.stop()
 
@@ -351,21 +356,38 @@ class _FakeMemory:
     """Mémoire factice : ``build_app`` ne charge ni modèle ni base réelle."""
 
 
-async def _connect_stream_when_ready(url: str) -> aiohttp.ClientWebSocketResponse:
+async def _connect_stream_when_ready(
+    http: aiohttp.ClientSession, url: str
+) -> aiohttp.ClientWebSocketResponse:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + 2.0
     while True:
         try:
-            http = aiohttp.ClientSession()
-            try:
-                return await http.ws_connect(url)
-            except BaseException:
-                await http.close()
-                raise
+            return await http.ws_connect(url)
         except aiohttp.ClientConnectorError:
             if loop.time() > deadline:
                 raise
             await asyncio.sleep(0.01)
+
+
+async def _assert_started_and_live(
+    ws: aiohttp.ClientWebSocketResponse,
+) -> None:
+    hello = await asyncio.wait_for(ws.receive_json(), 1.0)
+    assert hello["type"] == "hello"
+    assert "started" in [entry["kind"] for entry in hello["data"]["backlog"]]
+
+    logging.getLogger("fixture").warning("live")
+
+    live = None
+    while live is None:
+        frame = await asyncio.wait_for(ws.receive_json(), 1.0)
+        if frame["data"]["kind"] == "fixture":
+            live = frame
+    assert live["type"] == "trace"
+    assert live["data"]["source"] == "logging"
+    assert live["data"]["level"] == "warning"
+    assert live["data"]["payload"] == {"message": "live"}
 
 
 def test_build_app_feeds_the_stream_from_the_single_trace_flow(
@@ -396,32 +418,29 @@ def test_build_app_feeds_the_stream_from_the_single_trace_flow(
         original_level = root_logger.level
         app = build_app(config, secrets=None, env={}, env_file=None)
         runner = asyncio.create_task(app.run())
-        ws = None
         try:
-            ws = await _connect_stream_when_ready(
-                f"ws://127.0.0.1:{console_port}{STREAM_PATH}"
-            )
-            hello = await asyncio.wait_for(ws.receive_json(), 1.0)
-            assert hello["type"] == "hello"
-            assert "started" in [entry["kind"] for entry in hello["data"]["backlog"]]
-
-            logging.getLogger("fixture").warning("live")
-
-            live = None
-            while live is None:
-                frame = await asyncio.wait_for(ws.receive_json(), 1.0)
-                if frame["data"]["kind"] == "fixture":
-                    live = frame
-            assert live["type"] == "trace"
-            assert live["data"]["source"] == "logging"
-            assert live["data"]["level"] == "warning"
-            assert live["data"]["payload"] == {"message": "live"}
+            async with aiohttp.ClientSession() as http:
+                ws = await _connect_stream_when_ready(
+                    http, f"ws://127.0.0.1:{console_port}{STREAM_PATH}"
+                )
+                await _assert_started_and_live(ws)
         finally:
-            if ws is not None:
-                await ws.close()
             app.request_shutdown()
             await asyncio.wait_for(runner, 1.0)
             root_logger.handlers[:] = original_handlers
             root_logger.setLevel(original_level)
 
     asyncio.run(scenario())
+
+
+def test_truncation_marker_serialises_as_a_reserved_trace_frame() -> None:
+    """Le marqueur garde la forme d'une trame ``trace`` : aucun type exotique."""
+
+    frame = trace_frame(truncation_entry(3))
+
+    assert frame["v"] == 1
+    assert frame["type"] == "trace"
+    assert frame["data"]["source"] == "console"
+    assert frame["data"]["kind"] == TRUNCATION_KIND
+    assert frame["data"]["level"] == "warning"
+    assert frame["data"]["payload"] == {"dropped": 3}
