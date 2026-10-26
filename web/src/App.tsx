@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { fetchStatus, type StatusPayload } from "./api";
+import { EventForm } from "./EventForm";
 import { sessionSummary } from "./session";
 
 /** État de chargement de la page, sans état intermédiaire ambigu. */
@@ -98,6 +99,8 @@ export function App() {
             </dl>
           ) : null}
         </section>
+
+        <EventForm />
       </main>
 
       <footer className="app__footer">
