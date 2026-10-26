@@ -24,9 +24,11 @@ class ToolRegistry:
     Associe une déclaration (``ToolSpec``) à un handler asynchrone et à son
     propriétaire (``core`` pour un Tool du noyau, le nom du plugin sinon). Le
     noyau résout un nom de Tool appelé par le modèle, exécute le handler et
-    renvoie son résultat. Un nom inconnu ou un handler qui lève produit un
-    résultat d'erreur sans jamais lever, afin que l'échange avec le modèle
-    reste vivant.
+    renvoie son résultat. Un nom inconnu produit un résultat d'erreur sans
+    jamais lever. Un handler de **plugin** est du code externe : sa panne
+    devient un résultat d'erreur rendu au modèle, pour que l'échange reste
+    vivant. Un handler du **noyau** qui lève propage au contraire l'exception :
+    un bug du noyau ne se déguise jamais en erreur de Tool.
     """
 
     def __init__(self) -> None:
@@ -63,6 +65,10 @@ class ToolRegistry:
         try:
             return await handler(arguments)
         except Exception as exc:
+            if self._owners.get(name, "core") == "core":
+                # Un bug du noyau ne doit pas être masqué en erreur de Tool :
+                # il remonte, comme avant l'arrivée des plugins.
+                raise
             # Un handler de plugin est du code externe : sa panne devient un
             # résultat d'erreur rendu au modèle, jamais une Session qui tombe.
             return {"status": "error", "message": f"tool {name} failed: {exc}"}
