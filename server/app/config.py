@@ -27,6 +27,10 @@ DEFAULT_WEBHOOK_PORT = 8766
 # loopback par défaut, sans authentification en v1, comme le Webhook.
 DEFAULT_CONSOLE_HOST = "127.0.0.1"
 DEFAULT_CONSOLE_PORT = 8767
+# Build de la SPA servi par la Console. Le répertoire est relatif au répertoire
+# de travail du serveur ; absent, la Console explique quoi lancer sans empêcher
+# l'API de répondre (le build n'est jamais committé).
+DEFAULT_CONSOLE_STATIC_DIR = "web/dist"
 DEFAULT_LOG_DIR = "logs"
 # Un plugin est un dossier déposé (ADR-0014) ; l'état d'activation et la
 # configuration non secrète vivent dans un fichier JSON séparé, à la racine du
@@ -172,9 +176,12 @@ class ConsoleConfig(BaseModel):
     reste sans authentification en v1. Elle est **activée par défaut**, comme
     le Webhook, et se désactive par ``ATHENA_CONSOLE_ENABLED=0``.
 
-    Défauts : ``enabled=True``, ``host="127.0.0.1"``, ``port=8767``. Les trois
-    sont surchargeables par ``ATHENA_CONSOLE_ENABLED``, ``ATHENA_CONSOLE_HOST``
-    et ``ATHENA_CONSOLE_PORT``.
+    Défauts : ``enabled=True``, ``host="127.0.0.1"``, ``port=8767``, et
+    ``static_dir="web/dist"`` pour le build de la SPA. Les quatre sont
+    surchargeables par ``ATHENA_CONSOLE_ENABLED``, ``ATHENA_CONSOLE_HOST``,
+    ``ATHENA_CONSOLE_PORT`` et ``ATHENA_CONSOLE_STATIC_DIR``. Un
+    ``static_dir`` absent n'est pas une erreur : la Console sert alors une page
+    explicative et l'API répond normalement.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -182,13 +189,14 @@ class ConsoleConfig(BaseModel):
     enabled: bool = True
     host: str = Field(default=DEFAULT_CONSOLE_HOST, min_length=1)
     port: int = Field(default=DEFAULT_CONSOLE_PORT, ge=1, le=65535)
+    static_dir: str = Field(default=DEFAULT_CONSOLE_STATIC_DIR, min_length=1)
 
     @field_validator("enabled", mode="before")
     @classmethod
     def _enabled(cls, value: object) -> object:
         return _coerce_bool(value, variable="ATHENA_CONSOLE_ENABLED")
 
-    @field_validator("host", mode="before")
+    @field_validator("host", "static_dir", mode="before")
     @classmethod
     def _strip_host(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
@@ -348,6 +356,9 @@ def load_config(
             enabled=merged.get("ATHENA_CONSOLE_ENABLED", "1"),
             host=merged.get("ATHENA_CONSOLE_HOST", DEFAULT_CONSOLE_HOST),
             port=merged.get("ATHENA_CONSOLE_PORT", str(DEFAULT_CONSOLE_PORT)),
+            static_dir=merged.get(
+                "ATHENA_CONSOLE_STATIC_DIR", DEFAULT_CONSOLE_STATIC_DIR
+            ),
         ),
         plugins=PluginsConfig(
             directory=merged.get("ATHENA_PLUGINS_DIR", DEFAULT_PLUGINS_DIR),
