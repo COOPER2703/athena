@@ -257,7 +257,7 @@ Attendu : un démarrage **dégradé**, pas un refus.
 
 ```
 WARNING [plugins] DiscoveryFailed {"error": "…", "plugin": "homeassistant"}
-INFO    [plugins] PluginState {"plugin": "homeassistant", "reason": "RuntimeError: Home Assistant discovery failed: …", "state": "failed"}
+INFO    [plugins] PluginState {"plugin": "homeassistant", "reason": "PluginUnavailable: Home Assistant discovery failed: …", "state": "failed"}
 INFO    [app] started {"state": "Idle"}
 ```
 

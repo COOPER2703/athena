@@ -11,6 +11,10 @@ pousser un Événement) et rend un **PluginBinding** (Tools + Instruction de plu
 n'importe aucun interne du serveur et n'écrit pas lui-même dans le registre : le noyau
 agrège, détecte les collisions de noms et attribue chaque Tool à son plugin.
 
+Le contrat public vit dans le module **`plugin_api`** (comme `protocol` pour le fil client) :
+c'est la seule surface qu'un plugin importe, jamais `server`. Une plateforme injoignable s'y
+signale en levant `PluginUnavailable`, seule panne retentable.
+
 ## Considérations
 
 - Options rejetées : plugins in-tree (installer = modifier le dépôt) ; paquets Python à

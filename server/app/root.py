@@ -249,7 +249,7 @@ class App:
 
     def _has_pending_plugins(self) -> bool:
         loader = self._plugin_loader
-        return loader is not None and bool(getattr(loader, "pending", ()))
+        return loader is not None and bool(loader.pending)
 
     async def _retry_plugins(self) -> None:
         """Retente en tâche de fond les plugins dont ``create`` a échoué.

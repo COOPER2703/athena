@@ -637,6 +637,7 @@ class FakePluginLoader:
     def __init__(self) -> None:
         self.registry: PluginRegistry | None = None
         self.push: Callable[[str, str], None] | None = None
+        self.pending: tuple[str, ...] = ()
 
     async def load(
         self, registry: PluginRegistry, *, push_event: Callable[[str, str], None]
