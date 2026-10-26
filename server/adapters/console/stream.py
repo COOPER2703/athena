@@ -85,6 +85,11 @@ def stream_handler(
         status_subscription: StatusSubscription | None = (
             status.subscribe() if status is not None else None
         )
+        if status is not None:
+            # L'état part dans le `hello` : il devient la référence du tick,
+            # sinon un changement antérieur à la connexion serait rejoué en
+            # trame `status` identique.
+            status.adopt(current_snapshot)
 
         async def send_traces() -> None:
             async for entry in subscription:

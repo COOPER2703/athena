@@ -79,6 +79,15 @@ class StatusBroadcaster:
     def close(self) -> None:
         self._subscribers.close()
 
+    def adopt(self, snapshot: Mapping[str, object]) -> None:
+        """Adopte l'instantané déjà servi par une trame ``hello``.
+
+        Un client reçoit l'état courant dans son ``hello`` : cet état devient la
+        référence du diffuseur. Un changement antérieur à la connexion ne
+        produit donc pas une trame ``status`` redondante au tick suivant.
+        """
+        self._last = snapshot_fingerprint(snapshot)
+
     async def run(self) -> None:
         """Tick de fond : compare, puis diffuse seulement en cas de changement."""
         while True:
