@@ -140,3 +140,27 @@ def test_each_request_reflects_the_current_snapshot() -> None:
             await adapter.stop()
 
     asyncio.run(scenario())
+
+
+def test_without_a_build_the_root_explains_what_to_run(tmp_path) -> None:
+    """Sans build, `/` explique quoi lancer et l'API continue de répondre."""
+
+    async def scenario() -> None:
+        adapter = ConsoleAdapter(port=0, static_dir=tmp_path / "absent")
+        await adapter.start(_snapshot)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(_url(adapter, "/")) as response:
+                    assert response.status == 200
+                    assert response.content_type == "text/html"
+                    page = await response.text()
+                assert "make web" in page
+                assert "npm run build" in page
+
+                async with session.get(_url(adapter)) as response:
+                    assert response.status == 200
+                    assert (await response.json())["v"] == 1
+        finally:
+            await adapter.stop()
+
+    asyncio.run(scenario())

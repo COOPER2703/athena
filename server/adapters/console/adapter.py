@@ -13,6 +13,8 @@ vivant sans qu'aucun port du noyau ne soit créé pour la Console.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Callable, Mapping
 
 from aiohttp import web
@@ -22,9 +24,53 @@ from aiohttp import web
 # cette version (ADR-0002, contrat de la console).
 ENVELOPE_VERSION = 1
 # Préfixe réservé à l'API JSON. Le repli sous ce préfixe renvoie du JSON ; le
-# reste du serveur appartient à la SPA (ticket suivant).
+# reste du serveur appartient à la SPA.
 API_PREFIX = "/api"
 STATUS_PATH = "/api/status"
+# Build de la SPA, produit par `make web`. Le répertoire n'existe pas
+# nécessairement : l'API ne dépend pas du front (ADR-0003).
+DEFAULT_STATIC_DIR = "web/dist"
+
+# Page servie à la place du front quand le build est absent : plutôt qu'une 404
+# muette, elle indique la commande à lancer. Volontairement autonome (aucun
+# actif, aucun script) pour rester servie même sans le reste du build.
+_EXPLANATION_PAGE = """<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Console Athena — build absent</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 3rem;
+        background: #101215;
+        color: #d8dee9;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        line-height: 1.6;
+      }
+      h1 { font-size: 1.25rem; color: #8fbcbb; }
+      code { color: #ebcb8b; }
+      p { max-width: 60ch; }
+    </style>
+  </head>
+  <body>
+    <h1>Console Athena — build absent</h1>
+    <p>
+      Le build de la SPA n'a pas été trouvé. L'API JSON reste disponible sous
+      <code>/api</code>, mais la page de la Console doit être construite.
+    </p>
+    <p>Depuis la racine du dépôt, lancez :</p>
+    <p><code>make web</code></p>
+    <p>ou, dans <code>web/</code> :</p>
+    <p><code>npm ci &amp;&amp; npm run build</code></p>
+    <p>
+      Le build est ensuite servi depuis le répertoire statique de la Console
+      (<code>web/dist</code> par défaut, configurable par
+      <code>ATHENA_CONSOLE_STATIC_DIR</code>).
+    </p>
+  </body>
+</html>
+"""
 
 
 class ConsoleAdapter:
@@ -39,9 +85,11 @@ class ConsoleAdapter:
         *,
         host: str = "127.0.0.1",
         port: int = 8767,
+        static_dir: str | os.PathLike[str] = DEFAULT_STATIC_DIR,
     ) -> None:
         self._host = host
         self._port = port
+        self._static_dir = Path(static_dir)
         self._snapshot: Callable[[], Mapping[str, object]] | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -85,6 +133,10 @@ class ConsoleAdapter:
         # après les routes exactes, qui gardent la priorité.
         app.router.add_route("*", API_PREFIX, self._handle_unknown_api)
         app.router.add_route("*", f"{API_PREFIX}/{{tail:.*}}", self._handle_unknown_api)
+        # Tout le reste appartient à la SPA : `/`, ses chemins connus et ses
+        # chemins inconnus (page unique, sans routeur) reçoivent la même entrée.
+        app.router.add_get("/", self._handle_spa)
+        app.router.add_get("/{tail:.*}", self._handle_spa)
 
     async def _handle_status(self, request: web.Request) -> web.Response:
         snapshot = self._snapshot() if self._snapshot is not None else {}
@@ -92,3 +144,37 @@ class ConsoleAdapter:
 
     async def _handle_unknown_api(self, request: web.Request) -> web.Response:
         return web.json_response({"error": "not found"}, status=404)
+
+    async def _handle_spa(self, request: web.Request) -> web.Response:
+        """Sert le build de la SPA, son entrée, ou la page explicative.
+
+        Le fichier demandé est cherché d'abord ; à défaut, la page unique
+        reçoit tous les chemins non-API. Sans build, la page explicative prend
+        la place de la SPA pour que l'utilisateur sache quoi lancer.
+        """
+        index = self._index_file()
+        if index is None:
+            return web.Response(text=_EXPLANATION_PAGE, content_type="text/html")
+        static_file = self._static_file(request.match_info.get("tail", ""))
+        return web.FileResponse(static_file or index)
+
+    def _index_file(self) -> Path | None:
+        """Entrée de la SPA, ou ``None`` quand aucun build n'est présent."""
+        index = self._static_dir / "index.html"
+        return index if index.is_file() else None
+
+    def _static_file(self, tail: str) -> Path | None:
+        """Fichier du build demandé, borné au répertoire statique.
+
+        ``resolve`` élimine ``..`` et les liens symboliques avant la
+        comparaison : un chemin qui sortirait du répertoire statique est traité
+        comme inconnu et reçoit l'entrée de la SPA, jamais le fichier visé.
+        """
+        root = self._static_dir.resolve()
+        try:
+            candidate = (root / tail).resolve()
+        except (OSError, ValueError):
+            return None
+        if not candidate.is_relative_to(root) or not candidate.is_file():
+            return None
+        return candidate
