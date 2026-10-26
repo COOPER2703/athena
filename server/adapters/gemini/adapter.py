@@ -22,6 +22,8 @@ from server.core.events import (
     LlmFailed,
     LlmFailureCause,
     LlmOpened,
+    LlmTranscription,
+    Role,
 )
 from server.core.ports import ToolSpec, TraceSink
 
@@ -72,6 +74,10 @@ class GeminiLiveAdapter:
         self._connection_id = ""
         self._receiver: asyncio.Task[None] | None = None
         self._terminated = False
+        # Gemini Live streame la transcription de sortie par fragments. Le noyau
+        # raisonne en tours : on recompose le tour complet avant de l'émettre,
+        # sinon le Journal (mémoire) accumule des lignes comme « envoyé ».
+        self._pending_transcription: list[str] = []
 
     async def recv(self) -> Event:
         return await self._events.get()
@@ -120,6 +126,7 @@ class GeminiLiveAdapter:
     ) -> None:
         if self._receiver is not None or self._context is not None:
             await self._shutdown()
+        self._pending_transcription.clear()
         self._connection_id = connection_id
         self._terminated = False
         try:
@@ -161,6 +168,9 @@ class GeminiLiveAdapter:
                     await self._handle_response(response)
                     if self._terminated:
                         break
+                # Fin du tour : la transcription de sortie accumulée devient
+                # une seule prise de parole du domaine.
+                await self._flush_transcription()
                 if not delivered:
                     break
         except asyncio.CancelledError:
@@ -188,8 +198,21 @@ class GeminiLiveAdapter:
         for event in translate_response(response):
             if isinstance(event, LlmFailed):
                 await self._fail(event.cause)
+            elif isinstance(event, LlmTranscription) and event.role is Role.ASSISTANT:
+                self._pending_transcription.append(event.text)
             else:
                 await self._events.put(event)
+
+    async def _flush_transcription(self) -> None:
+        """Émet la transcription de sortie accumulée comme un seul tour."""
+        if not self._pending_transcription:
+            return
+        text = "".join(self._pending_transcription)
+        self._pending_transcription.clear()
+        if text:
+            await self._events.put(
+                LlmTranscription(text=text, role=Role.ASSISTANT)
+            )
 
     async def _fail(self, cause: LlmFailureCause) -> None:
         if self._terminated:
@@ -206,6 +229,7 @@ class GeminiLiveAdapter:
     async def _shutdown(self) -> None:
         receiver = self._receiver
         self._receiver = None
+        self._pending_transcription.clear()
         if receiver is not None and not receiver.done():
             receiver.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):

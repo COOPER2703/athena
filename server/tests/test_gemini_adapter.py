@@ -366,6 +366,69 @@ def test_maps_audio_transcriptions_and_traces_tool_calls() -> None:
     asyncio.run(scenario())
 
 
+def test_streamed_output_transcription_is_emitted_as_one_turn() -> None:
+    async def scenario() -> None:
+        fragments = ["Bonjour", " je", " vais", " bien."]
+        responses = [
+            SimpleNamespace(
+                server_content=SimpleNamespace(
+                    input_transcription=None,
+                    output_transcription=SimpleNamespace(text=fragment),
+                )
+            )
+            for fragment in fragments
+        ]
+        live_connect = FakeLiveConnect(session=FakeSession(responses=responses))
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmTranscription(
+            text="Bonjour je vais bien.", role=Role.ASSISTANT
+        )
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_streamed_output_transcription_is_not_merged_across_turns() -> None:
+    async def scenario() -> None:
+        def turn(text: str) -> list[Any]:
+            return [
+                SimpleNamespace(
+                    server_content=SimpleNamespace(
+                        input_transcription=None,
+                        output_transcription=SimpleNamespace(text=text),
+                    )
+                )
+            ]
+
+        live_connect = FakeLiveConnect(
+            session=PerTurnSession([turn("premier"), turn("second")])
+        )
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmTranscription(
+            text="premier", role=Role.ASSISTANT
+        )
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmTranscription(
+            text="second", role=Role.ASSISTANT
+        )
+
+        await adapter.execute(CloseLiveConnection(connection_id="s1"))
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
+
+    asyncio.run(scenario())
+
+
 def test_audio_and_transcription_in_one_message_are_both_emitted() -> None:
     async def scenario() -> None:
         response = SimpleNamespace(
