@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import ast_guard
+
 ADAPTERS_DIR = Path(__file__).resolve().parent.parent / "adapters"
 
 
@@ -16,12 +18,15 @@ def _imported_modules(tree: ast.AST) -> set[str]:
     return modules
 
 
-def test_adapters_import_nothing_from_the_app_layer() -> None:
-    """ADR-0001 : un adaptateur dépend du noyau, jamais de la racine de composition."""
+def _adapter_modules() -> list[Path]:
     files = sorted(ADAPTERS_DIR.rglob("*.py"))
     assert files, "expected the adapters package to contain modules"
+    return files
 
-    for path in files:
+
+def test_adapters_import_nothing_from_the_app_layer() -> None:
+    """ADR-0001 : un adaptateur dépend du noyau, jamais de la racine de composition."""
+    for path in _adapter_modules():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         offenders = sorted(
             module
@@ -31,6 +36,28 @@ def test_adapters_import_nothing_from_the_app_layer() -> None:
         assert not offenders, (
             f"{path.relative_to(ADAPTERS_DIR.parent.parent)} imports the app "
             f"layer: {offenders}"
+        )
+
+
+def test_every_adapter_respects_the_kernel_purity_guard() -> None:
+    """Critère #64 : aucun adaptateur ne touche au Coordinator ni à SessionState.
+
+    Le garde-fou existait pour le transport seul ; il couvre désormais tout
+    ``server/adapters/``, y compris la Console web. Les noms et modules
+    interdits viennent d'``ast_guard``, source unique de la règle.
+    """
+    for path in _adapter_modules():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        relative = path.relative_to(ADAPTERS_DIR.parent.parent)
+
+        forbidden_modules = ast_guard.imports(tree) & ast_guard.FORBIDDEN_MODULES
+        assert not forbidden_modules, (
+            f"{relative} imports forbidden modules: {sorted(forbidden_modules)}"
+        )
+
+        forbidden_names = ast_guard.names(tree) & ast_guard.FORBIDDEN_NAMES
+        assert not forbidden_names, (
+            f"{relative} references forbidden names: {sorted(forbidden_names)}"
         )
 
 
