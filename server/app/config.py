@@ -24,6 +24,12 @@ DEFAULT_CONSOLIDATION_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_WEBHOOK_HOST = "127.0.0.1"
 DEFAULT_WEBHOOK_PORT = 8766
 DEFAULT_LOG_DIR = "logs"
+# Un plugin est un dossier déposé (ADR-0014) ; l'état d'activation et la
+# configuration non secrète vivent dans un fichier JSON séparé, à la racine du
+# dépôt par défaut. Les deux chemins sont surchargeables pour les tests et les
+# déploiements.
+DEFAULT_PLUGINS_DIR = "plugins"
+DEFAULT_PLUGINS_STATE = "plugins.json"
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"", "0", "false", "no", "off"}
@@ -154,6 +160,26 @@ class WebhookConfig(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
+class PluginsConfig(BaseModel):
+    """Emplacements des plugins serveur (ADR-0014).
+
+    ``directory`` est le répertoire scanné au démarrage ; ``state_path`` le
+    fichier d'état qui porte la liste d'activation explicite et la
+    configuration non secrète. Un chemin absent ne fait pas échouer le
+    démarrage : il signifie simplement « aucun plugin ».
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    directory: str = Field(default=DEFAULT_PLUGINS_DIR, min_length=1)
+    state_path: str = Field(default=DEFAULT_PLUGINS_STATE, min_length=1)
+
+    @field_validator("directory", "state_path", mode="before")
+    @classmethod
+    def _strip_path(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
 class AppConfig(BaseModel):
     """Configuration validée au démarrage, injectée par constructeur."""
 
@@ -163,6 +189,7 @@ class AppConfig(BaseModel):
     gemini: GeminiConfig
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     webhook: WebhookConfig = Field(default_factory=WebhookConfig)
+    plugins: PluginsConfig = Field(default_factory=PluginsConfig)
     log_level: LogLevel = LogLevel.INFO
     log_dir: str = Field(default=DEFAULT_LOG_DIR, min_length=1)
     debug_decisions: bool = False
@@ -261,6 +288,10 @@ def load_config(
             enabled=merged.get("ATHENA_WEBHOOK_ENABLED", "1"),
             host=merged.get("ATHENA_WEBHOOK_HOST", DEFAULT_WEBHOOK_HOST),
             port=merged.get("ATHENA_WEBHOOK_PORT", str(DEFAULT_WEBHOOK_PORT)),
+        ),
+        plugins=PluginsConfig(
+            directory=merged.get("ATHENA_PLUGINS_DIR", DEFAULT_PLUGINS_DIR),
+            state_path=merged.get("ATHENA_PLUGINS_STATE", DEFAULT_PLUGINS_STATE),
         ),
         log_level=merged.get("LOG_LEVEL", "INFO"),
         log_dir=merged.get("ATHENA_LOG_DIR", DEFAULT_LOG_DIR),
