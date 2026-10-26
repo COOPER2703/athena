@@ -14,12 +14,14 @@ dependencies = [
     "numpy>=2.0",
     "aiohttp>=3.10",
     "mcp>=2.3.0",
+    "httpx2>=2.16.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "grpcio-tools==1.84.0",
     "pytest==9.1.1",
+    "uvicorn>=0.54.0",
 ]
 
 [build-system]

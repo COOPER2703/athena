@@ -208,6 +208,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "google-genai" },
+    { name = "httpx2" },
     { name = "mcp" },
     { name = "numpy" },
     { name = "protobuf" },
@@ -222,6 +223,7 @@ dependencies = [
 dev = [
     { name = "grpcio-tools" },
     { name = "pytest" },
+    { name = "uvicorn" },
 ]
 
 [package.metadata]
@@ -229,6 +231,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.10" },
     { name = "google-genai", specifier = ">=2.12.1" },
     { name = "grpcio-tools", marker = "extra == 'dev'", specifier = "==1.84.0" },
+    { name = "httpx2", specifier = ">=2.16.0" },
     { name = "mcp", specifier = ">=2.3.0" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "protobuf", specifier = "==7.35.1" },
@@ -237,6 +240,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = "==9.1.1" },
     { name = "sentence-transformers", specifier = ">=3.0.0" },
     { name = "sqlite-vec", specifier = ">=0.1.0" },
+    { name = "uvicorn", marker = "extra == 'dev'", specifier = ">=0.54.0" },
     { name = "websockets", specifier = ">=15.0" },
 ]
 provides-extras = ["dev"]
