@@ -105,30 +105,30 @@ export function statusFromHello(frame: HelloLike): StatusData {
   return normalizeStatus(frame.data?.snapshot);
 }
 
-/** Libellés français des états du Plugin Registry. */
-const PLUGIN_STATE_LABELS: Readonly<Record<string, string>> = {
-  activated: "Activé",
-  disabled: "Désactivé",
-  missing: "Manquant",
-  failed: "En échec",
+/** États connus du Plugin Registry, et leur présentation française. */
+export type PluginState = "activated" | "disabled" | "missing" | "failed";
+
+const PLUGIN_STATES: Readonly<Record<PluginState, { label: string }>> = {
+  activated: { label: "Activé" },
+  disabled: { label: "Désactivé" },
+  missing: { label: "Manquant" },
+  failed: { label: "En échec" },
 };
 
-const PLUGIN_STATE_CLASSES: ReadonlySet<string> = new Set([
-  "activated",
-  "disabled",
-  "missing",
-  "failed",
-]);
+/** Vrai si l'état est un état connu du Plugin Registry. */
+export function isPluginState(state: string): state is PluginState {
+  return Object.prototype.hasOwnProperty.call(PLUGIN_STATES, state);
+}
 
 /** Libellé d'un état de Plugin ; l'état brut passe s'il est inconnu. */
 export function formatPluginState(state: string): string {
   if (!state) {
     return "Inconnu";
   }
-  return PLUGIN_STATE_LABELS[state] ?? state;
+  return isPluginState(state) ? PLUGIN_STATES[state].label : state;
 }
 
 /** Classe CSS bornée d'un état de Plugin (aucune injection de valeur brute). */
 export function pluginStateClass(state: string): string {
-  return PLUGIN_STATE_CLASSES.has(state) ? state : "unknown";
+  return isPluginState(state) ? state : "unknown";
 }

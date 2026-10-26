@@ -137,6 +137,45 @@ def test_key_order_does_not_count_as_a_change() -> None:
     asyncio.run(scenario())
 
 
+def test_a_change_before_connection_is_carried_by_hello_without_a_duplicate() -> None:
+    """L'état du ``hello`` devient la référence : aucun ``status`` redondant.
+
+    Le changement survient après la construction du diffuseur (qui a pris son
+    empreinte de départ) mais avant l'abonnement du client. Le ``hello`` porte
+    donc le nouvel état : il ne doit pas être suivi d'une trame ``status``
+    identique au tick suivant.
+    """
+
+    async def scenario() -> None:
+        state = _state()
+        # Tick assez lent pour que le changement précède l'abonnement à coup
+        # sûr, puis un tick effectif après le hello.
+        slow_tick = 0.2
+        adapter = ConsoleAdapter(port=0, status_interval=slow_tick)
+        await adapter.start(lambda: state)
+        try:
+            session = state["session"]
+            assert isinstance(session, dict)
+            session["state"] = "SessionVisible"
+            session["session_id"] = "sess-1"
+            session["connection_id"] = "conn-1"
+            session["active_client_id"] = "client-1"
+
+            async with aiohttp.ClientSession() as http:
+                async with http.ws_connect(_ws_url(adapter)) as ws:
+                    hello = await _receive(ws)
+                    assert hello["type"] == "hello"
+                    assert hello["data"]["snapshot"] == state
+
+                    # Au moins un tick passe : l'état n'a pas changé depuis le
+                    # hello, donc rien ne doit descendre.
+                    await _expect_silence(ws, timeout=slow_tick * 3)
+        finally:
+            await adapter.stop()
+
+    asyncio.run(scenario())
+
+
 def test_a_reconnecting_client_starts_from_the_current_state() -> None:
     """Une reconnexion reçoit l'instantané courant dans ``hello``, puis les deltas."""
 

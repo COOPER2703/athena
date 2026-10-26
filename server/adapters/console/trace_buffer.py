@@ -15,12 +15,14 @@ les deux. C'est ce qui garantit l'absence de trou et de doublon à la connexion.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from collections import deque
-from collections.abc import AsyncIterator
 from typing import Deque
 
+from server.adapters.console.subscriptions import (
+    BoundedSubscription,
+    SubscriptionHub,
+)
 from server.core.ports import TraceEntry
 
 DEFAULT_TRACE_BUFFER = 500
@@ -53,7 +55,7 @@ def truncation_entry(dropped: int) -> TraceEntry:
     )
 
 
-class TraceSubscription(AsyncIterator[TraceEntry]):
+class TraceSubscription(BoundedSubscription[TraceEntry]):
     """File bornée d'un client : perd les plus anciennes entrées, pas les neuves.
 
     Un seul marqueur de troncature est émis par connexion, au premier
@@ -67,14 +69,8 @@ class TraceSubscription(AsyncIterator[TraceEntry]):
         backlog: tuple[TraceEntry, ...],
         capacity: int,
     ) -> None:
-        if capacity < 1:
-            raise ValueError("Trace buffer capacity must be >= 1")
+        super().__init__(capacity)
         self._backlog = backlog
-        self._capacity = capacity
-        self._queue: Deque[TraceEntry] = deque()
-        self._wakeup = asyncio.Event()
-        self._closed = False
-        self._dropped = 0
         self._marker_pending = False
         self._marker_sent = False
 
@@ -83,41 +79,19 @@ class TraceSubscription(AsyncIterator[TraceEntry]):
         """Entrées déjà présentes au moment exact de l'abonnement."""
         return self._backlog
 
-    def __aiter__(self) -> "TraceSubscription":
-        return self
+    def _has_pending(self) -> bool:
+        return bool(self._queue) or self._marker_pending
 
-    async def __anext__(self) -> TraceEntry:
-        while not self._queue and not self._closed:
-            self._wakeup.clear()
-            # Re-vérifier après ``clear`` : ``offer`` a pu remplir la file entre
-            # le test et l'effacement du drapeau.
-            if self._queue or self._closed:
-                break
-            await self._wakeup.wait()
-        if self._queue:
-            if self._marker_pending:
-                self._marker_pending = False
-                self._marker_sent = True
-                return truncation_entry(self._dropped)
-            return self._queue.popleft()
-        raise StopAsyncIteration
+    def _take(self) -> TraceEntry:
+        if self._marker_pending:
+            self._marker_pending = False
+            self._marker_sent = True
+            return truncation_entry(self._dropped)
+        return self._queue.popleft()
 
-    def offer(self, entry: TraceEntry) -> None:
-        """Ajoute une entrée ; jette la plus ancienne si la file est pleine."""
-        if self._closed:
-            return
-        if len(self._queue) >= self._capacity:
-            self._queue.popleft()
-            self._dropped += 1
-            if not self._marker_sent:
-                self._marker_pending = True
-        self._queue.append(entry)
-        self._wakeup.set()
-
-    def close(self) -> None:
-        """Réveille le lecteur et termine l'itération."""
-        self._closed = True
-        self._wakeup.set()
+    def _on_drop(self) -> None:
+        if not self._marker_sent:
+            self._marker_pending = True
 
 
 class TraceBuffer:
@@ -133,21 +107,16 @@ class TraceBuffer:
             raise ValueError("Trace buffer capacity must be >= 1")
         self._capacity = capacity
         self._entries: Deque[TraceEntry] = deque(maxlen=capacity)
-        self._subscribers: list[TraceSubscription] = []
-
-    @property
-    def capacity(self) -> int:
-        return self._capacity
+        self._subscribers: SubscriptionHub[TraceEntry] = SubscriptionHub()
 
     @property
     def subscriber_count(self) -> int:
-        return len(self._subscribers)
+        return self._subscribers.subscriber_count
 
     def emit(self, entry: TraceEntry) -> None:
         """Point d'entrée du fan-out : conserve puis diffuse l'entrée."""
         self._entries.append(entry)
-        for subscription in tuple(self._subscribers):
-            subscription.offer(entry)
+        self._subscribers.offer(entry)
 
     def subscribe(self) -> TraceSubscription:
         """Abonne un client : backlog figé + enregistrement, sans ``await``.
@@ -158,17 +127,13 @@ class TraceBuffer:
         entrée émise juste avant est déjà dans son backlog.
         """
         subscription = TraceSubscription(tuple(self._entries), self._capacity)
-        self._subscribers.append(subscription)
+        self._subscribers.add(subscription)
         return subscription
 
     def unsubscribe(self, subscription: TraceSubscription) -> None:
         """Retire un abonné à la déconnexion (aucune file ne fuit)."""
-        if subscription in self._subscribers:
-            self._subscribers.remove(subscription)
-        subscription.close()
+        self._subscribers.remove(subscription)
 
     def close(self) -> None:
         """Termine tous les abonnés : l'arrêt ferme proprement les sockets."""
-        for subscription in tuple(self._subscribers):
-            subscription.close()
-        self._subscribers.clear()
+        self._subscribers.close()

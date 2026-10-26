@@ -14,14 +14,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import Callable, Mapping
+
+from server.adapters.console.subscriptions import (
+    LatestValueSubscription,
+    SubscriptionHub,
+)
 
 # Tick par défaut : environ une seconde. Les tests injectent un intervalle plus
 # court pour rester rapides.
 DEFAULT_STATUS_INTERVAL = 1.0
 
 
-def stable_snapshot(snapshot: Mapping[str, object]) -> str:
+def snapshot_fingerprint(snapshot: Mapping[str, object]) -> str:
     """Empreinte déterministe d'un instantané JSON.
 
     Les clés sont triées : deux dicts de même contenu mais d'ordre d'insertion
@@ -53,76 +58,50 @@ class StatusBroadcaster:
             raise ValueError("Status interval must be > 0")
         self._snapshot = snapshot
         self._interval = interval
-        self._subscribers: list[StatusSubscription] = []
+        self._subscribers: SubscriptionHub[Mapping[str, object]] = SubscriptionHub()
         # Empreinte de départ, prise de façon synchrone à la construction : un
         # changement survenu après `start` sera donc vu au premier tick, même
         # si un client s'abonne entre-temps.
-        self._last = stable_snapshot(snapshot())
+        self._last = snapshot_fingerprint(snapshot())
 
     @property
     def subscriber_count(self) -> int:
-        return len(self._subscribers)
+        return self._subscribers.subscriber_count
 
     def subscribe(self) -> "StatusSubscription":
         subscription = StatusSubscription()
-        self._subscribers.append(subscription)
+        self._subscribers.add(subscription)
         return subscription
 
     def unsubscribe(self, subscription: "StatusSubscription") -> None:
-        if subscription in self._subscribers:
-            self._subscribers.remove(subscription)
-        subscription.close()
+        self._subscribers.remove(subscription)
 
     def close(self) -> None:
-        for subscription in tuple(self._subscribers):
-            subscription.close()
-        self._subscribers.clear()
+        self._subscribers.close()
+
+    def adopt(self, snapshot: Mapping[str, object]) -> None:
+        """Adopte l'instantané déjà servi par une trame ``hello``.
+
+        Un client reçoit l'état courant dans son ``hello`` : cet état devient la
+        référence du diffuseur. Un changement antérieur à la connexion ne
+        produit donc pas une trame ``status`` redondante au tick suivant.
+        """
+        self._last = snapshot_fingerprint(snapshot)
 
     async def run(self) -> None:
         """Tick de fond : compare, puis diffuse seulement en cas de changement."""
         while True:
             await asyncio.sleep(self._interval)
             current = self._snapshot()
-            fingerprint = stable_snapshot(current)
+            fingerprint = snapshot_fingerprint(current)
             if fingerprint == self._last:
                 continue
             self._last = fingerprint
             # Détache l'état de l'objet mutable de la racine : la trame envoyée
             # reflète le tick où le changement a été vu, pas un état plus tardif.
             payload = json.loads(fingerprint)
-            for subscription in tuple(self._subscribers):
-                subscription.offer(payload)
+            self._subscribers.offer(payload)
 
 
-class StatusSubscription(AsyncIterator[Mapping[str, object]]):
+class StatusSubscription(LatestValueSubscription[Mapping[str, object]]):
     """Abonné d'état : une seule valeur en attente, la plus récente."""
-
-    def __init__(self) -> None:
-        self._pending: Mapping[str, object] | None = None
-        self._wakeup = asyncio.Event()
-        self._closed = False
-
-    def __aiter__(self) -> "StatusSubscription":
-        return self
-
-    async def __anext__(self) -> Mapping[str, object]:
-        while self._pending is None and not self._closed:
-            self._wakeup.clear()
-            if self._pending is not None or self._closed:
-                break
-            await self._wakeup.wait()
-        if self._pending is None:
-            raise StopAsyncIteration
-        pending = self._pending
-        self._pending = None
-        return pending
-
-    def offer(self, snapshot: Mapping[str, object]) -> None:
-        if self._closed:
-            return
-        self._pending = snapshot
-        self._wakeup.set()
-
-    def close(self) -> None:
-        self._closed = True
-        self._wakeup.set()

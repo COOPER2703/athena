@@ -29,6 +29,7 @@ from server.app.config import (
     GeminiConfig,
     PluginsConfig,
     ServerConfig,
+    WebhookConfig,
 )
 from server.app.root import build_app
 from server.app.trace import build_trace_sink
@@ -407,6 +408,7 @@ def test_build_app_feeds_the_stream_from_the_single_trace_flow(
             gemini=GeminiConfig(api_key="test-key"),
             server=ServerConfig(host="127.0.0.1", port=_free_port()),
             console=ConsoleConfig(port=console_port),
+            webhook=WebhookConfig(enabled=False),
             plugins=PluginsConfig(
                 directory=str(tmp_path / "plugins"),
                 state_path=str(tmp_path / "plugins.json"),

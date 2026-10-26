@@ -7,8 +7,10 @@ import {
   emptyFeed,
   formatPayload,
   formatTimestamp,
+  isTraceLevel,
   isTruncation,
   resetOnHello,
+  traceLevelClass,
   type HelloFrame,
   type TraceEntry,
 } from "./trace";
@@ -71,6 +73,24 @@ describe("resetOnHello", () => {
 
     expect(resetOnHello(truncated, hello([])).truncated).toBe(0);
   });
+
+  it("incrémente la génération à chaque hello", () => {
+    const first = resetOnHello(emptyFeed(), hello([]));
+    const second = resetOnHello(first, hello([]));
+
+    expect(first.generation).toBe(1);
+    expect(second.generation).toBe(2);
+  });
+
+  it("borne aussi le backlog d'un hello et signale ce qu'il oublie", () => {
+    const backlog = Array.from({ length: 502 }, (_, index) => entry(`E${index}`));
+
+    const next = resetOnHello(emptyFeed(), hello(backlog));
+
+    expect(next.entries).toHaveLength(500);
+    expect(next.entries[0]?.kind).toBe("E2");
+    expect(next.browserDropped).toBe(2);
+  });
 });
 
 describe("applyTrace", () => {
@@ -83,13 +103,29 @@ describe("applyTrace", () => {
     expect(state.entries.map((item) => item.kind)).toEqual(["A", "B"]);
   });
 
-  it("conserve la borne en oubliant les plus anciennes", () => {
+  it("conserve la borne en signalant les entrées perdues côté navigateur", () => {
     const state = [entry("A"), entry("B"), entry("C")].reduce(
       (current, item) => applyTrace(current, item, 2),
       emptyFeed(),
     );
 
     expect(state.entries.map((item) => item.kind)).toEqual(["B", "C"]);
+    expect(state.browserDropped).toBe(1);
+  });
+
+  it("cumule les pertes navigateur et les remet à zéro à la reconnexion", () => {
+    const first = [entry("A"), entry("B"), entry("C")].reduce(
+      (current, item) => applyTrace(current, item, 2),
+      emptyFeed(),
+    );
+    const second = applyTrace(first, entry("D"), 2);
+
+    expect(second.entries.map((item) => item.kind)).toEqual(["C", "D"]);
+    expect(second.browserDropped).toBe(2);
+
+    const reconnected = resetOnHello(second, hello([entry("E")]));
+    expect(reconnected.browserDropped).toBe(0);
+    expect(reconnected.entries.map((item) => item.kind)).toEqual(["E"]);
   });
 
   it("accumule un marqueur de troncature sans l'afficher comme une trace", () => {
@@ -107,8 +143,16 @@ describe("applyTrace", () => {
   });
 });
 
-describe("formatTimestamp", () => {
-  it("affiche l'heure locale avec les millisecondes", () => {
+describe("niveaux de trace", () => {
+  it("borne la classe CSS aux niveaux connus", () => {
+    expect(isTraceLevel("warning")).toBe(true);
+    expect(traceLevelClass("error")).toBe("error");
+    expect(traceLevelClass("ERROR")).toBe("other");
+    expect(traceLevelClass("injection\" onclick=\"x")).toBe("other");
+  });
+});
+
+describe("formatTimestamp", () => {  it("affiche l'heure locale avec les millisecondes", () => {
     const seconds = 1_700_000_000.123;
     const date = new Date(seconds * 1000);
     const pad = (value: number, width = 2) =>

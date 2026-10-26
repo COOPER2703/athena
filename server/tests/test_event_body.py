@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from conftest import RecordingTraceSink
 from server.adapters import event_body
 from server.adapters.event_body import (
     INVALID_CONTENT_TYPE,
@@ -10,6 +11,7 @@ from server.adapters.event_body import (
     MAX_CONTENT_CHARS,
     AcceptedEvent,
     Rejection,
+    emit_event_received,
     not_serving,
     validate_event,
 )
@@ -92,6 +94,21 @@ def test_fixed_rejections_share_the_surfaces_policy() -> None:
 def test_not_serving_rejection_names_the_surface() -> None:
     assert not_serving("webhook") == Rejection(503, "webhook not serving")
     assert not_serving("console") == Rejection(503, "console not serving")
+
+
+def test_the_event_received_trace_is_shared_across_surfaces() -> None:
+    sink = RecordingTraceSink()
+
+    emit_event_received(
+        sink, "console", AcceptedEvent(source="maison", content="porte")
+    )
+    emit_event_received(
+        sink, "webhook", AcceptedEvent(source="maison", content="porte")
+    )
+
+    assert [entry.source for entry in sink.entries] == ["console", "webhook"]
+    assert {entry.kind for entry in sink.entries} == {"event_received"}
+    assert sink.entries[0].payload == {"source": "maison", "chars": 5}
 
 
 def test_validation_module_does_not_import_aiohttp() -> None:

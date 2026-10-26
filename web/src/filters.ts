@@ -108,6 +108,21 @@ export function resumeView(): FeedView {
 }
 
 /**
+ * Vue après un `hello` : un nouveau flux remplace l'ancien.
+ *
+ * La pause est une intention de l'utilisateur, pas un état du flux : elle est
+ * conservée, mais la vue gelée repart du nouveau backlog. Sans cela, une
+ * reconnexion pendant une pause laisserait affichées les traces du processus
+ * précédent, qui n'existent plus côté serveur.
+ */
+export function viewAfterHello(
+  view: FeedView,
+  entries: readonly TraceEntry[],
+): FeedView {
+  return view.paused ? pauseView(entries) : LIVE_VIEW;
+}
+
+/**
  * Traces à afficher.
  *
  * En pause, la source est l'instantané pris à la pause : les nouvelles traces

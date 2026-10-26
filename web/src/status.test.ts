@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   formatPluginState,
+  isPluginState,
   normalizeStatus,
   pluginStateClass,
   statusFromHello,
@@ -96,5 +97,11 @@ describe("plugin state labels", () => {
     expect(pluginStateClass("activated")).toBe("activated");
     expect(pluginStateClass("failed")).toBe("failed");
     expect(pluginStateClass("paused")).toBe("unknown");
+  });
+
+  it("reconnaît les seuls états du Plugin Registry", () => {
+    expect(isPluginState("missing")).toBe(true);
+    expect(isPluginState("paused")).toBe(false);
+    expect(isPluginState("__proto__")).toBe(false);
   });
 });

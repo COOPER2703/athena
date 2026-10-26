@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-from server.adapters.console.adapter import (
+from server.adapters.console.adapter import ConsoleAdapter
+from server.adapters.console.contract import (
     API_PREFIX,
     ENVELOPE_VERSION,
+    EVENTS_PATH,
     STATUS_PATH,
-    ConsoleAdapter,
+    STREAM_PATH,
 )
-from server.adapters.console.events import EVENTS_PATH
 
 __all__ = [
     "API_PREFIX",
     "ENVELOPE_VERSION",
     "EVENTS_PATH",
     "STATUS_PATH",
+    "STREAM_PATH",
     "ConsoleAdapter",
 ]

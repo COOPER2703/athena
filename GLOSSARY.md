@@ -113,10 +113,25 @@ _Avoid_: endpoint, callback, hook
 **Console web**:
 La surface d'observation du serveur : une page unique servie en HTTP/JSON et WebSocket sur
 un port dédié, liée à `127.0.0.1` par défaut, sans authentification en v1. Elle lit un
-**instantané gelé** de l'état (Session, Clients, Plugins, configuration non sensible) et le
-flux de traces. Ce n'est **pas un Client** : elle ne parle pas le Protocole partagé, ne
-s'enregistre pas, ne reçoit pas d'audio et ne démarre pas de Session (ADR-0003, ADR-0016).
+**instantané de lecture** de l'état (Session, Clients, Plugins, configuration non sensible)
+et le flux de **Traces** rejoué depuis le **Tampon de traces**. Ce n'est **pas un Client** :
+elle ne parle pas le Protocole partagé, ne s'enregistre pas, ne reçoit pas d'audio et ne
+démarre pas de Session (ADR-0003, ADR-0016).
 _Avoid_: dashboard, UI, interface web, client web
+
+**Trace**:
+Une entrée du flux d'observation : horodatage, Source, `kind`, niveau et payload. La Console
+la rejoue depuis le Tampon de traces ou la pousse en direct, telle quelle ; son niveau sert
+au filtrage et à la présentation, jamais à décider de sa conservation.
+_Avoid_: log, ligne de log, événement de log
+
+**Tampon de traces**:
+Le consommateur borné du flux unique de Traces, distinct du Journal : il garde les plus
+récentes pour les rejouer à la connexion d'un client, puis lui distribue le direct. Au-delà
+de sa borne, il perd les plus anciennes et le signale par un marqueur unique plutôt que de
+laisser croire à un historique complet. Sa borne navigateur est distincte et rendue visible
+côté page.
+_Avoid_: cache de logs, historique complet, buffer serveur
 
 **Session automatique**:
 Une Session ouverte par le noyau sans Wake word, lorsqu'un Événement est jugé digne d'être

@@ -1,12 +1,7 @@
 import { useEffect, useState } from "react";
 
+import { backoffDelay, connectionLabel, type ConnectionStatus } from "./connection";
 import { applyStreamFrame, initialStreamState, type StreamState } from "./stream";
-import {
-  backoffDelay,
-  connectionLabel,
-  type ConnectionStatus,
-  type StreamFrame,
-} from "./trace";
 
 /** Ce que la page consomme du flux : état, log et état de la connexion. */
 export interface ConsoleStream extends StreamState {
@@ -64,11 +59,9 @@ export function useConsoleStream(): ConsoleStream {
         } catch {
           return;
         }
-        if (typeof parsed !== "object" || parsed === null) {
-          return;
-        }
-        const frame = parsed as StreamFrame;
-        setStream((state) => applyStreamFrame(state, frame));
+        // `applyStreamFrame` valide la forme : une trame malformée ou d'un type
+        // inconnu rend le state inchangé, et React ne relance pas de rendu.
+        setStream((state) => applyStreamFrame(state, parsed));
       });
 
       ws.addEventListener("close", () => {
