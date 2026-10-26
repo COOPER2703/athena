@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from typing import Awaitable, Callable, Mapping
+from typing import Mapping
 
-from server.core.ports import ToolSpec
+from plugin_api import ToolHandler, ToolSpec
 
-ToolHandler = Callable[[Mapping[str, object]], Awaitable[Mapping[str, object]]]
+# ``ToolSpec`` et ``ToolHandler`` appartiennent au contrat public (``plugin_api``)
+# et sont ré-exportés ici pour les imports existants du noyau.
+
+__all__ = ["ToolHandler", "ToolNameConflict", "ToolRegistry", "ToolSpec"]
 
 
 class ToolNameConflict(ValueError):

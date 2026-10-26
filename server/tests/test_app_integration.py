@@ -382,8 +382,7 @@ def test_pushed_event_opens_a_proactive_auto_session_for_the_registered_client()
 FIXTURE_INSTRUCTION = "Utilise fixture__echo pour répéter."
 
 PLUGIN_CODE = '''
-from server.core.plugins import PluginBinding, ToolBinding
-from server.core.ports import ToolSpec
+from plugin_api import PluginBinding, ToolBinding, ToolSpec
 
 PARAMETERS = {
     "type": "object",

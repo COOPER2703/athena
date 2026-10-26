@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Mapping, NamedTuple, Protocol, Sequence
 
+from plugin_api import ToolSpec
 from protocol import SessionEndReason
+
+# ``ToolSpec`` appartient au contrat public (``plugin_api``) ; il est ré-exporté
+# ici pour que les imports existants du noyau continuent de marcher.
 
 
 class ClientLink(Protocol):
@@ -19,15 +23,6 @@ class ClientLink(Protocol):
     async def send_tool_call(
         self, client_id: str, tool_id: str, name: str, arguments_json: bytes
     ) -> None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class ToolSpec:
-    """Pure description of a Tool a model may call (registry seam, issue #28)."""
-
-    name: str
-    description: str
-    parameters: Mapping[str, object]
 
 
 class LlmSocket(Protocol):

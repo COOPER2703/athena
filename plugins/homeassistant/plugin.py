@@ -2,8 +2,8 @@
 
 Athena ne parle à Home Assistant que par l'endpoint MCP **Assist**
 (``/api/mcp/assist``), en Streamable HTTP stateless avec un token longue durée.
-Ce module ne connaît du serveur que les types du contrat de plugin
-(``PluginContext``, ``PluginBinding``) : il n'importe aucun interne.
+Ce module ne connaît du serveur que le contrat public des plugins
+(``plugin_api``) : il n'importe aucun interne.
 
 Le serveur HA est *stateless* : chaque opération (découverte, instruction,
 appel de Tool) ouvre sa propre session MCP. Rien n'est donc à surveiller, et un
@@ -30,8 +30,12 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
 from mcp_types import PaginatedRequestParams
 
-from server.core.plugins import PluginBinding, PluginContext, ToolBinding
-from server.core.ports import ToolSpec
+from plugin_api import (
+    PluginBinding,
+    PluginContext,
+    ToolBinding,
+    ToolSpec,
+)
 
 # Endpoint de l'API Assist : seul endpoint MCP qui ne demande pas de compte
 # administrateur et dont le périmètre est exactement l'Exposition Assist.

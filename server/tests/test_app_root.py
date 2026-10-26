@@ -676,8 +676,7 @@ def test_plugin_loader_receives_the_registry_and_the_event_canal() -> None:
 
 
 FIXTURE_PLUGIN_CODE = '''
-from server.core.plugins import PluginBinding, ToolBinding
-from server.core.ports import ToolSpec
+from plugin_api import PluginBinding, ToolBinding, ToolSpec
 
 
 async def handle(arguments):

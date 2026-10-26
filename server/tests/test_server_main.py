@@ -162,7 +162,7 @@ MANIFEST = {
 }
 
 EMPTY_PLUGIN_CODE = """
-from server.core.plugins import PluginBinding
+from plugin_api import PluginBinding
 
 create = lambda context: PluginBinding(name="fixture", tools=())
 """

@@ -46,8 +46,7 @@ def test_env_resolver_defaults_to_process_environment(
 
 
 PLUGIN_TEMPLATE = '''
-from server.core.plugins import PluginBinding, ToolBinding
-from server.core.ports import ToolSpec
+from plugin_api import PluginBinding, ToolBinding, ToolSpec
 
 
 async def handle(arguments):

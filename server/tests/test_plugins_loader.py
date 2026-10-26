@@ -15,8 +15,7 @@ from server.core.plugins import PluginRegistry
 FIXTURE_NAME = "fixture"
 
 FIXTURE_CODE = '''
-from server.core.plugins import PluginBinding, ToolBinding
-from server.core.ports import ToolSpec
+from plugin_api import PluginBinding, ToolBinding, ToolSpec
 
 
 async def handle(arguments):
@@ -257,8 +256,7 @@ def test_missing_required_config_key_fails_the_startup(tmp_path: Path) -> None:
 
 
 SECRET_CODE = '''
-from server.core.plugins import PluginBinding, ToolBinding
-from server.core.ports import ToolSpec
+from plugin_api import PluginBinding, ToolBinding, ToolSpec
 
 
 async def handle(arguments):
@@ -373,8 +371,7 @@ def test_malformed_manifest_fails_the_startup(tmp_path: Path) -> None:
 # Un plugin dont ``create`` échoue la première fois puis réussit : le cas d'une
 # plateforme injoignable au démarrage, qui se répare sans redémarrer Athena.
 FLAKY_CODE = '''
-from server.core.plugins import PluginBinding, ToolBinding
-from server.core.ports import ToolSpec
+from plugin_api import PluginBinding, ToolBinding, ToolSpec
 
 attempts = 0
 
@@ -406,8 +403,7 @@ def create(context):
 
 
 WRONG_BINDING_CODE = '''
-from server.core.plugins import PluginBinding, ToolBinding
-from server.core.ports import ToolSpec
+from plugin_api import PluginBinding, ToolBinding, ToolSpec
 
 attempts = 0
 
