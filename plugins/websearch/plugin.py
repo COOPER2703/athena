@@ -59,8 +59,24 @@ CREDITS_PER_DEPTH = {"fast": 1, "basic": 1, "advanced": 2}
 CACHE_MAX_ENTRIES = 32
 CACHE_TTL = 300.0
 
-# Clé de cache : requête normalisée, topic, fenêtre, langue et profondeur.
-CacheKey = tuple[str, str, str | None, str, str]
+
+@dataclass(frozen=True, slots=True)
+class CacheKey:
+    """Tout ce qui distingue deux recherches pour le moteur (ADR-0018).
+
+    Une dimension oubliée ici rendrait à une recherche la charge d'une autre :
+    la requête normalisée, le topic et la fenêtre viennent du modèle ; la
+    langue, la profondeur, le pays et le filtre strict, de la configuration.
+    """
+
+    query: str
+    topic: str
+    time_range: str | None
+    language: str
+    search_depth: str
+    country: str
+    strict_language: bool
+
 
 TOOL_NAME = "web_search"
 TOOL_DESCRIPTION = (
@@ -371,12 +387,14 @@ def _cache_key(
     time_range: str | None,
 ) -> CacheKey:
     """Deux recherches ne se confondent que si tous leurs paramètres concordent."""
-    return (
-        _normalize_query(query),
-        topic,
-        time_range,
-        settings.language,
-        settings.search_depth,
+    return CacheKey(
+        query=_normalize_query(query),
+        topic=topic,
+        time_range=time_range,
+        language=settings.language,
+        search_depth=settings.search_depth,
+        country=settings.country,
+        strict_language=settings.strict_language,
     )
 
 

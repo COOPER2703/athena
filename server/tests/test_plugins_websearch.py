@@ -1272,6 +1272,57 @@ def test_language_and_depth_are_part_of_the_cache_key(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_country_and_strict_language_are_part_of_the_cache_key(
+    tmp_path: Path,
+) -> None:
+    """Même requête, même langue : seul le biais de classement change.
+
+    ``country`` et ``strict_language`` partent dans le corps de ``POST /search``
+    comme les autres réglages : deux configurations qui n'en diffèrent que par
+    l'un des deux ne peuvent pas se rendre la charge de l'autre.
+    """
+
+    async def scenario() -> None:
+        async with TavilyStub() as stub:
+            plugin_dir = tmp_path / "focused-plugin"
+            shutil.copytree(PLUGIN_DIR, plugin_dir)
+            module = _load_plugin_module(plugin_dir)
+            traces: list[tuple[str, dict[str, Any]]] = []
+            plain = await module.create(_plugin_context(stub, traces))
+            british = await module.create(
+                _plugin_context(stub, traces, country="united kingdom")
+            )
+            strict = await module.create(
+                _plugin_context(stub, traces, strict_language="1")
+            )
+            arguments = {"query": "même question"}
+
+            await plain.tools[0].handler(arguments)
+            await british.tools[0].handler(arguments)
+            await strict.tools[0].handler(arguments)
+            # Mêmes réglages que le premier : celui-ci doit toucher le cache.
+            await plain.tools[0].handler(arguments)
+
+            assert len(stub.search_requests) == 3
+            assert [
+                (body["country"], body["filter_by_language"])
+                for body in (request["body"] for request in stub.search_requests)
+            ] == [
+                ("france", False),
+                ("united kingdom", False),
+                ("france", True),
+            ]
+            searches = [payload for kind, payload in traces if kind == "Search"]
+            assert [search["cache"] for search in searches] == [
+                "miss",
+                "miss",
+                "miss",
+                "hit",
+            ]
+
+    asyncio.run(scenario())
+
+
 def _load_plugin_module(plugin_dir: Path) -> Any:
     """Importe le point d'entrée copié, hors du chargeur, pour ``create()``."""
     module_name = "athena_plugin_websearch_focused"
