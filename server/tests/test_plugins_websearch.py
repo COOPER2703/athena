@@ -940,12 +940,13 @@ def test_a_long_excerpt_stops_at_600_on_a_clean_end_and_is_flagged(
     asyncio.run(scenario())
 
 
-def test_excerpt_budget_never_exceeds_6000_and_keeps_every_title_and_url(
+def test_excerpt_budget_never_exceeds_6000_and_caps_results_at_ten(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        # Un moteur qui rend plus que demandé : le budget total doit tenir
-        # quand même, sans perdre un seul titre ni une seule URL.
+        # Un moteur qui rend plus que demandé : dix résultats au maximum
+        # nourrissent la réponse (story 25), et le budget total tient quand
+        # même sans perdre un seul titre ni une seule URL des dix gardés.
         results = tuple(
             {
                 "title": f"Source {index} — Tournoi",
@@ -970,8 +971,10 @@ def test_excerpt_budget_never_exceeds_6000_and_keeps_every_title_and_url(
 
                 assert payload["status"] == "ok"
                 returned = payload["results"]
+                assert payload["count"] == 10
+                # Les dix premiers du moteur, dans son ordre ; jamais le onzième.
                 assert [(item["title"], item["url"]) for item in returned] == [
-                    (item["title"], item["url"]) for item in results
+                    (item["title"], item["url"]) for item in results[:10]
                 ]
                 assert sum(len(item["excerpt"]) for item in returned) <= 6000
                 assert all(item["truncated"] is True for item in returned)

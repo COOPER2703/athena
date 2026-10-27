@@ -522,9 +522,11 @@ def _extracts(body: object) -> list[dict[str, object]]:
     Une réponse sans liste ``results`` est *illisible*, pas vide : la confondre
     avec zéro résultat ferait passer une panne pour une absence d'information.
     ``published_date`` n'apparaît que si le moteur la fournit ; l'absence de
-    date ne fait jamais disparaître un résultat. Un extrait coupé porte
+    date ne fait jamais disparaître un résultat. Dix résultats au plus
+    nourrissent la réponse, dans l'ordre du moteur. Un extrait coupé porte
     ``truncated`` : le modèle sait que le texte n'est pas complet, et un
-    résultat intact ne porte jamais de faux indicateur.
+    résultat intact — ou laissé sans extrait — ne porte jamais de faux
+    indicateur.
     """
     if not isinstance(body, dict) or not isinstance(body.get("results"), list):
         raise ValueError("unexpected search body")
@@ -532,6 +534,8 @@ def _extracts(body: object) -> list[dict[str, object]]:
     extracts: list[dict[str, object]] = []
     remaining = MAX_EXCERPT_TOTAL
     for item in raw:
+        if len(extracts) >= MAX_RESULTS:
+            break
         if not isinstance(item, dict):
             continue
         # Le budget total se partage dans l'ordre du moteur : un résultat
@@ -546,7 +550,7 @@ def _extracts(body: object) -> list[dict[str, object]]:
             "url": str(item.get("url") or ""),
             "excerpt": excerpt,
         }
-        if truncated:
+        if truncated and excerpt:
             extract["truncated"] = True
         published = item.get("published_date")
         if isinstance(published, str) and published.strip():
