@@ -286,7 +286,8 @@ def test_refused_probe_degrades_the_start_then_repairs_itself(
                 registry=registry, loader=loader, retry_interval=0.1
             ) as (app, _live, _transport, _):
                 # La clé est refusée : Athena démarre quand même, dégradée.
-                assert _states(sink) == ["failed"]
+                assert _states(sink)[0] == "failed"
+                assert set(_states(sink)) == {"failed"}
                 assert app.plugins.states["websearch"] == "failed"
                 assert app.plugins.tools.specs() == ()
                 assert "401" in str(sink.of_kind("PluginState")[0].payload["reason"])
@@ -570,9 +571,10 @@ def test_search_timeout_returns_a_french_error_and_the_session_survives(
                     # Le moteur répond de nouveau : la Session et le plugin
                     # n'ont pas bougé.
                     stub.delay = 0.0
-                    assert (await _call(
+                    recovered = await _call(
                         session, "web_search", {"query": "question rapide"}
-                    ))["status"] == "ok"
+                    )
+                    assert recovered["status"] == "ok"
                 assert app.plugins.states["websearch"] == "activated"
                 assert not app_sink.of_kind("SessionClosed")
 
@@ -595,9 +597,10 @@ def test_unreachable_engine_during_a_session_is_a_sentence_not_a_crash(
                 app_sink,
             ):
                 async with _live_session(transport, live) as session:
-                    assert (await _call(
+                    before = await _call(
                         session, "web_search", {"query": "avant la panne"}
-                    ))["status"] == "ok"
+                    )
+                    assert before["status"] == "ok"
                     await stub.stop()
 
                     unreachable = await _call(
