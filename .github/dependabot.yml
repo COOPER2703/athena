@@ -2,12 +2,16 @@ version: 2
 # Une seule PR par groupe et par semaine : moins de bruit, et un seul run CI
 # à valider par écosystème.
 updates:
-  - package-ecosystem: "pip"
+  # Écosystème `uv` et non `pip` : Dependabot met à jour `uv.lock`, le seul
+  # état réellement exécuté (et audité par le job `python-audit`), au lieu de
+  # relever les planchers de pyproject.toml à chaque sortie de version.
+  - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 5
+    versioning-strategy: lockfile-only
     groups:
       python-minor:
         applies-to: version-updates
