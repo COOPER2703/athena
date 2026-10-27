@@ -32,9 +32,11 @@ from argon2.exceptions import InvalidHashError, VerificationError
 
 from server.adapters.trace import NullTraceSink, emit
 from server.core.ports import (
+    AccessToken,
     Account,
     AuthenticatedTicket,
     AuthError,
+    IssuedAccessToken,
     IssuedTicket,
     TraceSink,
 )
@@ -50,6 +52,19 @@ DEFAULT_PASSWORD_MIN_LENGTH = 12
 DEFAULT_LOGIN_MAX_ATTEMPTS = 5
 DEFAULT_LOGIN_BLOCK_SECONDS = 15 * 60
 DEFAULT_SETUP_MAX_ATTEMPTS = 5
+# Dernière utilisation d'un Jeton : écrite au plus une fois par minute et par
+# Jeton, pour ne pas dégrader le transport avec de l'observabilité (spec #75).
+DEFAULT_LAST_USED_RESOLUTION_SECONDS = 60
+
+# Préfixe lisible d'un Jeton d'accès : ``ath_`` rend une fuite accidentelle
+# détectable par une simple recherche de chaîne (spec #75, « Secrets »).
+TOKEN_PREFIX = "ath_"
+# Le préfixe affichable garde ``ath_`` et huit caractères du secret : assez pour
+# reconnaître un Jeton dans la liste, trop peu pour le reconstituer.
+TOKEN_DISPLAY_PREFIX_LENGTH = len(TOKEN_PREFIX) + 8
+# 256 bits d'entropie, comme les secrets de Ticket Console.
+TOKEN_SECRET_BYTES = 32
+TOKEN_KINDS = frozenset({"client", "source"})
 
 TRACE_SOURCE = "auth"
 
@@ -96,6 +111,25 @@ def _digest(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
+def _new_token_secret() -> str:
+    """Secret de Jeton : 256 bits, préfixé ``ath_`` pour être reconnaissable."""
+    return TOKEN_PREFIX + secrets.token_urlsafe(TOKEN_SECRET_BYTES)
+
+
+def _token_from_row(row: tuple[object, ...]) -> AccessToken:
+    """Traduit une ligne ``access_tokens`` en Jeton public (sans empreinte)."""
+    return AccessToken(
+        id=str(row[0]),
+        name=str(row[1]),
+        kind=str(row[2]),
+        source=None if row[3] is None else str(row[3]),
+        prefix=str(row[4]),
+        created_at=float(row[5]),
+        last_used_at=None if row[6] is None else float(row[6]),
+        revoked_at=None if row[7] is None else float(row[7]),
+    )
+
+
 class _Attempts:
     """Compteur d'échecs en mémoire, par clé (nom d'utilisateur ou installation)."""
 
@@ -127,6 +161,7 @@ class SqliteAuthStore:
         login_max_attempts: int = DEFAULT_LOGIN_MAX_ATTEMPTS,
         login_block_seconds: float = DEFAULT_LOGIN_BLOCK_SECONDS,
         setup_max_attempts: int = DEFAULT_SETUP_MAX_ATTEMPTS,
+        last_used_resolution_seconds: float = DEFAULT_LAST_USED_RESOLUTION_SECONDS,
     ) -> None:
         self._db_path = db_path
         self._trace_sink: TraceSink = trace_sink or NullTraceSink()
@@ -137,6 +172,7 @@ class SqliteAuthStore:
         self._login_max_attempts = login_max_attempts
         self._login_block = login_block_seconds
         self._setup_max_attempts = setup_max_attempts
+        self._last_used_resolution = last_used_resolution_seconds
         # Paramètres par défaut de la bibliothèque : Argon2id, mémoire dure.
         self._hasher = PasswordHasher()
         self._db: sqlite3.Connection | None = None
@@ -274,6 +310,129 @@ class SqliteAuthStore:
                 "UPDATE console_tickets SET revoked_at = ?"
                 " WHERE secret_hash = ? AND revoked_at IS NULL",
                 (now, _digest(secret)),
+            )
+            db.commit()
+
+    # --- Jetons d'accès (spec #75, ticket #78) -----------------------------
+
+    async def list_tokens(self) -> list[AccessToken]:
+        """Liste les Jetons, du plus récent au plus ancien, sans secret."""
+        with self._lock:
+            rows = self._get_db().execute(
+                "SELECT id, name, kind, source, prefix, created_at,"
+                " last_used_at, revoked_at"
+                " FROM access_tokens ORDER BY created_at DESC, rowid DESC"
+            ).fetchall()
+        return [_token_from_row(row) for row in rows]
+
+    async def create_token(
+        self, *, name: str, kind: str, source: str | None = None
+    ) -> IssuedAccessToken:
+        """Crée un Jeton et renvoie son secret en clair, une seule fois.
+
+        La source est l'autorité du Webhook : elle est obligatoire pour la
+        nature ``source`` et interdite pour ``client``, pour qu'un Jeton ne
+        puisse pas changer de surface à l'usage.
+        """
+        name = name.strip()
+        if not name:
+            raise AuthError("invalid_token_name")
+        if kind not in TOKEN_KINDS:
+            raise AuthError("invalid_kind")
+        source = source.strip() if isinstance(source, str) else None
+        if kind == "source":
+            if not source:
+                raise AuthError("invalid_source")
+        elif source:
+            raise AuthError("invalid_source")
+
+        now = self._now()
+        secret = _new_token_secret()
+        token = AccessToken(
+            id=secrets.token_hex(16),
+            name=name,
+            kind=kind,
+            source=source if kind == "source" else None,
+            prefix=secret[:TOKEN_DISPLAY_PREFIX_LENGTH],
+            created_at=now,
+        )
+        with self._lock:
+            db = self._get_db()
+            db.execute(
+                "INSERT INTO access_tokens"
+                " (id, name, kind, source, prefix, secret_hash, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    token.id,
+                    token.name,
+                    token.kind,
+                    token.source,
+                    token.prefix,
+                    _digest(secret),
+                    now,
+                ),
+            )
+            db.commit()
+        return IssuedAccessToken(token=token, secret=secret)
+
+    async def revoke_token(self, token_id: str) -> AccessToken | None:
+        """Révoque un Jeton ; ``None`` si l'identifiant est inconnu.
+
+        La première révocation fait foi : révoquer deux fois garde la date
+        d'origine. La validation suivante refuse le Jeton, sans redémarrage.
+        """
+        now = self._now()
+        with self._lock:
+            db = self._get_db()
+            db.execute(
+                "UPDATE access_tokens SET revoked_at = ?"
+                " WHERE id = ? AND revoked_at IS NULL",
+                (now, token_id),
+            )
+            db.commit()
+            row = db.execute(
+                "SELECT id, name, kind, source, prefix, created_at,"
+                " last_used_at, revoked_at"
+                " FROM access_tokens WHERE id = ?",
+                (token_id,),
+            ).fetchone()
+        return None if row is None else _token_from_row(row)
+
+    async def authenticate_token(
+        self, secret: str, kind: str
+    ) -> AccessToken | None:
+        """Résout un secret en Jeton de la nature demandée, ou ``None``.
+
+        Un Jeton inconnu, révoqué ou d'une autre nature est refusé : la
+        révocation est donc réelle dès la requête suivante, sans cache.
+        """
+        if not secret or kind not in TOKEN_KINDS:
+            return None
+        with self._lock:
+            row = self._get_db().execute(
+                "SELECT id, name, kind, source, prefix, created_at,"
+                " last_used_at, revoked_at"
+                " FROM access_tokens"
+                " WHERE secret_hash = ? AND kind = ? AND revoked_at IS NULL",
+                (_digest(secret), kind),
+            ).fetchone()
+        return None if row is None else _token_from_row(row)
+
+    async def mark_token_used(self, token_id: str) -> None:
+        """Enregistre la dernière utilisation, au plus une fois par minute.
+
+        Le contrôle et l'écriture sont une seule requête : deux appels
+        concurrents ne peuvent pas produire deux écritures rapprochées. Un
+        Jeton révoqué n'est plus marqué.
+        """
+        now = self._now()
+        with self._lock:
+            db = self._get_db()
+            db.execute(
+                "UPDATE access_tokens SET last_used_at = ?"
+                " WHERE id = ? AND revoked_at IS NULL"
+                " AND (last_used_at IS NULL OR last_used_at <= ?)",
+                (now, token_id, now - self._last_used_resolution),
             )
             db.commit()
 

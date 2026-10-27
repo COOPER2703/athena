@@ -240,6 +240,38 @@ class IssuedTicket:
 
 
 @dataclass(frozen=True, slots=True)
+class AccessToken:
+    """Un Jeton d'accès tel que la Console le montre.
+
+    Le secret et son empreinte n'y figurent **jamais** : seul le préfixe
+    affichable reste, pour qu'un humain reconnaisse le Jeton sans pouvoir s'en
+    servir. ``source`` n'est renseignée que pour la nature ``source`` (Webhook) ;
+    ``revoked_at`` porte la révocation, qui reste visible après coup.
+    """
+
+    id: str
+    name: str
+    kind: str
+    source: str | None
+    prefix: str
+    created_at: float
+    last_used_at: float | None = None
+    revoked_at: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class IssuedAccessToken:
+    """Jeton fraîchement créé, avec son secret en clair (une seule fois).
+
+    Le secret n'est ni relisible ni stocké : la surface l'affiche une fois puis
+    l'oublie. ``token`` est la ligne durable, sans secret.
+    """
+
+    token: AccessToken
+    secret: str
+
+
+@dataclass(frozen=True, slots=True)
 class AuthenticatedTicket:
     """Ticket Console valide, résolu en Compte.
 
@@ -258,8 +290,10 @@ class AuthService(Protocol):
 
     Les adaptateurs (Console, transport, Webhook) ne connaissent que cette
     interface, jamais le schéma SQL ni Argon2. L'implémentation vit dans
-    ``server/adapters/auth``. Les Jetons d'accès (tickets #78/#79/#80) et le
-    changement de mot de passe (#77) s'ajouteront ici de façon additive.
+    ``server/adapters/auth``. Les Ticket Console (#76), les Jetons d'accès
+    (#78) et le changement de mot de passe (#77) sont déclarés ici de façon
+    additive ; les consommateurs de Jetons (#79 transport, #80 Webhook) n'ont
+    que ``authenticate_token`` et ``mark_token_used`` à appeler.
     """
 
     @property
@@ -316,4 +350,46 @@ class AuthService(Protocol):
 
     async def revoke_ticket(self, secret: str) -> None:
         """Révoque un Ticket Console (déconnexion du navigateur courant)."""
+        ...
+
+    async def list_tokens(self) -> list[AccessToken]:
+        """Liste les Jetons d'accès, révoqués compris, sans secret ni empreinte."""
+        ...
+
+    async def create_token(
+        self, *, name: str, kind: str, source: str | None = None
+    ) -> IssuedAccessToken:
+        """Crée un Jeton nommé et renvoie son secret en clair, une seule fois.
+
+        ``kind`` vaut ``client`` (transport des Clients) ou ``source`` (Webhook) ;
+        ``source`` est obligatoire pour ``source``, interdite pour ``client``.
+        Lève ``AuthError`` : ``invalid_token_name``, ``invalid_kind``,
+        ``invalid_source``.
+        """
+        ...
+
+    async def revoke_token(self, token_id: str) -> AccessToken | None:
+        """Révoque un Jeton ; ``None`` si l'identifiant est inconnu.
+
+        La révocation prend effet à la validation suivante, sans redémarrage. Un
+        Jeton déjà révoqué garde sa date de révocation d'origine.
+        """
+        ...
+
+    async def authenticate_token(
+        self, secret: str, kind: str
+    ) -> AccessToken | None:
+        """Résout un secret en Jeton de la nature demandée, ou ``None``.
+
+        Refuse un secret inconnu, révoqué, ou d'une autre nature : un Jeton
+        ``source`` ne vaut pas pour le transport, et réciproquement.
+        """
+        ...
+
+    async def mark_token_used(self, token_id: str) -> None:
+        """Enregistre la dernière utilisation, au plus une fois par minute.
+
+        Le transport et le Webhook appellent ceci après chaque usage ; l'écriture
+        est bornée par la résolution du store pour ne pas écrire par trame.
+        """
         ...
