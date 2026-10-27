@@ -23,8 +23,10 @@ diagnose a past run without access to the server terminal.
 ### Console web
 
 La Console web est une surface d'observation (ADR-0003), distincte du Webhook. Elle
-écoute par défaut sur `127.0.0.1:8767`, **activée**, sans authentification en v1. Sa
-configuration suit le même schéma que le Webhook :
+écoute par défaut sur `127.0.0.1:8767`, **activée**. Depuis la spec #75, elle exige un
+**Ticket Console** (cookie `HttpOnly; Secure; SameSite=Strict`) pour toute route d'API
+hors identité : seule la SPA, `/healthz`, `/api/session`, `/api/setup` et `/api/login`
+restent publiques. Sa configuration suit le même schéma que le Webhook :
 
 - `ATHENA_CONSOLE_ENABLED` : `1` par défaut ; `0` désactive complètement la surface.
 - `ATHENA_CONSOLE_HOST` : `127.0.0.1` par défaut (loopback ; ne l'ouvrir au réseau qu'en
@@ -40,6 +42,25 @@ Le Webhook reste séparé (`ATHENA_WEBHOOK_ENABLED`, `ATHENA_WEBHOOK_HOST`,
 `ATHENA_WEBHOOK_PORT`, `127.0.0.1:8766` par défaut). Le contrat JSON de la Console
 commence par `GET /api/status` ; le front vit dans `web/` et n'est pas requis pour que
 l'API réponde.
+
+### Authentification
+
+Le module d'auth vit dans `server/adapters/auth/` (port `AuthService` dans
+`server/core/ports.py`). Il possède sa propre base SQLite, **distincte de la mémoire** :
+`ATHENA_AUTH_DB` (`auth.db` par défaut, relatif au répertoire de travail). Les tables
+(Comptes, Tickets Console, Jetons d'accès) sont créées par `CREATE TABLE IF NOT EXISTS`,
+sans migration. Au démarrage sans Compte, un Code d'installation à usage unique est écrit
+dans le journal (`logs/server.log`) sous `[auth] InstallationCode` ; il n'est plus jamais
+émis dès qu'un Compte existe.
+
+- `ATHENA_CONSOLE_TICKET_DAYS` : `30` jours glissants par défaut.
+- `ATHENA_CONSOLE_TICKET_REFRESH_SECONDS` : `3600` (l'expiration n'est repoussée qu'au
+  plus une fois par heure).
+- `ATHENA_AUTH_PASSWORD_MIN_LENGTH` : `12` caractères minimum, imposés côté serveur
+  (hachage Argon2id).
+- `ATHENA_AUTH_LOGIN_MAX_ATTEMPTS` : `5` échecs avant blocage.
+- `ATHENA_AUTH_LOGIN_BLOCK_MINUTES` : `15` minutes de blocage, levé automatiquement.
+- `ATHENA_AUTH_SETUP_MAX_ATTEMPTS` : `5` tentatives d'installation avant blocage.
 
 ### Front (`web/`)
 

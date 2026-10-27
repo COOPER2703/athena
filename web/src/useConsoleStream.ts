@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { backoffDelay, connectionLabel, type ConnectionStatus } from "./connection";
 import { applyStreamFrame, initialStreamState, type StreamState } from "./stream";
@@ -7,6 +7,16 @@ import { applyStreamFrame, initialStreamState, type StreamState } from "./stream
 export interface ConsoleStream extends StreamState {
   connection: ConnectionStatus;
   connectionLabel: string;
+}
+
+/** Options d'ouverture du flux. */
+export interface ConsoleStreamOptions {
+  /**
+   * Appelé quand la connexion se ferme **sans avoir jamais été ouverte** :
+   * le handshake a été refusé (401) avant l'upgrade. La page en profite pour
+   * vérifier le Ticket Console et revenir à l'écran de connexion.
+   */
+  onClosedBeforeOpen?: () => void;
 }
 
 /** URL du flux vivant, sur la même origine que la page servie par la Console. */
@@ -23,20 +33,28 @@ function streamUrl(): string {
  * serveur, la page se resynchronise seule sans rechargement. Une trame `status`
  * met à jour la Session et les panneaux sans toucher au flux de traces.
  */
-export function useConsoleStream(): ConsoleStream {
+export function useConsoleStream(
+  options: ConsoleStreamOptions = {},
+): ConsoleStream {
   const [stream, setStream] = useState<StreamState>(initialStreamState);
   const [connection, setConnection] = useState<ConnectionStatus>("connecting");
+  // Le callback vit dans une ref : l'effet ne se réexécute pas à chaque rendu
+  // du parent, et la connexion n'est ouverte qu'une fois.
+  const closedBeforeOpen = useRef(options.onClosedBeforeOpen);
+  closedBeforeOpen.current = options.onClosedBeforeOpen;
 
   useEffect(() => {
     let disposed = false;
     let socket: WebSocket | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let failures = 0;
+    let opened = false;
 
     const connect = () => {
       if (disposed) {
         return;
       }
+      opened = false;
       setConnection(failures === 0 ? "connecting" : "reconnecting");
       const ws = new WebSocket(streamUrl());
       socket = ws;
@@ -45,6 +63,7 @@ export function useConsoleStream(): ConsoleStream {
         if (disposed) {
           return;
         }
+        opened = true;
         failures = 0;
         setConnection("connected");
       });
@@ -67,6 +86,9 @@ export function useConsoleStream(): ConsoleStream {
       ws.addEventListener("close", () => {
         if (disposed) {
           return;
+        }
+        if (!opened) {
+          closedBeforeOpen.current?.();
         }
         if (typeof navigator !== "undefined" && !navigator.onLine) {
           setConnection("disconnected");

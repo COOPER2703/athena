@@ -39,7 +39,7 @@ export type EventValidation = ValidEvent | InvalidEvent;
 /** Résultat d'une tentative d'injection, prêt à afficher. */
 export type SubmissionResult =
   | { ok: true; message: string }
-  | { ok: false; message: string };
+  | { ok: false; message: string; unauthorized?: boolean };
 
 /** Nombre de caractères utiles : les espaces de bord ne comptent pas. */
 export function characterCount(content: string): number {
@@ -128,5 +128,9 @@ export async function submitDraft(
   } catch {
     body = null;
   }
-  return { ok: false, message: eventErrorMessage(response.status, body) };
+  return {
+    ok: false,
+    message: eventErrorMessage(response.status, body),
+    ...(response.status === 401 ? { unauthorized: true } : {}),
+  };
 }
