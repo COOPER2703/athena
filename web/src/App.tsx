@@ -50,6 +50,14 @@ export function App() {
     setPhase({ phase: "login", message: UNAUTHORIZED_MESSAGE });
   }, []);
 
+  // Déconnexion voulue : le serveur a déjà effacé le cookie, on revient au
+  // login sans message d'expiration.
+  const handleSignedOut = useCallback((message?: string) => {
+    setPhase(
+      message === undefined ? { phase: "login" } : { phase: "login", message },
+    );
+  }, []);
+
   if (phase.phase === "loading") {
     return (
       <main className="auth">
@@ -88,6 +96,7 @@ export function App() {
     <ConsoleScreen
       username={phase.username}
       onUnauthorized={handleUnauthorized}
+      onSignedOut={handleSignedOut}
     />
   );
 }
