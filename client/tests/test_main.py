@@ -10,6 +10,7 @@ import pytest
 from client.__main__ import _build_app, _enter_loop, cli, main
 from client.app import ClientApp
 from client.config import AppConfig
+from client.ws_client import MissingAccessTokenError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -31,9 +32,29 @@ class FailingApp:
         raise RuntimeError("transport down")
 
 
-def test_build_app_returns_client_app() -> None:
+def test_build_app_returns_client_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ATHENA_ACCESS_TOKEN", "ath_secret")
     app = _build_app(AppConfig())
     assert isinstance(app, ClientApp)
+
+
+def test_build_app_refuses_to_start_without_an_access_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ATHENA_ACCESS_TOKEN", raising=False)
+    with pytest.raises(MissingAccessTokenError) as excinfo:
+        _build_app(AppConfig())
+    assert "ATHENA_ACCESS_TOKEN" in str(excinfo.value)
+
+
+def test_cli_reports_a_missing_access_token(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("ATHENA_ACCESS_TOKEN", raising=False)
+    with pytest.raises(SystemExit) as excinfo:
+        cli()
+    assert excinfo.value.code == 2
+    assert "ATHENA_ACCESS_TOKEN" in capsys.readouterr().err
 
 
 def test_entrypoints_are_exposed() -> None:

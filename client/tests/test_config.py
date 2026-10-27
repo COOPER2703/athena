@@ -15,10 +15,12 @@ def test_backoff_delays_grow_exponentially_then_cap() -> None:
 def test_client_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("WS_SERVER_URL", raising=False)
     monkeypatch.delenv("CLIENT_NAME", raising=False)
+    monkeypatch.delenv("ATHENA_ACCESS_TOKEN", raising=False)
     cfg = ClientConfig()
     assert cfg.server_url == "ws://localhost:8765"
     assert cfg.client_name == "desktop"
     assert cfg.platform == "desktop"
+    assert cfg.access_token == ""
 
 
 def test_client_config_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -27,6 +29,13 @@ def test_client_config_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = ClientConfig()
     assert cfg.server_url == "ws://example:1234"
     assert cfg.client_name == "laptop"
+
+
+def test_client_config_reads_the_access_token_from_its_dedicated_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATHENA_ACCESS_TOKEN", "ath_secret")
+    assert ClientConfig().access_token == "ath_secret"
 
 
 def test_audio_config_uses_pcm16_mono_rates() -> None:

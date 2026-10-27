@@ -6,6 +6,7 @@ from typing import Awaitable, Callable, Protocol
 
 import websockets
 from websockets.asyncio.client import ClientConnection
+from websockets.exceptions import InvalidStatus
 
 from protocol import (
     Audio,
@@ -24,11 +25,41 @@ from protocol import (
     encode,
 )
 
-from client.config import ClientConfig
+from client.config import ACCESS_TOKEN_ENV, ClientConfig
 
 log = logging.getLogger("athena.client")
 
-Connector = Callable[[str], Awaitable[ClientConnection]]
+
+class AccessTokenError(RuntimeError):
+    """Le Client ne peut pas s'authentifier auprès du transport."""
+
+
+class MissingAccessTokenError(AccessTokenError):
+    """Aucun Jeton d'accès n'est configuré : le Client refuse de démarrer."""
+
+
+class AccessTokenRefusedError(AccessTokenError):
+    """Le serveur a refusé le Jeton au handshake (401)."""
+
+
+def require_access_token(client: ClientConfig) -> str:
+    """Rend le Jeton configuré, ou lève un message qui dit où le récupérer."""
+    token = client.access_token.strip()
+    if not token:
+        raise MissingAccessTokenError(
+            "Jeton d'accès manquant : définissez la variable d'environnement "
+            f"{ACCESS_TOKEN_ENV} avec un Jeton de nature « client » créé dans "
+            "la Console (Jetons d'accès → créer un Jeton)."
+        )
+    return token
+
+
+def authorization_headers(token: str) -> dict[str, str]:
+    """En-tête du handshake : le Jeton ne transite jamais par l'URL."""
+    return {"Authorization": f"Bearer {token}"}
+
+
+Connector = Callable[..., Awaitable[ClientConnection]]
 Sleeper = Callable[[float], Awaitable[None]]
 
 
@@ -117,6 +148,11 @@ class WsTransport:
         while self._running:
             try:
                 await self.connect()
+            except AccessTokenError:
+                # Un Jeton absent ou refusé ne se répare pas en réessayant :
+                # retenter en boucle masquerait la cause derrière du bruit.
+                self._running = False
+                raise
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -140,6 +176,7 @@ class WsTransport:
         self._running = False
 
     async def connect(self) -> None:
+        token = require_access_token(self._client)
         await self._cancel_task(self._recv_task)
         await self._cancel_task(self._ping_task)
         self._recv_task = None
@@ -147,7 +184,19 @@ class WsTransport:
         self._client_id = None
         self._closed.clear()
 
-        self._ws = await self._connect(self._client.server_url)
+        try:
+            self._ws = await self._connect(
+                self._client.server_url,
+                additional_headers=authorization_headers(token),
+            )
+        except InvalidStatus as exc:
+            if exc.response.status_code != 401:
+                raise
+            raise AccessTokenRefusedError(
+                "Jeton d'accès refusé par le serveur (401) : il est inconnu, "
+                "révoqué, ou n'a pas la nature « client ». Créez-en un nouveau "
+                f"dans la Console, puis mettez à jour {ACCESS_TOKEN_ENV}."
+            ) from exc
         self._connected.set()
 
         await self._send(
