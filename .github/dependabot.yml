@@ -12,6 +12,16 @@ updates:
       python-minor:
         applies-to: version-updates
         update-types: ["minor", "patch"]
+    ignore:
+      # Versions épinglées dans pyproject.toml et couplées au code généré par
+      # `make generate` : un bump casse
+      # test_generated_header_version_matches_runtime (cf. PR #86). Le bump se
+      # fait à la main : pyproject + `make generate` + revue du diff généré.
+      # `applies-to: version-updates` laisse passer les security updates.
+      - dependency-name: "protobuf"
+        applies-to: version-updates
+      - dependency-name: "grpcio-tools"
+        applies-to: version-updates
 
   - package-ecosystem: "npm"
     directory: "/web"
