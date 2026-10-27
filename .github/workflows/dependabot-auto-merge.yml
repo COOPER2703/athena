@@ -29,6 +29,9 @@ jobs:
       github.event.pull_request.user.login == 'dependabot[bot]' &&
       github.repository == github.event.pull_request.head.repo.full_name
     runs-on: ubuntu-latest
+    # Pas de checkout : gh a besoin de savoir sur quel dépôt taper.
+    env:
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Métadonnées Dependabot
         id: meta
@@ -56,6 +59,13 @@ jobs:
           TYPE: ${{ steps.meta.outputs.update-type }}
         run: |
           gh pr edit "$PR" --add-label automerge
+          # `main` exige une branche à jour : sans ça, une PR ouverte avant le
+          # dernier merge de main resterait bloquée en « branch out of date ».
+          gh pr update-branch "$PR" || true
+          if [ "$(gh pr view "$PR" --json autoMergeRequest --jq '.autoMergeRequest != null')" = "true" ]; then
+            echo "Auto-merge déjà armé sur #$PR."
+            exit 0
+          fi
           gh pr comment "$PR" --body "Auto-merge activé : \`${DEP}\` ${FROM} → ${TO} (${TYPE}). Fusion dès que CI + Security sont verts."
           gh pr merge --auto --squash "$PR"
 
