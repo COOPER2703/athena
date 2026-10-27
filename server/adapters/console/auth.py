@@ -43,6 +43,10 @@ _STATUS_BY_CODE = {
     "invalid_code": 403,
     "already_installed": 409,
     "invalid_credentials": 401,
+    # Le mot de passe actuel est faux : la requête est authentifiée, mais la
+    # preuve demandée manque. Un 403 évite de déclencher le retour au login.
+    "invalid_password": 403,
+    "unauthorized": 401,
     "too_many_attempts": 429,
     "weak_password": 400,
     "invalid_username": 400,
@@ -91,6 +95,17 @@ def _set_ticket_cookie(
         TICKET_COOKIE,
         secret,
         max_age=ttl,
+        path="/",
+        httponly=True,
+        secure=True,
+        samesite="Strict",
+    )
+
+
+def _clear_ticket_cookie(response: web.StreamResponse) -> None:
+    """Efface le Ticket Console : le navigateur n'a plus rien à présenter."""
+    response.del_cookie(
+        TICKET_COOKIE,
         path="/",
         httponly=True,
         secure=True,
@@ -277,7 +292,78 @@ class ConsoleAuth:
             return self._auth_error(error)
         return self._opened(ticket)
 
+    # --- Routes authentifiées ---------------------------------------------
+
+    async def handle_logout(self, request: web.Request) -> web.Response:
+        """Déconnecte le navigateur courant : Ticket révoqué, cookie effacé."""
+        if self._auth is None:
+            return self._auth_disabled()
+        secret = request.cookies.get(TICKET_COOKIE)
+        if secret:
+            await self._auth.revoke_ticket(secret)
+        return self._signed_out()
+
+    async def handle_logout_all(self, request: web.Request) -> web.Response:
+        """« Déconnecter partout » : tous les Tickets du Compte sont révoqués."""
+        if self._auth is None:
+            return self._auth_disabled()
+        secret = request.cookies.get(TICKET_COOKIE)
+        session = (
+            await self._auth.authenticate_ticket(secret) if secret else None
+        )
+        if session is None:
+            return _error(
+                "unauthorized",
+                401,
+                message="Ticket Console absent, expiré ou révoqué.",
+            )
+        await self._auth.revoke_account_tickets(session.account.id)
+        return self._signed_out()
+
+    async def handle_password_post(self, request: web.Request) -> web.Response:
+        """Change le mot de passe ; les autres Tickets du Compte sont révoqués."""
+        if self._auth is None:
+            return self._auth_disabled()
+        payload = await _json_object(request)
+        fields = _fields(payload, "current_password", "new_password")
+        if fields is None:
+            return _error(
+                "invalid_request",
+                400,
+                message="Corps JSON attendu : current_password, new_password.",
+            )
+        current_password, new_password = fields
+        secret = request.cookies.get(TICKET_COOKIE)
+        if secret is None:
+            return _error(
+                "unauthorized",
+                401,
+                message="Ticket Console absent, expiré ou révoqué.",
+            )
+        try:
+            await self._auth.change_password(
+                secret, current_password, new_password
+            )
+        except AuthError as error:
+            return self._auth_error(error)
+        return web.json_response({"v": ENVELOPE_VERSION, "changed": True})
+
     # --- Traduction des échecs --------------------------------------------
+
+    def _auth_disabled(self) -> web.Response:
+        return _error(
+            "auth_disabled",
+            400,
+            message="L'authentification n'est pas configurée.",
+        )
+
+    def _signed_out(self) -> web.Response:
+        """Réponse commune des deux déconnexions : cookie effacé, plus d'identité."""
+        response = web.json_response(
+            {"v": ENVELOPE_VERSION, "authenticated": False}
+        )
+        _clear_ticket_cookie(response)
+        return response
 
     def _opened(self, ticket: IssuedTicket) -> web.Response:
         assert self._auth is not None
@@ -312,6 +398,8 @@ _MESSAGE_BY_CODE = {
     "invalid_code": "Code d'installation invalide ou déjà utilisé.",
     "already_installed": "Un Compte existe déjà : l'installation est fermée.",
     "invalid_credentials": "Identifiants incorrects.",
+    "invalid_password": "Le mot de passe actuel est incorrect.",
+    "unauthorized": "Ticket Console absent, expiré ou révoqué.",
     "too_many_attempts": "Trop de tentatives : réessayez plus tard.",
     "invalid_username": "Le nom d'utilisateur ne peut pas être vide.",
 }
