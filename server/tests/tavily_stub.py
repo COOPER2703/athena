@@ -48,6 +48,9 @@ class TavilyStub:
     usage: int = 42
     limit: int = 1000
     search_status: int = 200
+    # Corps brut renvoyé tel quel par ``POST /search`` : permet de simuler une
+    # réponse illisible (JSON tronqué, forme inattendue) sans toucher au plugin.
+    raw_search_body: bytes | None = None
     results: tuple[dict[str, Any], ...] = DEFAULT_RESULTS
     answer: str = ""
     delay: float = 0.0
@@ -153,6 +156,9 @@ class TavilyStub:
         if scope["path"] == SEARCH_PATH:
             if self.delay:
                 await asyncio.sleep(self.delay)
+            if self.raw_search_body is not None:
+                await _respond_raw(send, self.search_status, self.raw_search_body)
+                return
             await _respond(
                 send,
                 self.search_status,
@@ -195,7 +201,10 @@ async def _read_body(receive: Any) -> dict[str, Any]:
 
 
 async def _respond(send: Any, status: int, payload: Any) -> None:
-    body = json.dumps(payload).encode("utf-8")
+    await _respond_raw(send, status, json.dumps(payload).encode("utf-8"))
+
+
+async def _respond_raw(send: Any, status: int, body: bytes) -> None:
     await send(
         {
             "type": "http.response.start",

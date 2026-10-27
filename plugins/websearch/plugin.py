@@ -53,12 +53,35 @@ TOOL_DESCRIPTION = (
     "Cherche sur le web et renvoie des extraits de pages sourcés "
     "(titre, URL, extrait, date de publication)."
 )
+
+# Énumérations offertes au modèle (ADR-0018) : le schéma est passé tel quel à
+# Gemini, c'est donc la seule validation côté modèle.
+TOPICS = ("general", "news", "finance")
+TIME_RANGES = ("day", "week", "month", "year")
+DEFAULT_TOPIC = "general"
+
 TOOL_PARAMETERS: Mapping[str, object] = {
     "type": "object",
     "properties": {
         "query": {
             "type": "string",
             "description": "La question ou les mots-clés à chercher sur le web",
+        },
+        "topic": {
+            "type": "string",
+            "enum": list(TOPICS),
+            "description": (
+                "Le type de recherche : `general` pour une question de culture "
+                "générale, `news` pour l'actualité, `finance` pour la finance"
+            ),
+        },
+        "time_range": {
+            "type": "string",
+            "enum": list(TIME_RANGES),
+            "description": (
+                "La fenêtre de fraîcheur demandée par la question : `day`, "
+                "`week`, `month` ou `year`"
+            ),
         },
     },
     "required": ["query"],
@@ -266,26 +289,41 @@ def _tool(settings: _Settings, trace: Trace) -> ToolBinding:
     )
 
 
-def _request_body(settings: _Settings, query: str) -> dict[str, object]:
+def _choice(value: object, allowed: tuple[str, ...]) -> str | None:
+    """Retient une valeur d'énumération ; tout le reste est ignoré."""
+    return value if isinstance(value, str) and value in allowed else None
+
+
+def _request_body(
+    settings: _Settings,
+    query: str,
+    topic: str,
+    time_range: str | None,
+) -> dict[str, object]:
     """Corps de ``POST /search``, borné par le budget de contexte (ADR-0018).
 
-    ``topic`` vaut pour l'instant toujours ``general`` : le schéma du Tool ne
-    l'expose pas encore (#103). ``country`` n'a de sens que pour ce topic, et
-    ``filter_by_language`` traduit ``strict_language``.
+    ``topic`` vient du modèle (``general`` par défaut) et ``time_range`` n'est
+    envoyé que s'il est fourni. ``country`` n'accompagne que ``general`` :
+    Tavily répond ``400`` pour un topic d'actualité. ``filter_by_language``
+    traduit ``strict_language``.
     """
-    return {
+    body: dict[str, object] = {
         "query": query,
-        "topic": "general",
+        "topic": topic,
         "max_results": MAX_RESULTS,
         "chunks_per_source": CHUNKS_PER_SOURCE,
         "search_depth": settings.search_depth,
         "language": settings.language,
-        "country": settings.country,
         "filter_by_language": settings.strict_language,
         "include_answer": False,
         "include_raw_content": False,
         "include_images": False,
     }
+    if time_range is not None:
+        body["time_range"] = time_range
+    if topic == DEFAULT_TOPIC:
+        body["country"] = settings.country
+    return body
 
 
 async def _search(
@@ -300,7 +338,9 @@ async def _search(
     une reprise doublerait la latence d'une conversation en cours.
     """
     query = str(arguments.get("query", "")).strip()
-    payload = _request_body(settings, query)
+    topic = _choice(arguments.get("topic"), TOPICS) or DEFAULT_TOPIC
+    time_range = _choice(arguments.get("time_range"), TIME_RANGES)
+    payload = _request_body(settings, query, topic, time_range)
     loop = asyncio.get_running_loop()
     started = loop.time()
     try:
@@ -342,12 +382,14 @@ async def _search(
 def _extracts(body: object) -> list[dict[str, object]]:
     """Projette la réponse du moteur sur le contrat du Tool (glossaire).
 
+    Une réponse sans liste ``results`` est *illisible*, pas vide : la confondre
+    avec zéro résultat ferait passer une panne pour une absence d'information.
     ``published_date`` n'apparaît que si le moteur la fournit ; l'absence de
     date ne fait jamais disparaître un résultat.
     """
-    raw = body.get("results") if isinstance(body, dict) else None
-    if not isinstance(raw, list):
-        return []
+    if not isinstance(body, dict) or not isinstance(body.get("results"), list):
+        raise ValueError("unexpected search body")
+    raw = body["results"]
     extracts: list[dict[str, object]] = []
     for item in raw:
         if not isinstance(item, dict):
@@ -364,6 +406,19 @@ def _extracts(body: object) -> list[dict[str, object]]:
     return extracts
 
 
+# Paramètres tracés dans la Console : de quoi diagnostiquer une recherche
+# hors sujet ou vide, sans jamais la clé.
+_TRACED_PARAMS = (
+    "topic",
+    "time_range",
+    "max_results",
+    "chunks_per_source",
+    "search_depth",
+    "language",
+    "country",
+)
+
+
 def _trace_search(
     trace: Trace,
     query: str,
@@ -376,16 +431,11 @@ def _trace_search(
     """Trace une recherche : requête, paramètres, durée, résultats, crédits."""
     entry: dict[str, object] = {
         "query": query,
+        # Les paramètres effectivement partis au moteur : ni plus, ni moins.
         "params": {
             key: payload[key]
-            for key in (
-                "topic",
-                "max_results",
-                "chunks_per_source",
-                "search_depth",
-                "language",
-                "country",
-            )
+            for key in _TRACED_PARAMS
+            if key in payload
         },
         "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 1),
         "results": results,
