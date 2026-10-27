@@ -393,6 +393,40 @@ def test_exhausted_quota_is_traced_as_a_warning(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_a_probe_5xx_is_traced_as_degraded_without_blocking_the_start(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with TavilyStub(usage_status=503) as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                app,
+                live,
+                transport,
+                _,
+            ):
+                # Le moteur répond : c'est sa sonde qui est en défaut, pas le
+                # plugin. Le démarrage reste actif et la Trace le dit.
+                assert app.plugins.states["websearch"] == "activated"
+                [degraded] = sink.of_kind("ProbeDegraded")
+                assert degraded.payload["status"] == 503
+                assert not sink.of_kind("ProbeFailed")
+                # L'ancien nom, qui se lisait comme un PluginUnavailable levé,
+                # ne doit plus apparaître : le plugin, lui, est sain.
+                assert not sink.of_kind("ProbeUnavailable")
+
+                async with _live_session(transport, live) as session:
+                    payload = await _call(
+                        session, "web_search", {"query": "après une sonde en défaut"}
+                    )
+
+                assert payload["status"] == "ok"
+                assert app.plugins.states["websearch"] == "activated"
+
+    asyncio.run(scenario())
+
+
 # ---------------------------------------------------------------------------
 # Tool de bout en bout : App → Gemini → registre → plugin → HTTP.
 # ---------------------------------------------------------------------------
@@ -424,7 +458,8 @@ TOOL_PARAMETERS: dict[str, Any] = {
     "required": ["query"],
 }
 
-# Texte exact de la spec #101, section « Instruction de plugin ».
+# Texte exact de la spec #101, section « Instruction de plugin », suivi de la
+# ligne sur les résultats vides demandée par #103 (stories 4 et 5).
 INSTRUCTION = (
     "`web_search` interroge le web. Utilise-le pour toute question factuelle, "
     "d'actualité ou de culture générale dont tu n'es pas sûre, et jamais pour "
@@ -434,7 +469,10 @@ INSTRUCTION = (
     "Quand tu réponds, attribue à la source par son nom ; ne lis jamais une URL "
     "à haute voix et ne récite pas d'extrait brut.\n"
     "Si les sources se contredisent, dis-le au lieu de trancher. Si la recherche "
-    "échoue, dis-le simplement et propose de réessayer."
+    "échoue, dis-le simplement et propose de réessayer.\n"
+    "Si les extraits ne contiennent pas la réponse, dis que tu ne sais pas ; si la "
+    "recherche ne rend aucun résultat, dis que tu n'as rien trouvé, sans rien "
+    "inventer."
 )
 
 
@@ -465,6 +503,11 @@ def test_web_search_is_declared_and_returns_sourced_excerpts(tmp_path: Path) -> 
                     assert dict(declared["web_search"].parameters_json_schema) == (
                         TOOL_PARAMETERS
                     )
+                    # Le vocabulaire du glossaire : des Extraits de recherche,
+                    # jamais des « pages ».
+                    description = declared["web_search"].description
+                    assert "extraits de recherche" in description
+                    assert "page" not in description.lower()
                     # L'Instruction de plugin est composée dans le prompt système
                     # de la Session qui déclare le Tool.
                     assert INSTRUCTION in live.instruction()
@@ -572,6 +615,37 @@ def test_configured_depth_language_and_country_reach_the_engine(
     asyncio.run(scenario())
 
 
+def test_an_unknown_search_depth_falls_back_to_basic(tmp_path: Path) -> None:
+    """Seules ``fast``, ``basic`` et ``advanced`` ont un sens pour le moteur."""
+
+    async def scenario() -> None:
+        async with TavilyStub() as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(
+                tmp_path, sink, stub.base_url, config={"search_depth": "turbo"}
+            )
+            async with _running_app(registry=registry, loader=loader) as (
+                _,
+                live,
+                transport,
+                _,
+            ):
+                async with _live_session(transport, live) as session:
+                    payload = await _call(
+                        session, "web_search", {"query": "profondeur inconnue"}
+                    )
+
+                assert payload["status"] == "ok"
+                [request] = stub.search_requests
+                assert request["body"]["search_depth"] == "basic"
+                [search] = sink.of_kind("Search")
+                assert search.payload["params"]["search_depth"] == "basic"
+                # ``basic`` coûte un crédit : la valeur refusée n'en invente pas.
+                assert search.payload["credits"] == 1
+
+    asyncio.run(scenario())
+
+
 # ---------------------------------------------------------------------------
 # Pannes : un appel ne lève jamais, la Session et le plugin survivent.
 # ---------------------------------------------------------------------------
@@ -598,8 +672,12 @@ def test_search_timeout_returns_a_french_error_and_the_session_survives(
                     )
                     assert slow["status"] == "error"
                     assert "temps" in slow["message"]
-                    assert sink.of_kind("Search")[-1].payload["status"] == "error"
-                    assert sink.of_kind("Search")[-1].payload["credits"] == 0
+                    # Un seul POST : pas de reprise qui doublerait la latence.
+                    assert len(stub.search_requests) == 1
+                    timed_out = sink.of_kind("Search")[-1].payload
+                    assert timed_out["status"] == "error"
+                    assert timed_out["reason"] == "timeout"
+                    assert timed_out["credits"] == 0
 
                     # Le moteur répond de nouveau : la Session et le plugin
                     # n'ont pas bougé.
@@ -608,6 +686,7 @@ def test_search_timeout_returns_a_french_error_and_the_session_survives(
                         session, "web_search", {"query": "question rapide"}
                     )
                     assert recovered["status"] == "ok"
+                    assert len(stub.search_requests) == 2
                 assert app.plugins.states["websearch"] == "activated"
                 assert not app_sink.of_kind("SessionClosed")
 
@@ -735,6 +814,7 @@ def test_zero_results_is_a_success_not_an_error(tmp_path: Path) -> None:
                 # Zéro résultat est un succès : à l'Instruction de dire à
                 # l'oral qu'elle n'a rien trouvé.
                 assert payload == {"status": "ok", "count": 0, "results": []}
+                assert "aucun résultat" in live.instruction()
                 [search] = sink.of_kind("Search")
                 assert search.payload["results"] == 0
                 assert search.payload["credits"] == 1
@@ -843,42 +923,6 @@ def test_unreadable_body_becomes_a_french_error_not_zero_results(
     asyncio.run(scenario())
 
 
-def test_timeout_after_eight_seconds_is_a_single_attempt(
-    tmp_path: Path,
-) -> None:
-    """Le budget réel est de 8 s ; le test le réduit sur la copie du module."""
-
-    async def scenario() -> None:
-        async with TavilyStub(delay=1.0) as stub:
-            sink = RecordingTraceSink()
-            registry, loader = _plugins(
-                tmp_path, sink, stub.base_url, search_timeout=0.2
-            )
-            async with _running_app(registry=registry, loader=loader) as (
-                app,
-                live,
-                transport,
-                app_sink,
-            ):
-                async with _live_session(transport, live) as session:
-                    payload = await _call(
-                        session, "web_search", {"query": "moteur muet"}
-                    )
-
-                assert payload["status"] == "error"
-                assert "temps" in payload["message"]
-                # Un seul POST : pas de reprise qui doublerait la latence.
-                assert len(stub.search_requests) == 1
-                assert app.plugins.states["websearch"] == "activated"
-                assert not app_sink.of_kind("SessionClosed")
-
-                [search] = sink.of_kind("Search")
-                assert search.payload["status"] == "error"
-                assert search.payload["reason"] == "timeout"
-
-    asyncio.run(scenario())
-
-
 # ---------------------------------------------------------------------------
 # #104 — Budget de contexte : extraits bornés, fin propre, indicateur.
 #
@@ -891,8 +935,9 @@ def test_timeout_after_eight_seconds_is_a_single_attempt(
 def _long_text(length: int) -> str:
     """Texte continu de ``length`` caractères, fait de phrases terminées.
 
-    La coupe à 3 000 caractères tombe au milieu d'une phrase : c'est au plugin
-    de reculer jusqu'à la dernière fin propre.
+    Le plugin n'en garde qu'un extrait de 600 caractères au plus : la coupe
+    tombe au milieu d'une phrase, c'est à lui de reculer jusqu'à la dernière
+    fin propre.
     """
     sentence = "La finale a été remportée par l'équipe locale. "
     return (sentence * (length // len(sentence) + 1))[:length]
@@ -940,12 +985,13 @@ def test_a_long_excerpt_stops_at_600_on_a_clean_end_and_is_flagged(
     asyncio.run(scenario())
 
 
-def test_excerpt_budget_never_exceeds_6000_and_keeps_every_title_and_url(
+def test_excerpt_budget_never_exceeds_6000_and_caps_results_at_ten(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        # Un moteur qui rend plus que demandé : le budget total doit tenir
-        # quand même, sans perdre un seul titre ni une seule URL.
+        # Un moteur qui rend plus que demandé : dix résultats au maximum
+        # nourrissent la réponse (story 25), et le budget total tient quand
+        # même sans perdre un seul titre ni une seule URL des dix gardés.
         results = tuple(
             {
                 "title": f"Source {index} — Tournoi",
@@ -970,8 +1016,10 @@ def test_excerpt_budget_never_exceeds_6000_and_keeps_every_title_and_url(
 
                 assert payload["status"] == "ok"
                 returned = payload["results"]
+                assert payload["count"] == 10
+                # Les dix premiers du moteur, dans son ordre ; jamais le onzième.
                 assert [(item["title"], item["url"]) for item in returned] == [
-                    (item["title"], item["url"]) for item in results
+                    (item["title"], item["url"]) for item in results[:10]
                 ]
                 assert sum(len(item["excerpt"]) for item in returned) <= 6000
                 assert all(item["truncated"] is True for item in returned)
@@ -1262,6 +1310,57 @@ def test_language_and_depth_are_part_of_the_cache_key(tmp_path: Path) -> None:
             searches = [
                 payload for kind, payload in traces if kind == "Search"
             ]
+            assert [search["cache"] for search in searches] == [
+                "miss",
+                "miss",
+                "miss",
+                "hit",
+            ]
+
+    asyncio.run(scenario())
+
+
+def test_country_and_strict_language_are_part_of_the_cache_key(
+    tmp_path: Path,
+) -> None:
+    """Même requête, même langue : seul le biais de classement change.
+
+    ``country`` et ``strict_language`` partent dans le corps de ``POST /search``
+    comme les autres réglages : deux configurations qui n'en diffèrent que par
+    l'un des deux ne peuvent pas se rendre la charge de l'autre.
+    """
+
+    async def scenario() -> None:
+        async with TavilyStub() as stub:
+            plugin_dir = tmp_path / "focused-plugin"
+            shutil.copytree(PLUGIN_DIR, plugin_dir)
+            module = _load_plugin_module(plugin_dir)
+            traces: list[tuple[str, dict[str, Any]]] = []
+            plain = await module.create(_plugin_context(stub, traces))
+            british = await module.create(
+                _plugin_context(stub, traces, country="united kingdom")
+            )
+            strict = await module.create(
+                _plugin_context(stub, traces, strict_language="1")
+            )
+            arguments = {"query": "même question"}
+
+            await plain.tools[0].handler(arguments)
+            await british.tools[0].handler(arguments)
+            await strict.tools[0].handler(arguments)
+            # Mêmes réglages que le premier : celui-ci doit toucher le cache.
+            await plain.tools[0].handler(arguments)
+
+            assert len(stub.search_requests) == 3
+            assert [
+                (body["country"], body["filter_by_language"])
+                for body in (request["body"] for request in stub.search_requests)
+            ] == [
+                ("france", False),
+                ("united kingdom", False),
+                ("france", True),
+            ]
+            searches = [payload for kind, payload in traces if kind == "Search"]
             assert [search["cache"] for search in searches] == [
                 "miss",
                 "miss",

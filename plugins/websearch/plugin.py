@@ -59,12 +59,28 @@ CREDITS_PER_DEPTH = {"fast": 1, "basic": 1, "advanced": 2}
 CACHE_MAX_ENTRIES = 32
 CACHE_TTL = 300.0
 
-# Clé de cache : requête normalisée, topic, fenêtre, langue et profondeur.
-CacheKey = tuple[str, str, str | None, str, str]
+
+@dataclass(frozen=True, slots=True)
+class CacheKey:
+    """Tout ce qui distingue deux recherches pour le moteur (ADR-0018).
+
+    Une dimension oubliée ici rendrait à une recherche la charge d'une autre :
+    la requête normalisée, le topic et la fenêtre viennent du modèle ; la
+    langue, la profondeur, le pays et le filtre strict, de la configuration.
+    """
+
+    query: str
+    topic: str
+    time_range: str | None
+    language: str
+    search_depth: str
+    country: str
+    strict_language: bool
+
 
 TOOL_NAME = "web_search"
 TOOL_DESCRIPTION = (
-    "Cherche sur le web et renvoie des extraits de pages sourcés "
+    "Cherche sur le web et renvoie des extraits de recherche sourcés "
     "(titre, URL, extrait, date de publication)."
 )
 
@@ -110,7 +126,10 @@ INSTRUCTION = (
     "Quand tu réponds, attribue à la source par son nom ; ne lis jamais une URL "
     "à haute voix et ne récite pas d'extrait brut.\n"
     "Si les sources se contredisent, dis-le au lieu de trancher. Si la recherche "
-    "échoue, dis-le simplement et propose de réessayer."
+    "échoue, dis-le simplement et propose de réessayer.\n"
+    "Si les extraits ne contiennent pas la réponse, dis que tu ne sais pas ; si la "
+    "recherche ne rend aucun résultat, dis que tu n'as rien trouvé, sans rien "
+    "inventer."
 )
 
 _UNREACHABLE_MESSAGE = (
@@ -188,11 +207,21 @@ def _settings(context: PluginContext) -> _Settings:
     return _Settings(
         base_url=text("base_url", DEFAULT_BASE_URL).rstrip("/"),
         api_key=str(context.secrets.get("api_key", "")),
-        search_depth=text("search_depth", DEFAULT_SEARCH_DEPTH),
+        search_depth=_depth(text("search_depth", DEFAULT_SEARCH_DEPTH)),
         language=text("language", DEFAULT_LANGUAGE),
         country=text("country", DEFAULT_COUNTRY),
         strict_language=_as_flag(text("strict_language", DEFAULT_STRICT_LANGUAGE)),
     )
+
+
+def _depth(value: str) -> str:
+    """Retient une profondeur que le moteur connaît, sinon ``basic``.
+
+    Les clés de ``CREDITS_PER_DEPTH`` sont les seules valeurs acceptées par
+    Tavily ; une faute de frappe dans ``plugins.json`` ne doit pas partir au
+    moteur ni fausser le compte de crédits.
+    """
+    return value if value in CREDITS_PER_DEPTH else DEFAULT_SEARCH_DEPTH
 
 
 def _as_flag(value: str) -> bool:
@@ -206,8 +235,7 @@ async def _probe(settings: _Settings, trace: Trace) -> None:
     retentables. Un 5xx inattendu est tracé puis ignoré : le moteur répond,
     c'est sa sonde qui est en défaut, pas le plugin.
     """
-    http = _client(settings, PROBE_TIMEOUT)
-    async with http as client:
+    async with _client(settings, PROBE_TIMEOUT) as client:
         try:
             response = await client.get(settings.base_url + "/usage")
         except asyncio.CancelledError:
@@ -235,8 +263,9 @@ async def _probe(settings: _Settings, trace: Trace) -> None:
             f"(HTTP {response.status_code})"
         )
     if response.status_code >= 500:
+        # Le moteur répond : sa sonde est en défaut, le plugin ne l'est pas.
         trace(
-            "ProbeUnavailable",
+            "ProbeDegraded",
             {"status": response.status_code},
             level="warning",
         )
@@ -371,12 +400,14 @@ def _cache_key(
     time_range: str | None,
 ) -> CacheKey:
     """Deux recherches ne se confondent que si tous leurs paramètres concordent."""
-    return (
-        _normalize_query(query),
-        topic,
-        time_range,
-        settings.language,
-        settings.search_depth,
+    return CacheKey(
+        query=_normalize_query(query),
+        topic=topic,
+        time_range=time_range,
+        language=settings.language,
+        search_depth=settings.search_depth,
+        country=settings.country,
+        strict_language=settings.strict_language,
     )
 
 
@@ -504,9 +535,11 @@ def _extracts(body: object) -> list[dict[str, object]]:
     Une réponse sans liste ``results`` est *illisible*, pas vide : la confondre
     avec zéro résultat ferait passer une panne pour une absence d'information.
     ``published_date`` n'apparaît que si le moteur la fournit ; l'absence de
-    date ne fait jamais disparaître un résultat. Un extrait coupé porte
+    date ne fait jamais disparaître un résultat. Dix résultats au plus
+    nourrissent la réponse, dans l'ordre du moteur. Un extrait coupé porte
     ``truncated`` : le modèle sait que le texte n'est pas complet, et un
-    résultat intact ne porte jamais de faux indicateur.
+    résultat intact — ou laissé sans extrait — ne porte jamais de faux
+    indicateur.
     """
     if not isinstance(body, dict) or not isinstance(body.get("results"), list):
         raise ValueError("unexpected search body")
@@ -514,6 +547,8 @@ def _extracts(body: object) -> list[dict[str, object]]:
     extracts: list[dict[str, object]] = []
     remaining = MAX_EXCERPT_TOTAL
     for item in raw:
+        if len(extracts) >= MAX_RESULTS:
+            break
         if not isinstance(item, dict):
             continue
         # Le budget total se partage dans l'ordre du moteur : un résultat
@@ -528,7 +563,7 @@ def _extracts(body: object) -> list[dict[str, object]]:
             "url": str(item.get("url") or ""),
             "excerpt": excerpt,
         }
-        if truncated:
+        if truncated and excerpt:
             extract["truncated"] = True
         published = item.get("published_date")
         if isinstance(published, str) and published.strip():
