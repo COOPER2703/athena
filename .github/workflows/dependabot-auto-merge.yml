@@ -16,6 +16,7 @@ on:
     # `main` exige une branche à jour : après chaque merge, les PR Dependabot
     # passent en « branch out of date » et n'en sortent jamais seules.
     - cron: "0 4 * * *"
+  workflow_dispatch: # rattrapage manuel du job `refresh-branches`
 
 permissions:
   contents: write
@@ -90,7 +91,7 @@ jobs:
   # toute PR ouverte avant un merge de main reste bloquée en « out of date »
   # (la protection exige une branche à jour) et n'est jamais fusionnée.
   refresh-branches:
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
       GH_REPO: ${{ github.repository }}
