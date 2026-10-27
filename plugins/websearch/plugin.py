@@ -88,6 +88,14 @@ _REFUSED_MESSAGE = (
     "La recherche web a été refusée par le moteur. "
     "Vérifie la clé d'API, puis réessaie."
 )
+_UNREADABLE_MESSAGE = (
+    "La recherche web a échoué : le moteur a renvoyé une réponse illisible. "
+    "Réessaie dans un instant."
+)
+_STATUS_MESSAGE = (
+    "La recherche web a échoué (réponse {status} du moteur). "
+    "Réessaie dans un instant."
+)
 
 Trace = Callable[..., None]
 
@@ -113,7 +121,11 @@ async def create(context: PluginContext) -> PluginBinding:
     """
     settings = _settings(context)
     await _probe(settings, context.trace)
-    return PluginBinding(name=context.name, tools=(), instruction=INSTRUCTION)
+    return PluginBinding(
+        name=context.name,
+        tools=(_tool(settings, context.trace),),
+        instruction=INSTRUCTION,
+    )
 
 
 def _settings(context: PluginContext) -> _Settings:
@@ -233,3 +245,162 @@ def _as_int(value: object) -> int | None:
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
     return None
+
+
+# -- Tool ``web_search`` -------------------------------------------------------
+
+
+def _tool(settings: _Settings, trace: Trace) -> ToolBinding:
+    """Déclare le Tool et son handler : un appel ne lève jamais."""
+
+    async def handle(arguments: Mapping[str, object]) -> Mapping[str, object]:
+        return await _search(settings, arguments, trace)
+
+    return ToolBinding(
+        spec=ToolSpec(
+            name=TOOL_NAME,
+            description=TOOL_DESCRIPTION,
+            parameters=TOOL_PARAMETERS,
+        ),
+        handler=handle,
+    )
+
+
+def _request_body(settings: _Settings, query: str) -> dict[str, object]:
+    """Corps de ``POST /search``, borné par le budget de contexte (ADR-0018).
+
+    ``topic`` vaut pour l'instant toujours ``general`` : le schéma du Tool ne
+    l'expose pas encore (#103). ``country`` n'a de sens que pour ce topic, et
+    ``filter_by_language`` traduit ``strict_language``.
+    """
+    return {
+        "query": query,
+        "topic": "general",
+        "max_results": MAX_RESULTS,
+        "chunks_per_source": CHUNKS_PER_SOURCE,
+        "search_depth": settings.search_depth,
+        "language": settings.language,
+        "country": settings.country,
+        "filter_by_language": settings.strict_language,
+        "include_answer": False,
+        "include_raw_content": False,
+        "include_images": False,
+    }
+
+
+async def _search(
+    settings: _Settings,
+    arguments: Mapping[str, object],
+    trace: Trace,
+) -> Mapping[str, object]:
+    """Interroge le moteur et rend des Extraits de recherche, ou une erreur.
+
+    Aucune exception ne remonte : une panne devient une phrase en français que
+    le modèle peut dire à voix haute (ADR-0018). Un timeout n'est pas retenté :
+    une reprise doublerait la latence d'une conversation en cours.
+    """
+    query = str(arguments.get("query", "")).strip()
+    payload = _request_body(settings, query)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    try:
+        async with _client(settings, SEARCH_TIMEOUT) as client:
+            response = await client.post(settings.base_url + "/search", json=payload)
+    except asyncio.CancelledError:
+        raise
+    except httpx2.TimeoutException:
+        _trace_search(trace, query, payload, started, reason="timeout")
+        return _error(_TIMEOUT_MESSAGE)
+    except httpx2.RequestError as exc:
+        _trace_search(trace, query, payload, started, reason=type(exc).__name__)
+        return _error(_UNREACHABLE_MESSAGE)
+    except Exception as exc:  # défense : le handler ne lève jamais
+        _trace_search(trace, query, payload, started, reason=type(exc).__name__)
+        return _error(_UNREACHABLE_MESSAGE)
+
+    if response.status_code in (401, 403):
+        _trace_search(
+            trace, query, payload, started, reason=f"HTTP {response.status_code}"
+        )
+        return _error(_REFUSED_MESSAGE)
+    if response.status_code >= 400:
+        _trace_search(
+            trace, query, payload, started, reason=f"HTTP {response.status_code}"
+        )
+        return _error(_STATUS_MESSAGE.format(status=response.status_code))
+
+    try:
+        results = _extracts(response.json())
+    except (TypeError, ValueError):
+        _trace_search(trace, query, payload, started, reason="unreadable body")
+        return _error(_UNREADABLE_MESSAGE)
+
+    _trace_search(trace, query, payload, started, results=len(results))
+    return {"status": "ok", "count": len(results), "results": results}
+
+
+def _extracts(body: object) -> list[dict[str, object]]:
+    """Projette la réponse du moteur sur le contrat du Tool (glossaire).
+
+    ``published_date`` n'apparaît que si le moteur la fournit ; l'absence de
+    date ne fait jamais disparaître un résultat.
+    """
+    raw = body.get("results") if isinstance(body, dict) else None
+    if not isinstance(raw, list):
+        return []
+    extracts: list[dict[str, object]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        extract: dict[str, object] = {
+            "title": str(item.get("title") or ""),
+            "url": str(item.get("url") or ""),
+            "excerpt": str(item.get("content") or ""),
+        }
+        published = item.get("published_date")
+        if isinstance(published, str) and published.strip():
+            extract["published_date"] = published.strip()
+        extracts.append(extract)
+    return extracts
+
+
+def _trace_search(
+    trace: Trace,
+    query: str,
+    payload: Mapping[str, object],
+    started: float,
+    *,
+    results: int = 0,
+    reason: str | None = None,
+) -> None:
+    """Trace une recherche : requête, paramètres, durée, résultats, crédits."""
+    entry: dict[str, object] = {
+        "query": query,
+        "params": {
+            key: payload[key]
+            for key in (
+                "topic",
+                "max_results",
+                "chunks_per_source",
+                "search_depth",
+                "language",
+                "country",
+            )
+        },
+        "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 1),
+        "results": results,
+        "credits": 0 if reason else _credits(payload),
+    }
+    if reason is not None:
+        entry["status"] = "error"
+        entry["reason"] = reason
+    trace("Search", entry)
+
+
+def _credits(payload: Mapping[str, object]) -> int:
+    depth = str(payload.get("search_depth", DEFAULT_SEARCH_DEPTH))
+    return CREDITS_PER_DEPTH.get(depth, 1)
+
+
+def _error(message: str) -> Mapping[str, object]:
+    return {"status": "error", "message": message}

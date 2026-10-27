@@ -139,9 +139,6 @@ class TavilyStub:
                 "body": body,
             }
         )
-        if self.delay:
-            await asyncio.sleep(self.delay)
-
         if scope["path"] == USAGE_PATH:
             await _respond(
                 send,
@@ -154,6 +151,8 @@ class TavilyStub:
             )
             return
         if scope["path"] == SEARCH_PATH:
+            if self.delay:
+                await asyncio.sleep(self.delay)
             await _respond(
                 send,
                 self.search_status,
