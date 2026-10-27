@@ -2,6 +2,13 @@
 
 import { normalizeAuth, type AuthSession } from "./auth";
 import { normalizeStatus, type StatusData } from "./status";
+import {
+  normalizeIssuedToken,
+  normalizeTokens,
+  type AccessToken,
+  type IssuedToken,
+  type TokenDraftValue,
+} from "./tokens";
 
 /** Signature minimale de `fetch`, injectable dans les tests. */
 export type Fetcher = (input: string, init: RequestInit) => Promise<Response>;
@@ -154,4 +161,48 @@ export async function login(
     fetcher,
   );
   return normalizeAuth(body);
+}
+
+/** Liste les Jetons d'accès ; le contrat ne contient jamais de secret. */
+export async function listTokens(
+  fetcher: Fetcher = fetch,
+): Promise<AccessToken[]> {
+  return normalizeTokens(await requestJson("/api/tokens", {}, fetcher));
+}
+
+/**
+ * Crée un Jeton d'accès et rend son secret en clair — une seule fois.
+ *
+ * Le panneau appelant doit l'afficher puis l'oublier : rien ici ne le conserve.
+ */
+export async function createToken(
+  draft: TokenDraftValue,
+  fetcher: Fetcher = fetch,
+): Promise<IssuedToken> {
+  const body = await requestJson(
+    "/api/tokens",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(draft),
+    },
+    fetcher,
+  );
+  const issued = normalizeIssuedToken(body);
+  if (issued === null) {
+    throw new ApiError(0, "invalid_response", "Réponse de création illisible.");
+  }
+  return issued;
+}
+
+/** Révoque un Jeton individuellement ; la révocation prend effet aussitôt. */
+export async function revokeToken(
+  id: string,
+  fetcher: Fetcher = fetch,
+): Promise<void> {
+  await requestJson(
+    `/api/tokens/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+    fetcher,
+  );
 }
