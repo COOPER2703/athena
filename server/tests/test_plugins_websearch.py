@@ -387,6 +387,22 @@ TOOL_PARAMETERS: dict[str, Any] = {
             "type": "string",
             "description": "La question ou les mots-clés à chercher sur le web",
         },
+        "topic": {
+            "type": "string",
+            "enum": ["general", "news", "finance"],
+            "description": (
+                "Le type de recherche : `general` pour une question de culture "
+                "générale, `news` pour l'actualité, `finance` pour la finance"
+            ),
+        },
+        "time_range": {
+            "type": "string",
+            "enum": ["day", "week", "month", "year"],
+            "description": (
+                "La fenêtre de fraîcheur demandée par la question : `day`, "
+                "`week`, `month` ou `year`"
+            ),
+        },
     },
     "required": ["query"],
 }
@@ -577,6 +593,271 @@ def test_search_timeout_returns_a_french_error_and_the_session_survives(
                     assert recovered["status"] == "ok"
                 assert app.plugins.states["websearch"] == "activated"
                 assert not app_sink.of_kind("SessionClosed")
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# #103 — Fraîcheur et honnêteté : actualité, dates, échecs.
+#
+# Même seam que le reste du fichier : App → Gemini → registre → plugin → stub.
+# Ce que l'on observe : le corps JSON réellement émis, la charge rendue au
+# modèle et les Traces. Jamais les fonctions internes du plugin.
+# ---------------------------------------------------------------------------
+
+
+def test_news_topic_and_time_range_reach_the_engine(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with TavilyStub() as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                _,
+                live,
+                transport,
+                _,
+            ):
+                async with _live_session(transport, live) as session:
+                    payload = await _call(
+                        session,
+                        "web_search",
+                        {
+                            "query": "les nouvelles de cette semaine sur X",
+                            "topic": "news",
+                            "time_range": "week",
+                        },
+                    )
+
+                assert payload["status"] == "ok"
+                # La date de publication est relayée quand le moteur la donne…
+                assert payload["results"][1]["published_date"] == "2026-10-26"
+                # …et absente sinon, sans faire disparaître le résultat.
+                assert "published_date" not in payload["results"][0]
+
+                [request] = stub.search_requests
+                body = request["body"]
+                assert body["topic"] == "news"
+                assert body["time_range"] == "week"
+                # Tavily refuse ``400`` un ``country`` hors ``general``.
+                assert "country" not in body
+                # La langue reste toujours envoyée.
+                assert body["language"] == "fr"
+
+                [search] = sink.of_kind("Search")
+                assert search.payload["params"]["topic"] == "news"
+                assert search.payload["params"]["time_range"] == "week"
+                assert "country" not in search.payload["params"]
+                assert search.payload["results"] == 2
+                assert search.payload["credits"] == 1
+                assert isinstance(search.payload["duration_ms"], (int, float))
+                assert SECRET not in json.dumps(search.payload)
+
+    asyncio.run(scenario())
+
+
+def test_general_topic_is_the_default_and_time_range_is_omitted(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with TavilyStub() as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                _,
+                live,
+                transport,
+                _,
+            ):
+                async with _live_session(transport, live) as session:
+                    # Le modèle ne fournit ni topic ni time_range.
+                    default = await _call(
+                        session, "web_search", {"query": "premier ministre irlandais"}
+                    )
+                    # Le modèle fournit une fenêtre mais laisse le topic au défaut.
+                    windowed = await _call(
+                        session,
+                        "web_search",
+                        {"query": "résultats du tournoi", "time_range": "month"},
+                    )
+
+                assert default["status"] == "ok"
+                assert windowed["status"] == "ok"
+
+                first, second = stub.search_requests
+                assert first["body"]["topic"] == "general"
+                assert "time_range" not in first["body"]
+                assert first["body"]["country"] == "france"
+                assert second["body"]["topic"] == "general"
+                assert second["body"]["time_range"] == "month"
+                assert second["body"]["country"] == "france"
+
+                first_trace, second_trace = sink.of_kind("Search")
+                assert first_trace.payload["params"]["topic"] == "general"
+                assert "time_range" not in first_trace.payload["params"]
+                assert second_trace.payload["params"]["time_range"] == "month"
+
+    asyncio.run(scenario())
+
+
+def test_zero_results_is_a_success_not_an_error(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with TavilyStub(results=()) as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                app,
+                live,
+                transport,
+                app_sink,
+            ):
+                async with _live_session(transport, live) as session:
+                    payload = await _call(
+                        session, "web_search", {"query": "sujet sans aucune page"}
+                    )
+
+                # Zéro résultat est un succès : à l'Instruction de dire à
+                # l'oral qu'elle n'a rien trouvé.
+                assert payload == {"status": "ok", "count": 0, "results": []}
+                [search] = sink.of_kind("Search")
+                assert search.payload["results"] == 0
+                assert search.payload["credits"] == 1
+                assert "status" not in search.payload
+                assert app.plugins.states["websearch"] == "activated"
+                assert not app_sink.of_kind("SessionClosed")
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("status", "fragment"),
+    [
+        (401, "clé"),
+        (429, "429"),
+        (432, "432"),
+        (500, "500"),
+        (503, "503"),
+    ],
+)
+def test_a_refused_search_becomes_a_french_sentence_without_a_retry(
+    tmp_path: Path, status: int, fragment: str
+) -> None:
+    async def scenario() -> None:
+        async with TavilyStub(search_status=status) as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                app,
+                live,
+                transport,
+                app_sink,
+            ):
+                async with _live_session(transport, live) as session:
+                    payload = await _call(
+                        session, "web_search", {"query": "question refusée"}
+                    )
+                    assert payload["status"] == "error"
+                    assert fragment in payload["message"]
+                    assert SECRET not in payload["message"]
+
+                    # Aucune reprise automatique : un seul essai par appel.
+                    assert len(stub.search_requests) == 1
+
+                    # Le moteur se rétablit : la Session et le plugin survivent.
+                    stub.search_status = 200
+                    recovered = await _call(
+                        session, "web_search", {"query": "question suivante"}
+                    )
+                    assert recovered["status"] == "ok"
+                    assert len(stub.search_requests) == 2
+
+                assert app.plugins.states["websearch"] == "activated"
+                assert not app_sink.of_kind("SessionClosed")
+
+                failed, success = sink.of_kind("Search")
+                assert failed.payload["status"] == "error"
+                assert failed.payload["credits"] == 0
+                assert f"HTTP {status}" in failed.payload["reason"]
+                assert success.payload["results"] == 2
+                assert all(
+                    SECRET not in json.dumps(entry.payload) for entry in sink.entries
+                )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "raw_body",
+    [
+        b'{"results": [',  # JSON tronqué : corps illisible.
+        b'{"unexpected": true}',  # JSON valide, contrat inattendu.
+        b"[]",  # JSON valide, pas un objet.
+    ],
+    ids=["truncated", "missing-results", "not-an-object"],
+)
+def test_unreadable_body_becomes_a_french_error_not_zero_results(
+    tmp_path: Path, raw_body: bytes
+) -> None:
+    async def scenario() -> None:
+        async with TavilyStub(raw_search_body=raw_body) as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                app,
+                live,
+                transport,
+                app_sink,
+            ):
+                async with _live_session(transport, live) as session:
+                    payload = await _call(
+                        session, "web_search", {"query": "corps illisible"}
+                    )
+
+                # Une réponse qu'on ne sait pas lire n'est pas « aucun résultat ».
+                assert payload["status"] == "error"
+                assert "illisible" in payload["message"]
+                assert len(stub.search_requests) == 1
+                assert app.plugins.states["websearch"] == "activated"
+                assert not app_sink.of_kind("SessionClosed")
+
+                [search] = sink.of_kind("Search")
+                assert search.payload["status"] == "error"
+                assert search.payload["reason"] == "unreadable body"
+
+    asyncio.run(scenario())
+
+
+def test_timeout_after_eight_seconds_is_a_single_attempt(
+    tmp_path: Path,
+) -> None:
+    """Le budget réel est de 8 s ; le test le réduit sur la copie du module."""
+
+    async def scenario() -> None:
+        async with TavilyStub(delay=1.0) as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(
+                tmp_path, sink, stub.base_url, search_timeout=0.2
+            )
+            async with _running_app(registry=registry, loader=loader) as (
+                app,
+                live,
+                transport,
+                app_sink,
+            ):
+                async with _live_session(transport, live) as session:
+                    payload = await _call(
+                        session, "web_search", {"query": "moteur muet"}
+                    )
+
+                assert payload["status"] == "error"
+                assert "temps" in payload["message"]
+                # Un seul POST : pas de reprise qui doublerait la latence.
+                assert len(stub.search_requests) == 1
+                assert app.plugins.states["websearch"] == "activated"
+                assert not app_sink.of_kind("SessionClosed")
+
+                [search] = sink.of_kind("Search")
+                assert search.payload["status"] == "error"
+                assert search.payload["reason"] == "timeout"
 
     asyncio.run(scenario())
 
