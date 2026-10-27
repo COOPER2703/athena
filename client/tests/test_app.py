@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
+
 from client.app import ClientApp
 from client.config import AppConfig
 from client.state import ClientState
+from client.ws_client import AccessTokenRefusedError
 from protocol import SessionEnded, SessionStarted
 
 
@@ -248,6 +251,24 @@ def test_disconnect_returns_to_listening() -> None:
         await app.on_session_started(SessionStarted())
         await app.on_disconnect()
         assert app.state is ClientState.LISTENING
+
+    asyncio.run(scenario())
+
+
+def test_run_propagates_an_access_token_refusal_after_cleanup() -> None:
+    class RefusingTransport(FakeTransport):
+        async def run(self) -> None:
+            raise AccessTokenRefusedError("Jeton d'accès refusé (401)")
+
+    async def scenario() -> None:
+        audio = BlockingFakeAudio()
+        transport = RefusingTransport()
+        app = make_app(audio=audio, transport=transport)
+
+        with pytest.raises(AccessTokenRefusedError):
+            await app.run()
+        assert audio.closed
+        assert transport.disconnected
 
     asyncio.run(scenario())
 

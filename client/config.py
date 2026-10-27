@@ -9,6 +9,12 @@ def _get_env(key: str, default: str) -> str:
     return os.getenv(key, default)
 
 
+# Variable d'environnement dédiée au Jeton d'accès du Client desktop. Le Jeton
+# est un credential machine : il ne passe ni par le Protocole (figé), ni par une
+# URL, mais par l'en-tête ``Authorization: Bearer`` du handshake.
+ACCESS_TOKEN_ENV = "ATHENA_ACCESS_TOKEN"
+
+
 @dataclass(frozen=True, slots=True)
 class AudioConfig:
     channels: int = 1
@@ -40,6 +46,11 @@ class ClientConfig:
     )
     client_name: str = field(
         default_factory=lambda: _get_env("CLIENT_NAME", "desktop")
+    )
+    # Aucun défaut secret : sans Jeton, le Client refuse de démarrer plutôt que
+    # de tenter un handshake qui sera refusé.
+    access_token: str = field(
+        default_factory=lambda: _get_env(ACCESS_TOKEN_ENV, "")
     )
     platform: str = "desktop"
     ping_interval: float = 30.0

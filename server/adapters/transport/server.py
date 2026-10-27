@@ -7,6 +7,7 @@ from typing import Callable, Iterable, Mapping, Sequence
 
 import websockets
 from websockets.asyncio.server import Server, ServerConnection, serve
+from websockets.http11 import Request, Response
 
 from protocol import (
     Error,
@@ -29,9 +30,31 @@ from server.core.commands import (
     Trace,
 )
 from server.core.events import ClientDisconnected, ClientRegistered, Event
-from server.core.ports import TraceSink
+from server.core.ports import AuthService, TraceSink
 
 _TRACE_SOURCE = "transport"
+# Nature du Jeton d'accès admise au handshake du transport : un Jeton créé
+# pour le Webhook (``source``) ne vaut jamais pour une connexion Client.
+_CLIENT_TOKEN_KIND = "client"
+
+
+def _bearer_secret(header: str | None) -> str | None:
+    """Extrait le secret d'un en-tête ``Authorization: Bearer``, ou ``None``.
+
+    Le schéma est insensible à la casse (RFC 7235) ; le secret est un jeton
+    opaque sans espace. Tout en-tête absent, d'un autre schéma ou malformé est
+    refusé, sans tenter d'interpréter le reste.
+    """
+    if not header:
+        return None
+    scheme, separator, credentials = header.partition(" ")
+    if not separator or scheme.lower() != "bearer":
+        return None
+    secret = credentials.strip()
+    if not secret or any(character.isspace() for character in secret):
+        return None
+    return secret
+
 
 # Une liste statique (tests, usages simples) ou un fournisseur relu à chaque
 # enregistrement, pour que ``Registered.server_tools`` suive le registre (les
@@ -66,11 +89,16 @@ class WebSocketTransport:
         port: int = 8765,
         server_tools: ServerTools | None = None,
         trace_sink: TraceSink | None = None,
+        auth: AuthService | None = None,
     ) -> None:
         self._host = host
         self._port = port
         self._server_tools = server_tools
         self._trace_sink: TraceSink = trace_sink or NullTraceSink()
+        # Authentification du handshake. Sans service injecté, la surface reste
+        # ouverte : c'est le mode des tests unitaires du transport, jamais celui
+        # de ``build_app`` qui partage le store d'auth de la Console.
+        self._auth = auth
         self._clients: dict[str, ClientConnection] = {}
         self._events: asyncio.Queue[Event] = asyncio.Queue()
         self._server: Server | None = None
@@ -86,7 +114,12 @@ class WebSocketTransport:
         return dict(self._clients)
 
     async def start(self) -> None:
-        self._server = await serve(self._handle_connection, self._host, self._port)
+        self._server = await serve(
+            self._handle_connection,
+            self._host,
+            self._port,
+            process_request=self._authorize if self._auth is not None else None,
+        )
 
     async def stop(self) -> None:
         server = self._server
@@ -144,6 +177,46 @@ class WebSocketTransport:
             payload={"client_id": client_id, "tool_id": tool_id, "name": name},
             level="warning",
         )
+
+    async def _authorize(
+        self, connection: ServerConnection, request: Request
+    ) -> Response | None:
+        """Valide le Jeton d'accès **avant** d'accepter la connexion.
+
+        Le handshake est le seul point d'authentification : aucune trame n'est
+        décodée pour un inconnu, et la dernière utilisation n'est écrite qu'ici
+        (le store borne lui-même l'écriture à une fois par minute et par Jeton).
+        """
+        auth = self._auth
+        assert auth is not None
+        secret = _bearer_secret(request.headers.get("Authorization"))
+        token = (
+            None
+            if secret is None
+            else await auth.authenticate_token(secret, _CLIENT_TOKEN_KIND)
+        )
+        if token is None:
+            self._emit(
+                "handshake_refused",
+                payload={
+                    "reason": (
+                        "missing_or_malformed_authorization"
+                        if secret is None
+                        else "invalid_token"
+                    )
+                },
+                level="warning",
+            )
+            refusal = connection.respond(401, "Unauthorized")
+            refusal.headers["WWW-Authenticate"] = "Bearer"
+            return refusal
+
+        await auth.mark_token_used(token.id)
+        self._emit(
+            "client_authorized",
+            payload={"token_id": token.id, "token_name": token.name},
+        )
+        return None
 
     async def _handle_connection(self, websocket: ServerConnection) -> None:
         connection: ClientConnection | None = None

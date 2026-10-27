@@ -8,12 +8,20 @@ import sys
 from client.app import ClientApp
 from client.audio_io import AudioIO
 from client.config import AppConfig
-from client.ws_client import WsTransport
+from client.ws_client import (
+    AccessTokenRefusedError,
+    MissingAccessTokenError,
+    WsTransport,
+    require_access_token,
+)
 
 log = logging.getLogger("athena.client")
 
 
 def _build_app(cfg: AppConfig) -> ClientApp:
+    # Le Jeton est validé avant d'ouvrir le micro : un Client sans credential
+    # échoue tout de suite, avec un message qui dit où le récupérer.
+    require_access_token(cfg.client)
     transport = WsTransport(cfg.client)
     return ClientApp(cfg, audio=AudioIO(cfg.audio), transport=transport)
 
@@ -56,16 +64,30 @@ async def main() -> None:
     await asyncio.wait(
         [run_task, shutdown_task], return_when=asyncio.FIRST_COMPLETED
     )
+    failure = (
+        run_task.exception()
+        if run_task.done() and not run_task.cancelled()
+        else None
+    )
 
     for task in (run_task, enter_task, shutdown_task):
         task.cancel()
     await asyncio.gather(
         run_task, enter_task, shutdown_task, return_exceptions=True
     )
+    if failure is not None:
+        raise failure
 
 
 def cli() -> None:
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except MissingAccessTokenError as exc:
+        print(f"Erreur de configuration : {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+    except AccessTokenRefusedError as exc:
+        print(f"Connexion refusée : {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
 
 
 if __name__ == "__main__":
