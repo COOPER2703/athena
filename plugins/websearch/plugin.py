@@ -235,8 +235,7 @@ async def _probe(settings: _Settings, trace: Trace) -> None:
     retentables. Un 5xx inattendu est tracé puis ignoré : le moteur répond,
     c'est sa sonde qui est en défaut, pas le plugin.
     """
-    http = _client(settings, PROBE_TIMEOUT)
-    async with http as client:
+    async with _client(settings, PROBE_TIMEOUT) as client:
         try:
             response = await client.get(settings.base_url + "/usage")
         except asyncio.CancelledError:
