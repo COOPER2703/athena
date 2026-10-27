@@ -595,6 +595,7 @@ def build_app(
             host=config.webhook.host,
             port=config.webhook.port,
             trace_sink=trace_sink,
+            auth=auth,
         )
 
     console: ConsoleAdapter | None = None
