@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.util
 import json
 import re
 import shutil
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
@@ -21,7 +23,7 @@ from server.adapters.transport import WebSocketTransport
 from server.app.clock import AsyncioClock
 from server.app.root import App
 from server.app.secrets import EnvSecretResolver
-from server.core.plugins import PluginRegistry
+from server.core.plugins import PluginContext, PluginRegistry
 from tavily_stub import TavilyStub
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -199,14 +201,18 @@ def _install_websearch(
     *,
     config: dict[str, str] | None = None,
     search_timeout: float | None = None,
+    cache_ttl: float | None = None,
 ) -> tuple[Path, Path]:
     """Copie le vrai plugin et écrit un fichier d'état qui l'active."""
     plugins_dir = tmp_path / "plugins"
     plugin_dir = plugins_dir / "websearch"
     shutil.copytree(PLUGIN_DIR, plugin_dir)
-    if search_timeout is not None:
+    if search_timeout is not None or cache_ttl is not None:
         source = (plugin_dir / "plugin.py").read_text(encoding="utf-8")
-        source = _patched_constant(source, "SEARCH_TIMEOUT", search_timeout)
+        if search_timeout is not None:
+            source = _patched_constant(source, "SEARCH_TIMEOUT", search_timeout)
+        if cache_ttl is not None:
+            source = _patched_constant(source, "CACHE_TTL", cache_ttl)
         (plugin_dir / "plugin.py").write_text(source, encoding="utf-8")
 
     state_path = tmp_path / "plugins.json"
@@ -230,12 +236,14 @@ def _plugins(
     config: dict[str, str] | None = None,
     secret: str = SECRET,
     search_timeout: float | None = None,
+    cache_ttl: float | None = None,
 ) -> tuple[PluginRegistry, PluginLoader]:
     plugins_dir, state_path = _install_websearch(
         tmp_path,
         base_url,
         config=config,
         search_timeout=search_timeout,
+        cache_ttl=cache_ttl,
     )
     registry = PluginRegistry()
     loader = PluginLoader(
@@ -858,6 +866,466 @@ def test_timeout_after_eight_seconds_is_a_single_attempt(
                 [search] = sink.of_kind("Search")
                 assert search.payload["status"] == "error"
                 assert search.payload["reason"] == "timeout"
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# #104 — Budget de contexte : extraits bornés, fin propre, indicateur.
+#
+# Même seam que le reste du fichier : App → Gemini → registre → plugin → stub.
+# La troncature se prouve par la charge rendue au modèle, jamais par une
+# fonction interne.
+# ---------------------------------------------------------------------------
+
+
+def _long_text(length: int) -> str:
+    """Texte continu de ``length`` caractères, fait de phrases terminées.
+
+    La coupe à 3 000 caractères tombe au milieu d'une phrase : c'est au plugin
+    de reculer jusqu'à la dernière fin propre.
+    """
+    sentence = "La finale a été remportée par l'équipe locale. "
+    return (sentence * (length // len(sentence) + 1))[:length]
+
+
+def test_a_long_excerpt_stops_at_600_on_a_clean_end_and_is_flagged(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        results = (
+            {
+                "title": "Le Monde — Tournoi de X",
+                "url": "https://example.test/tournoi",
+                "content": _long_text(3000),
+            },
+        )
+        async with TavilyStub(results=results) as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                _,
+                live,
+                transport,
+                _,
+            ):
+                async with _live_session(transport, live) as session:
+                    payload = await _call(
+                        session, "web_search", {"query": "tournoi de X"}
+                    )
+
+                assert payload["status"] == "ok"
+                [result] = payload["results"]
+                assert result["title"] == "Le Monde — Tournoi de X"
+                assert result["url"] == "https://example.test/tournoi"
+                assert len(result["excerpt"]) <= 600
+                # La coupe recule jusqu'à la dernière phrase complète, sans
+                # mot coupé en deux.
+                assert result["excerpt"].endswith(".")
+                assert result["excerpt"].endswith(
+                    "La finale a été remportée par l'équipe locale."
+                )
+                # Le modèle sait que l'extrait est incomplet.
+                assert result["truncated"] is True
+
+    asyncio.run(scenario())
+
+
+def test_excerpt_budget_never_exceeds_6000_and_keeps_every_title_and_url(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        # Un moteur qui rend plus que demandé : le budget total doit tenir
+        # quand même, sans perdre un seul titre ni une seule URL.
+        results = tuple(
+            {
+                "title": f"Source {index} — Tournoi",
+                "url": f"https://example.test/source/{index}",
+                "content": _long_text(3000),
+            }
+            for index in range(11)
+        )
+        async with TavilyStub(results=results) as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                _,
+                live,
+                transport,
+                _,
+            ):
+                async with _live_session(transport, live) as session:
+                    payload = await _call(
+                        session, "web_search", {"query": "tournoi de X"}
+                    )
+
+                assert payload["status"] == "ok"
+                returned = payload["results"]
+                assert [(item["title"], item["url"]) for item in returned] == [
+                    (item["title"], item["url"]) for item in results
+                ]
+                assert sum(len(item["excerpt"]) for item in returned) <= 6000
+                assert all(item["truncated"] is True for item in returned)
+
+    asyncio.run(scenario())
+
+
+def test_excerpt_cut_falls_back_to_a_word_boundary_then_a_hard_cut(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        results = (
+            {
+                "title": "Mots",
+                "url": "https://example.test/mots",
+                # Aucune fin de phrase : la coupe doit reculer au dernier mot.
+                "content": "alpha bravo " * 700,
+            },
+            {
+                "title": "Bloc",
+                "url": "https://example.test/bloc",
+                # Aucun espace : il ne reste que la coupe nette.
+                "content": "x" * 3000,
+            },
+            {
+                "title": "Court",
+                "url": "https://example.test/court",
+                "content": "Texte complet.",
+            },
+        )
+        async with TavilyStub(results=results) as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                _,
+                live,
+                transport,
+                _,
+            ):
+                async with _live_session(transport, live) as session:
+                    payload = await _call(
+                        session, "web_search", {"query": "mots et blocs"}
+                    )
+
+                words, block, short = payload["results"]
+                assert len(words["excerpt"]) <= 600
+                assert words["excerpt"].endswith("bravo")
+                assert words["truncated"] is True
+                assert block["excerpt"] == "x" * 600
+                assert block["truncated"] is True
+                # Un extrait complet ne porte jamais de faux indicateur.
+                assert short["excerpt"] == "Texte complet."
+                assert "truncated" not in short
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# #104 — Cache : une question répétée ne repaie pas un crédit.
+#
+# La preuve tient dans deux effets observables : le nombre de ``POST /search``
+# réellement émis et le ``hit``/``miss`` de la Trace.
+# ---------------------------------------------------------------------------
+
+
+def test_two_identical_searches_hit_the_cache_and_save_a_credit(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with TavilyStub() as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                _,
+                live,
+                transport,
+                _,
+            ):
+                async with _live_session(transport, live) as session:
+                    first = await _call(
+                        session, "web_search", {"query": "tournoi de X 2026"}
+                    )
+                    second = await _call(
+                        session, "web_search", {"query": "tournoi de X 2026"}
+                    )
+
+                # Même charge, sans seconde requête HTTP ni second crédit.
+                assert second == first
+                assert len(stub.search_requests) == 1
+                miss, hit = sink.of_kind("Search")
+                assert miss.payload["cache"] == "miss"
+                assert miss.payload["credits"] == 1
+                assert hit.payload["cache"] == "hit"
+                assert hit.payload["credits"] == 0
+                assert hit.payload["results"] == 2
+
+    asyncio.run(scenario())
+
+
+def test_a_reformulated_identical_question_hits_the_same_cache_entry(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with TavilyStub() as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                _,
+                live,
+                transport,
+                _,
+            ):
+                async with _live_session(transport, live) as session:
+                    await _call(
+                        session, "web_search", {"query": "Tournoi de X 2026"}
+                    )
+                    # Casse, espaces et ponctuation finale ne changent rien.
+                    reformulated = await _call(
+                        session,
+                        "web_search",
+                        {"query": "  tournoi   de x 2026 ?! "},
+                    )
+
+                assert reformulated["status"] == "ok"
+                assert len(stub.search_requests) == 1
+                assert [trace.payload["cache"] for trace in sink.of_kind("Search")] == [
+                    "miss",
+                    "hit",
+                ]
+
+    asyncio.run(scenario())
+
+
+def test_a_cached_search_expires_after_the_ttl(tmp_path: Path) -> None:
+    """Le TTL réel est de 5 minutes ; le test le réduit sur la copie du module."""
+
+    async def scenario() -> None:
+        async with TavilyStub() as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(
+                tmp_path, sink, stub.base_url, cache_ttl=0.1
+            )
+            async with _running_app(registry=registry, loader=loader) as (
+                _,
+                live,
+                transport,
+                _,
+            ):
+                async with _live_session(transport, live) as session:
+                    first = await _call(
+                        session, "web_search", {"query": "tournoi de X 2026"}
+                    )
+                    await asyncio.sleep(0.2)
+                    second = await _call(
+                        session, "web_search", {"query": "tournoi de X 2026"}
+                    )
+
+                # Même question, mais le cache a expiré : le crédit est repayé.
+                assert second == first
+                assert len(stub.search_requests) == 2
+                assert [trace.payload["cache"] for trace in sink.of_kind("Search")] == [
+                    "miss",
+                    "miss",
+                ]
+
+    asyncio.run(scenario())
+
+
+def test_the_cache_stays_bounded_past_32_distinct_questions(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with TavilyStub() as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                _,
+                live,
+                transport,
+                _,
+            ):
+                async with _live_session(transport, live) as session:
+                    for index in range(40):
+                        await _call(
+                            session,
+                            "web_search",
+                            {"query": f"question distincte {index}"},
+                        )
+
+                    # La plus ancienne est sortie : elle repaie une requête…
+                    await _call(
+                        session, "web_search", {"query": "question distincte 0"}
+                    )
+                    # …alors que la plus récente est encore là.
+                    await _call(
+                        session, "web_search", {"query": "question distincte 39"}
+                    )
+
+                assert len(stub.search_requests) == 41
+                traces = sink.of_kind("Search")
+                assert traces[-2].payload["cache"] == "miss"
+                assert traces[-1].payload["cache"] == "hit"
+
+    asyncio.run(scenario())
+
+
+def test_topic_and_time_range_are_part_of_the_cache_key(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with TavilyStub() as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                _,
+                live,
+                transport,
+                _,
+            ):
+                async with _live_session(transport, live) as session:
+                    # Même requête, trois recherches différentes pour le moteur.
+                    await _call(
+                        session,
+                        "web_search",
+                        {
+                            "query": "X cette semaine",
+                            "topic": "news",
+                            "time_range": "week",
+                        },
+                    )
+                    await _call(session, "web_search", {"query": "X cette semaine"})
+                    await _call(
+                        session,
+                        "web_search",
+                        {"query": "X cette semaine", "topic": "news"},
+                    )
+                    # La dernière est la répétition exacte de la précédente.
+                    await _call(
+                        session,
+                        "web_search",
+                        {"query": "X cette semaine", "topic": "news"},
+                    )
+
+                assert len(stub.search_requests) == 3
+                assert [
+                    (body["topic"], body.get("time_range"))
+                    for body in (request["body"] for request in stub.search_requests)
+                ] == [("news", "week"), ("general", None), ("news", None)]
+                assert [
+                    trace.payload["cache"] for trace in sink.of_kind("Search")
+                ] == ["miss", "miss", "miss", "hit"]
+
+    asyncio.run(scenario())
+
+
+def test_language_and_depth_are_part_of_the_cache_key(tmp_path: Path) -> None:
+    """Config fixée à ``create()`` : deux réglages, même cache de module.
+
+    Aucune route de bout en bout ne fait varier la langue ou la profondeur en
+    cours de vie du plugin (elles viennent du fichier d'état). Le contrat
+    public ``create()`` puis le handler suffisent à prouver la clé.
+    """
+
+    async def scenario() -> None:
+        async with TavilyStub() as stub:
+            plugin_dir = tmp_path / "focused-plugin"
+            shutil.copytree(PLUGIN_DIR, plugin_dir)
+            module = _load_plugin_module(plugin_dir)
+            traces: list[tuple[str, dict[str, Any]]] = []
+            base = await module.create(_plugin_context(stub, traces))
+            translated = await module.create(
+                _plugin_context(stub, traces, language="en")
+            )
+            deep = await module.create(
+                _plugin_context(stub, traces, search_depth="advanced")
+            )
+            arguments = {"query": "même question"}
+
+            await base.tools[0].handler(arguments)
+            await translated.tools[0].handler(arguments)
+            await deep.tools[0].handler(arguments)
+            # Mêmes réglages que le premier : celui-ci doit toucher le cache.
+            await base.tools[0].handler(arguments)
+
+            assert len(stub.search_requests) == 3
+            assert [
+                (body["language"], body["search_depth"])
+                for body in (request["body"] for request in stub.search_requests)
+            ] == [("fr", "basic"), ("en", "basic"), ("fr", "advanced")]
+            searches = [
+                payload for kind, payload in traces if kind == "Search"
+            ]
+            assert [search["cache"] for search in searches] == [
+                "miss",
+                "miss",
+                "miss",
+                "hit",
+            ]
+
+    asyncio.run(scenario())
+
+
+def _load_plugin_module(plugin_dir: Path) -> Any:
+    """Importe le point d'entrée copié, hors du chargeur, pour ``create()``."""
+    module_name = "athena_plugin_websearch_focused"
+    spec = importlib.util.spec_from_file_location(
+        module_name, plugin_dir / "plugin.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _plugin_context(
+    stub: TavilyStub,
+    traces: list[tuple[str, dict[str, Any]]],
+    **config: str,
+) -> PluginContext:
+    """Contexte public minimal : une Trace en mémoire, le reste au défaut."""
+
+    def trace(
+        kind: str, payload: dict[str, Any] | None = None, *, level: str = "info"
+    ) -> None:
+        traces.append((kind, dict(payload or {})))
+
+    return PluginContext(
+        name="websearch",
+        config={"base_url": stub.base_url, **config},
+        secrets={"api_key": SECRET},
+        trace=trace,
+        push_event=lambda source, text: None,
+    )
+
+
+def test_an_error_is_never_cached(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with TavilyStub(search_status=500) as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                _,
+                live,
+                transport,
+                _,
+            ):
+                async with _live_session(transport, live) as session:
+                    failed = await _call(
+                        session, "web_search", {"query": "question réparée"}
+                    )
+                    assert failed["status"] == "error"
+
+                    # Le moteur se répare : la même question repart au moteur,
+                    # sans quoi une panne passagère collerait à la question.
+                    stub.search_status = 200
+                    recovered = await _call(
+                        session, "web_search", {"query": "question réparée"}
+                    )
+
+                assert recovered["status"] == "ok"
+                assert len(stub.search_requests) == 2
+                assert [
+                    trace.payload["cache"] for trace in sink.of_kind("Search")
+                ] == ["miss", "miss"]
 
     asyncio.run(scenario())
 
