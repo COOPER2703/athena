@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from typing import Mapping
 
@@ -68,6 +69,14 @@ EVENT_QUEUE_MAX = 120
 EVENT_MAX_CHARS = 4096
 _MEMORY_HEADER = "[MÉMOIRE]"
 _EVENT_HEADER = "[ÉVÉNEMENTS]"
+# Un contenu externe ne doit jamais pouvoir forger l'en-tête du bloc de faits
+# ni en ouvrir un second : ses occurrences sont neutralisées dans le rendu
+# destiné au modèle (#81). Le Journal et le dédoublonnage du Rappel gardent,
+# eux, la forme brute (``_format_fact``).
+_EVENT_HEADER_TOKEN = re.compile(
+    r"\[\s*(?:événements|evenements)\s*\]", re.IGNORECASE
+)
+_HEADER_REDACTED = "[en-tête retiré]"
 
 
 class EventDropReason(StrEnum):
@@ -392,7 +401,7 @@ class Coordinator:
         self._event_queue = []
         if not batch:
             return self._decision("EventJudge")
-        facts = [self._format_fact(event) for event in batch]
+        facts = [self._safe_fact(event) for event in batch]
         verdict = (
             await self._judge.judge(facts)
             if self._judge is not None
@@ -423,22 +432,41 @@ class Coordinator:
                     extra={"events": len(batch), "announce": False},
                 )
             ]
-        return await self._start_announcement(batch, verdict.message)
+        message = verdict.message.strip()
+        if not message:
+            # « Annonce » sans phrase : le verdict est malformé. Le lot ne doit
+            # jamais devenir le tour à prononcer — ce serait lire à voix haute
+            # le contenu externe, instructions comprises (#81). Faute fermée.
+            return [
+                self._trace(
+                    "EventJudgmentFailed",
+                    from_state=SessionState.IDLE,
+                    to_state=SessionState.IDLE,
+                    client_id=self._registered_client_id,
+                    reason="missing_message",
+                    extra={"events": len(batch)},
+                    level="error",
+                )
+            ]
+        return await self._start_announcement(batch, message)
 
     async def _start_announcement(
         self, batch: list[EventReceived], message: str
     ) -> list[Command]:
         """Ouvre l'unique Connexion Live et lui fait prononcer l'Annonce.
 
-        La Session automatique est une **Session ordinaire** : même prompt
-        système, mêmes instructions de plugin, même Activation mémoire et mêmes
-        Tools qu'une Session ouverte par un Wake word (ADR-0013) ; l'instruction
-        d'Annonce s'y ajoute pour qu'Athena sache qu'un Événement a ouvert la
-        Session. Le message du juge est la phrase à prononcer ; les faits bruts
-        du lot sont transmis au Live comme contexte (``facts``), sans être
-        prononcés, pour qu'Athena puisse détailler l'Événement à la demande. La
-        Connexion est marquée ``auto`` : son premier son devient une Session
-        automatique annoncée au Client de référence.
+        La Session automatique reprend l'Activation d'une Session ordinaire
+        (prompt système, instructions de plugin, contexte mémoire — ADR-0013),
+        et l'instruction d'Annonce s'y ajoute pour qu'Athena sache qu'un
+        Événement a ouvert la Session. Elle s'en distingue sur un point, qui
+        est **structurel** : la Connexion est ouverte sans aucun outil, pour
+        qu'un Événement piégé ne puisse jamais déclencher une action (#81,
+        amendement d'ADR-0013 à venir). Le message du juge est la phrase à
+        prononcer ; les faits assainis du lot sont transmis au Live comme
+        contexte (``facts``), sans être prononcés, pour qu'Athena puisse
+        détailler l'Événement à la demande. La Connexion est marquée ``auto`` :
+        son premier son devient une Session automatique annoncée au Client de
+        référence.
         """
         self._judged_batch = batch
         self._session_counter += 1
@@ -472,24 +500,25 @@ class Coordinator:
             context,
         )
 
-        rendered = self._render_batch(batch)
-        text = message.strip()
-        # Les faits bruts ne sont transmis comme contexte séparé que si le juge
-        # a fourni une phrase : sans phrase, le lot est le tour à prononcer.
-        facts = rendered if text else ""
         return [
             OpenLiveConnection(
                 connection_id=self._connection_id,
                 instruction=instruction,
-                tools=self._open_tools(),
+                # Aucun outil : le contenu externe qui a déclenché l'Annonce
+                # ne peut jamais se traduire par une action (#81).
+                tools=(),
             ),
             StartIdleTimer(
                 connection_id=self._connection_id, timeout=ANNOUNCE_TIMEOUT
             ),
             SendAnnouncementToLlm(
                 connection_id=self._connection_id,
-                text=text or rendered,
-                facts=facts,
+                # Le message du juge est la seule phrase prononcée ; les faits
+                # ne sont que le contexte séparé du suivi. ``_judge_batch``
+                # garantit qu'un verdict d'annonce porte toujours une phrase,
+                # donc le contenu externe n'est jamais lu à voix haute (#81).
+                text=message,
+                facts=self._render_batch(batch),
             ),
             self._trace(
                 "EventJudge",
@@ -505,10 +534,26 @@ class Coordinator:
         """Étiquette un fait par sa Source, forme ``[source] contenu``."""
         return f"[{event.source}] {event.content}"
 
+    @staticmethod
+    def _safe_fact(event: EventReceived) -> str:
+        """Fait rendu pour le modèle : une ligne, sans en-tête forgeable.
+
+        ``_format_fact`` reste la forme brute du Journal et du dédoublonnage du
+        Rappel. Ici, le contenu externe et son étiquette de Source sont aplatis
+        (**un fait = une ligne**) et les occurrences de l'en-tête
+        ``[ÉVÉNEMENTS]`` sont retirées : un contenu ne peut ni fabriquer un
+        second fait, ni simuler un nouveau bloc, ni fermer l'étiquette de Source
+        (#81).
+        """
+        source = " ".join(event.source.splitlines()).replace("]", ")")
+        content = " ".join(event.content.splitlines())
+        content = _EVENT_HEADER_TOKEN.sub(_HEADER_REDACTED, content)
+        return f"[{source}] {content}"
+
     @classmethod
     def _render_batch(cls, batch: list[EventReceived]) -> str:
         """Un fait par ligne, étiqueté par Source (ordre d'arrivée, FIFO)."""
-        lines = [f"- {cls._format_fact(event)}" for event in batch]
+        lines = [f"- {cls._safe_fact(event)}" for event in batch]
         return "\n".join([_EVENT_HEADER, *lines])
 
     async def _on_session_requested(

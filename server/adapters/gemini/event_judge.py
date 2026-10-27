@@ -2,12 +2,27 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Callable, Sequence
 
 from server.adapters.trace import NullTraceSink, emit
 from server.core.ports import Judgment, TraceSink
 
 _TRACE_SOURCE = "judge"
+
+# Bornes du bloc de données externes transmis au juge. Le prompt les nomme et
+# déclare que tout ce qu'elles contiennent est une donnée non fiable. Elles sont
+# posées **ici**, en code, pour que le cadre ne dépende pas du bon vouloir du
+# modèle ni de la forme du contenu reçu (#81).
+_FACTS_START = "<<<DÉBUT_FAITS_EXTERNES>>>"
+_FACTS_END = "<<<FIN_FAITS_EXTERNES>>>"
+# Un contenu externe ne doit jamais pouvoir refermer le bloc ni en ouvrir un
+# second : toute occurrence des bornes y est neutralisée, casse et accents
+# compris.
+_DELIMITER = re.compile(
+    r"<<<\s*(?:début|debut|fin)_faits_externes\s*>>>", re.IGNORECASE
+)
+_NEUTRALISED = "[délimiteur retiré]"
 
 # Le fournisseur renvoie parfois 503/429 sur un pic de charge. Le SDK retente
 # déjà, mais un échec persistant rend `announce=false` (faute fermée) : sans
@@ -30,6 +45,20 @@ def _default_generate(api_key: str) -> Generate:
         return response.text or ""
 
     return generate
+
+
+def _render_facts(facts: Sequence[str]) -> str:
+    """Rend les faits comme un bloc de données borné, un fait par ligne.
+
+    Le contenu externe est aplati sur une ligne et ses occurrences des bornes
+    sont retirées : il ne peut ni forger une seconde ligne, ni refermer le bloc,
+    ni en ouvrir un autre (#81). Le prompt, lui, déclare ce bloc non fiable.
+    """
+    lines = [
+        f"- {_DELIMITER.sub(_NEUTRALISED, ' '.join(fact.splitlines()))}"
+        for fact in facts
+    ]
+    return "\n".join([_FACTS_START, *lines, _FACTS_END])
 
 
 class GeminiEventJudge:
@@ -68,9 +97,7 @@ class GeminiEventJudge:
     async def judge(self, facts: Sequence[str]) -> Judgment:
         if not facts:
             return Judgment(announce=False)
-        prompt = f"{self._prompt}\n\n---\n\n" + "\n".join(
-            f"- {fact}" for fact in facts
-        )
+        prompt = f"{self._prompt}\n\n{_render_facts(facts)}"
         text = ""
         for attempt in range(1, self._attempts + 1):
             try:
@@ -130,8 +157,11 @@ class GeminiEventJudge:
         if not announce:
             return Judgment(announce=False)
         message = data.get("message")
-        if not isinstance(message, str):
-            message = ""
+        if not isinstance(message, str) or not message.strip():
+            # Une annonce sans phrase est un verdict malformé : le noyau ne doit
+            # jamais prononcer le lot brut faute de phrase — ce serait lire à
+            # voix haute le contenu externe, instructions comprises (#81).
+            return Judgment(announce=False, failed=True)
         return Judgment(announce=True, message=message)
 
     def _emit(self, kind: str, payload: dict[str, object], *, level: str) -> None:
