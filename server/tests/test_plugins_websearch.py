@@ -970,6 +970,56 @@ def test_excerpt_budget_never_exceeds_6000_and_keeps_every_title_and_url(
     asyncio.run(scenario())
 
 
+def test_excerpt_cut_falls_back_to_a_word_boundary_then_a_hard_cut(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        results = (
+            {
+                "title": "Mots",
+                "url": "https://example.test/mots",
+                # Aucune fin de phrase : la coupe doit reculer au dernier mot.
+                "content": "alpha bravo " * 700,
+            },
+            {
+                "title": "Bloc",
+                "url": "https://example.test/bloc",
+                # Aucun espace : il ne reste que la coupe nette.
+                "content": "x" * 3000,
+            },
+            {
+                "title": "Court",
+                "url": "https://example.test/court",
+                "content": "Texte complet.",
+            },
+        )
+        async with TavilyStub(results=results) as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                _,
+                live,
+                transport,
+                _,
+            ):
+                async with _live_session(transport, live) as session:
+                    payload = await _call(
+                        session, "web_search", {"query": "mots et blocs"}
+                    )
+
+                words, block, short = payload["results"]
+                assert len(words["excerpt"]) <= 600
+                assert words["excerpt"].endswith("bravo")
+                assert words["truncated"] is True
+                assert block["excerpt"] == "x" * 600
+                assert block["truncated"] is True
+                # Un extrait complet ne porte jamais de faux indicateur.
+                assert short["excerpt"] == "Texte complet."
+                assert "truncated" not in short
+
+    asyncio.run(scenario())
+
+
 # ---------------------------------------------------------------------------
 # #104 — Cache : une question répétée ne repaie pas un crédit.
 #
