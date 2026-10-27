@@ -1,0 +1,16 @@
+{
+  "api_version": 1,
+  "name": "websearch",
+  "version": "0.1.0",
+  "description": "Recherche web via le moteur Tavily",
+  "platform": "server",
+  "entrypoint": "plugin.py",
+  "config": [
+    { "key": "base_url", "type": "url" },
+    { "key": "search_depth", "type": "string" },
+    { "key": "language", "type": "string" },
+    { "key": "country", "type": "string" },
+    { "key": "strict_language", "type": "string" }
+  ],
+  "secrets": [{ "key": "api_key", "required": true }]
+}
