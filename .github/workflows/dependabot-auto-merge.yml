@@ -1,0 +1,72 @@
+name: Dependabot auto-merge
+
+# Active l'auto-merge GitHub sur les PR Dependabot (patch + minor).
+# GitHub ne fusionne que lorsque TOUS les checks requis sont verts :
+#   - CI / test, CI / web                    (ci.yml)
+#   - Security / dependency-review, python-audit, web-audit, secrets-scan
+# Ces checks doivent être déclarés dans la protection de branche `main`,
+# sinon `--auto` fusionne immédiatement, sans attendre les tests.
+#
+# Les majors ne sont jamais fusionnés : ils restent en revue humaine.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write # création du label `automerge`
+
+concurrency:
+  group: dependabot-automerge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  auto-merge:
+    # Dependabot uniquement, et jamais une PR venant d'un fork.
+    if: >
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.repository == github.event.pull_request.head.repo.full_name
+    runs-on: ubuntu-latest
+    steps:
+      - name: Métadonnées Dependabot
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Préparer les labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create automerge --color 0e8a16 --description "Fusion auto Dependabot" --force
+          gh label create "needs-review" --color d93f0b --description "Mise à jour majeure : revue humaine" --force
+
+      - name: Activer l'auto-merge (patch + minor)
+        if: >
+          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+          steps.meta.outputs.update-type == 'version-update:semver-minor'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          DEP: ${{ steps.meta.outputs.dependency-names }}
+          FROM: ${{ steps.meta.outputs.previous-version }}
+          TO: ${{ steps.meta.outputs.new-version }}
+          TYPE: ${{ steps.meta.outputs.update-type }}
+        run: |
+          gh pr edit "$PR" --add-label automerge
+          gh pr comment "$PR" --body "Auto-merge activé : \`${DEP}\` ${FROM} → ${TO} (${TYPE}). Fusion dès que CI + Security sont verts."
+          gh pr merge --auto --squash "$PR"
+
+      - name: Marquer les majors pour revue humaine
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          DEP: ${{ steps.meta.outputs.dependency-names }}
+          FROM: ${{ steps.meta.outputs.previous-version }}
+          TO: ${{ steps.meta.outputs.new-version }}
+        run: |
+          gh pr edit "$PR" --add-label "needs-review"
+          gh pr comment "$PR" --body "Mise à jour **majeure** de \`${DEP}\` (${FROM} → ${TO}) : auto-merge désactivé, relecture du changelog nécessaire."

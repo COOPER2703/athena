@@ -1,0 +1,102 @@
+name: Security
+
+# Check de sécurité bloquants, en complément de `ci.yml` (tests + build).
+# Les noms de jobs (`dependency-review`, `python-audit`, `web-audit`,
+# `secrets-scan`) sont ceux à déclarer comme checks requis dans la protection
+# de branche : c'est ce qui empêche le merge automatique de Dependabot tant
+# qu'une CVE ou un secret n'est pas réglé.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Rattrape les CVE publiées après le merge (lundi 06:00 UTC).
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Diff des dépendances introduites par la PR : CVE connues + licences.
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
+
+  # Audit de l'environnement Python réellement installé (mêmes deps que ci.yml).
+  python-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: sudo apt-get update && sudo apt-get install -y portaudio19-dev
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]" pip-audit
+      # --strict : toute vuln non ignorée fait échouer le job.
+      # Faux positif : ajouter `--ignore-vuln <ID>` ici, avec un commentaire.
+      - run: python -m pip_audit --strict --desc
+
+  # Audit des dépendances du front (prod + dev : vite/tsc cassés = build cassé).
+  web-audit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm audit --audit-level=high
+
+  # Secrets committés (clés API, tokens). Histo complet de la branche.
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Repo privé appartenant à une orga : ajouter GITLEAKS_LICENSE.
+
+  # Optionnel — analyse statique (code scanning). Décommenter si besoin :
+  # gratuit sur repo public, nécessite GitHub Advanced Security sur repo privé.
+  #
+  # codeql:
+  #   runs-on: ubuntu-latest
+  #   permissions:
+  #     contents: read
+  #     security-events: write
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       language: [python, javascript-typescript]
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: github/codeql-action/init@v3
+  #       with:
+  #         languages: ${{ matrix.language }}
+  #     - uses: github/codeql-action/analyze@v3
