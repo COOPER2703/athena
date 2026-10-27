@@ -15,6 +15,7 @@ from server.adapters.console.contract import (
     STATUS_PATH,
     STREAM_PATH,
     TICKET_COOKIE,
+    TOKENS_PATH,
 )
 
 __all__ = [
@@ -31,5 +32,6 @@ __all__ = [
     "STATUS_PATH",
     "STREAM_PATH",
     "TICKET_COOKIE",
+    "TOKENS_PATH",
     "ConsoleAdapter",
 ]

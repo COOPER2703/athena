@@ -7,6 +7,7 @@ import { EventForm } from "./EventForm";
 import { sessionSummary } from "./session";
 import { ClientsPanel, ConfigPanel, PluginsPanel } from "./StatusPanels";
 import type { StatusData } from "./status";
+import { TokenPanel } from "./TokenPanel";
 import { TraceFeed } from "./TraceFeed";
 import { useConsoleStream } from "./useConsoleStream";
 
@@ -170,6 +171,8 @@ export function ConsoleScreen({
         <TraceFeed feed={stream.feed} connection={stream.connection} />
 
         <EventForm onUnauthorized={onUnauthorized} />
+
+        <TokenPanel onUnauthorized={onUnauthorized} />
       </main>
 
       <footer className="app__footer">

@@ -29,8 +29,14 @@ from server.adapters.console.contract import (
     SESSION_PATH,
     SETUP_PATH,
     TICKET_COOKIE,
+    TOKENS_PATH,
 )
-from server.core.ports import AuthError, AuthService, IssuedTicket
+from server.core.ports import (
+    AccessToken,
+    AuthError,
+    AuthService,
+    IssuedTicket,
+)
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
@@ -50,6 +56,10 @@ _STATUS_BY_CODE = {
     "too_many_attempts": 429,
     "weak_password": 400,
     "invalid_username": 400,
+    "invalid_token_name": 400,
+    "invalid_kind": 400,
+    "invalid_source": 400,
+    "token_not_found": 404,
 }
 
 
@@ -292,6 +302,68 @@ class ConsoleAuth:
             return self._auth_error(error)
         return self._opened(ticket)
 
+    # --- Jetons d'accès (ticket #78) ---------------------------------------
+
+    async def handle_tokens_get(self, request: web.Request) -> web.Response:
+        """Liste les Jetons : nom, préfixe, nature, dates. Jamais un secret."""
+        if self._auth is None:
+            return self._auth_disabled()
+        tokens = await self._auth.list_tokens()
+        return web.json_response(
+            {
+                "v": ENVELOPE_VERSION,
+                "tokens": [_token_json(token) for token in tokens],
+            }
+        )
+
+    async def handle_tokens_post(self, request: web.Request) -> web.Response:
+        """Crée un Jeton et renvoie son secret en clair, une seule fois."""
+        if self._auth is None:
+            return self._auth_disabled()
+        payload = await _json_object(request)
+        name = payload.get("name") if payload is not None else None
+        kind = payload.get("kind") if payload is not None else None
+        source = payload.get("source") if payload is not None else None
+        if (
+            not isinstance(name, str)
+            or not isinstance(kind, str)
+            or (source is not None and not isinstance(source, str))
+        ):
+            return _error(
+                "invalid_request",
+                400,
+                message="Corps JSON attendu : name, kind (client|source), source.",
+            )
+        try:
+            issued = await self._auth.create_token(
+                name=name, kind=kind, source=source
+            )
+        except AuthError as error:
+            return self._auth_error(error)
+        return web.json_response(
+            {
+                "v": ENVELOPE_VERSION,
+                "token": _token_json(issued.token),
+                "secret": issued.secret,
+            },
+            status=201,
+        )
+
+    async def handle_token_delete(self, request: web.Request) -> web.Response:
+        """Révoque un Jeton individuellement ; la révocation est immédiate."""
+        if self._auth is None:
+            return self._auth_disabled()
+        revoked = await self._auth.revoke_token(request.match_info["token_id"])
+        if revoked is None:
+            return _error(
+                "token_not_found",
+                404,
+                message="Ce Jeton d'accès n'existe pas.",
+            )
+        return web.json_response(
+            {"v": ENVELOPE_VERSION, "token": _token_json(revoked)}
+        )
+
     # --- Routes authentifiées ---------------------------------------------
 
     async def handle_logout(self, request: web.Request) -> web.Response:
@@ -348,6 +420,7 @@ class ConsoleAuth:
             return self._auth_error(error)
         return web.json_response({"v": ENVELOPE_VERSION, "changed": True})
 
+
     # --- Traduction des échecs --------------------------------------------
 
     def _auth_disabled(self) -> web.Response:
@@ -402,7 +475,32 @@ _MESSAGE_BY_CODE = {
     "unauthorized": "Ticket Console absent, expiré ou révoqué.",
     "too_many_attempts": "Trop de tentatives : réessayez plus tard.",
     "invalid_username": "Le nom d'utilisateur ne peut pas être vide.",
+    "invalid_token_name": "Le nom du Jeton d'accès ne peut pas être vide.",
+    "invalid_kind": "La nature du Jeton doit être « client » ou « source ».",
+    "invalid_source": (
+        "Une source est obligatoire pour un Jeton « source » "
+        "et interdite pour un Jeton « client »."
+    ),
+    "token_not_found": "Ce Jeton d'accès n'existe pas.",
 }
+
+
+def _token_json(token: AccessToken) -> dict[str, object]:
+    """Forme publique d'un Jeton : ni secret, ni empreinte, jamais.
+
+    ``revoked_at`` rend la révocation visible dans la liste ; le front en
+    déduit l'état, et la ligne reste consultable après coup.
+    """
+    return {
+        "id": token.id,
+        "name": token.name,
+        "kind": token.kind,
+        "source": token.source,
+        "prefix": token.prefix,
+        "created_at": token.created_at,
+        "last_used_at": token.last_used_at,
+        "revoked_at": token.revoked_at,
+    }
 
 
 def _fields(payload: Mapping[str, object] | None, *names: str) -> tuple[str, ...] | None:

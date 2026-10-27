@@ -3,11 +3,14 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ApiError,
   changePassword,
+  createToken,
   fetchSession,
+  listTokens,
   login,
   logout,
   logoutAll,
   requestJson,
+  revokeToken,
   setupAccount,
 } from "./api";
 
@@ -165,5 +168,71 @@ describe("session et formulaires", () => {
         credentials: "same-origin",
       });
     }
+  });
+});
+
+const LISTED_TOKEN = {
+  id: "t1",
+  name: "Portable",
+  kind: "client",
+  source: null,
+  prefix: "ath_abcd1234",
+  created_at: 1_700_000_000,
+  last_used_at: null,
+  revoked_at: null,
+};
+
+describe("jetons d'accès", () => {
+  it("liste les Jetons via GET /api/tokens", async () => {
+    const fetcher = vi.fn(async (_input: string, _init: RequestInit) =>
+      response(200, { v: 1, tokens: [LISTED_TOKEN] }),
+    );
+
+    await expect(listTokens(fetcher)).resolves.toEqual([
+      {
+        id: "t1",
+        name: "Portable",
+        kind: "client",
+        source: null,
+        prefix: "ath_abcd1234",
+        createdAt: 1_700_000_000,
+        lastUsedAt: null,
+        revokedAt: null,
+      },
+    ]);
+    expect(fetcher.mock.calls[0]?.[0]).toBe("/api/tokens");
+  });
+
+  it("crée un Jeton et rend le secret une seule fois", async () => {
+    const fetcher = vi.fn(async (_input: string, _init: RequestInit) =>
+      response(201, { v: 1, token: LISTED_TOKEN, secret: "ath_secret" }),
+    );
+
+    await expect(
+      createToken({ name: "Portable", kind: "client", source: null }, fetcher),
+    ).resolves.toMatchObject({ secret: "ath_secret" });
+    const [path, init] = fetcher.mock.calls[0] ?? [];
+    expect(path).toBe("/api/tokens");
+    expect(init).toMatchObject({ method: "POST", credentials: "same-origin" });
+    expect(JSON.parse(String(init?.body))).toEqual({
+      name: "Portable",
+      kind: "client",
+      source: null,
+    });
+  });
+
+  it("révoque un Jeton par son identifiant, sans secret dans l'URL", async () => {
+    const fetcher = vi.fn(async (_input: string, _init: RequestInit) =>
+      response(200, {
+        v: 1,
+        token: { ...LISTED_TOKEN, revoked_at: 1_700_000_200 },
+      }),
+    );
+
+    await revokeToken("t/1", fetcher);
+
+    const [path, init] = fetcher.mock.calls[0] ?? [];
+    expect(path).toBe("/api/tokens/t%2F1");
+    expect(init).toMatchObject({ method: "DELETE" });
   });
 });

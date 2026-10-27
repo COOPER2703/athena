@@ -36,6 +36,7 @@ from server.adapters.console.contract import (
     SETUP_PATH,
     STATUS_PATH,
     STREAM_PATH,
+    TOKENS_PATH,
 )
 from server.adapters.console.events import EventInjection
 from server.adapters.console.status import (
@@ -219,6 +220,14 @@ class ConsoleAdapter:
         app.router.add_get(SETUP_PATH, self._console_auth.handle_setup_get)
         app.router.add_post(SETUP_PATH, self._console_auth.handle_setup_post)
         app.router.add_post(LOGIN_PATH, self._console_auth.handle_login_post)
+        # Jetons d'accès : authentifiés par le Ticket Console, jamais par un
+        # Jeton d'accès (les deux credentials ne se remplacent pas).
+        app.router.add_get(TOKENS_PATH, self._console_auth.handle_tokens_get)
+        app.router.add_post(TOKENS_PATH, self._console_auth.handle_tokens_post)
+        app.router.add_delete(
+            f"{TOKENS_PATH}/{{token_id}}",
+            self._console_auth.handle_token_delete,
+        )
         # Cycle de vie du Compte : authentifié par le middleware, donc jamais
         # joignable sans Ticket Console valide.
         app.router.add_post(LOGOUT_PATH, self._console_auth.handle_logout)
