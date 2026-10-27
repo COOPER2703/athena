@@ -199,3 +199,121 @@ class TraceEntry(NamedTuple):
 
 class TraceSink(Protocol):
     def emit(self, entry: TraceEntry) -> None: ...
+
+
+class AuthError(Exception):
+    """Échec d'une opération d'authentification, porteur d'un code stable.
+
+    Le code appartient au vocabulaire du port (``invalid_code``,
+    ``already_installed``, ``invalid_credentials``, ``too_many_attempts``,
+    ``weak_password``, ``invalid_username``) : les surfaces le traduisent en
+    statut HTTP, le port ne connaît pas HTTP. ``retry_after`` accompagne
+    ``too_many_attempts`` avec le nombre de secondes restantes.
+    """
+
+    def __init__(self, code: str, *, retry_after: float | None = None) -> None:
+        super().__init__(code)
+        self.code = code
+        self.retry_after = retry_after
+
+
+@dataclass(frozen=True, slots=True)
+class Account:
+    """Le Compte unique de l'admin : identité d'accès, distincte de l'Utilisateur."""
+
+    id: str
+    username: str
+
+
+@dataclass(frozen=True, slots=True)
+class IssuedTicket:
+    """Ticket Console fraîchement ouvert, avec son secret en clair (une fois).
+
+    Le secret n'est jamais réaffiché ni stocké : la surface le dépose dans le
+    cookie ``HttpOnly`` puis l'oublie.
+    """
+
+    account: Account
+    ticket_id: str
+    secret: str
+    expires_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedTicket:
+    """Ticket Console valide, résolu en Compte.
+
+    ``refreshed`` signale que l'expiration glissante a été repoussée pendant
+    cette vérification : la surface peut alors reposer le cookie. Le store
+    n'écrit qu'au plus une fois par intervalle de rafraîchissement.
+    """
+
+    account: Account
+    expires_at: float
+    refreshed: bool
+
+
+class AuthService(Protocol):
+    """Port d'authentification des surfaces publiques (spec #75).
+
+    Les adaptateurs (Console, transport, Webhook) ne connaissent que cette
+    interface, jamais le schéma SQL ni Argon2. L'implémentation vit dans
+    ``server/adapters/auth``. Les Jetons d'accès (tickets #78/#79/#80) et le
+    changement de mot de passe (#77) s'ajouteront ici de façon additive.
+    """
+
+    @property
+    def setup_required(self) -> bool:
+        """Vrai tant qu'aucun Compte n'existe : l'instance n'est pas installée."""
+        ...
+
+    @property
+    def ticket_ttl(self) -> int:
+        """Durée de validité d'un Ticket Console, en secondes."""
+        ...
+
+    @property
+    def password_min_length(self) -> int:
+        """Longueur minimale du mot de passe imposée côté serveur."""
+        ...
+
+    def announce_installation_code(self) -> str | None:
+        """Écrit le Code d'installation au démarrage, s'il en faut un.
+
+        Sans Compte, génère (une fois par démarrage) le code à usage unique et
+        l'émet dans le flux de traces — donc dans le journal. Avec un Compte,
+        ne fait rien et renvoie ``None`` : le code ne doit jamais réapparaître.
+        """
+        ...
+
+    async def install(
+        self, code: str, username: str, password: str
+    ) -> IssuedTicket:
+        """Crée l'unique Compte et ouvre un Ticket Console.
+
+        Lève ``AuthError`` : ``invalid_code`` (code erroné ou consommé),
+        ``already_installed`` (un Compte existe), ``weak_password``,
+        ``invalid_username`` ou ``too_many_attempts``.
+        """
+        ...
+
+    async def login(self, username: str, password: str) -> IssuedTicket:
+        """Vérifie les identifiants et ouvre un Ticket Console.
+
+        Lève ``AuthError`` : ``invalid_credentials`` (même code pour un
+        utilisateur inconnu et un mot de passe faux, pour ne rien révéler) ou
+        ``too_many_attempts`` après le seuil d'échecs.
+        """
+        ...
+
+    async def authenticate_ticket(self, secret: str) -> AuthenticatedTicket | None:
+        """Résout un secret de cookie en Compte, ou ``None`` s'il est invalide.
+
+        Un ticket révoqué ou expiré est refusé immédiatement ; un ticket actif
+        voit son expiration repoussée au plus une fois par intervalle.
+        """
+        ...
+
+    async def revoke_ticket(self, secret: str) -> None:
+        """Révoque un Ticket Console (déconnexion du navigateur courant)."""
+        ...
