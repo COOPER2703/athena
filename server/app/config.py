@@ -7,6 +7,14 @@ from typing import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from server.adapters.auth.store import (
+    DEFAULT_LOGIN_BLOCK_SECONDS,
+    DEFAULT_LOGIN_MAX_ATTEMPTS,
+    DEFAULT_PASSWORD_MIN_LENGTH,
+    DEFAULT_SETUP_MAX_ATTEMPTS,
+    DEFAULT_TICKET_REFRESH_SECONDS,
+    DEFAULT_TICKET_TTL_SECONDS,
+)
 from server.adapters.memory.embedder import DEFAULT_EMBED_MODEL
 from server.app.secrets import EnvSecretResolver, SecretResolver
 
@@ -18,13 +26,28 @@ DEFAULT_GEMINI_VOICE = "Leda"
 # fermée, donc plus aucune Session automatique ne se lançait.
 DEFAULT_JUDGE_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_MEMORY_DB = "athena_memory.db"
+# Base d'authentification **séparée** de la mémoire (spec #75) : Comptes,
+# Tickets Console et Jetons d'accès se sauvegardent et se restaurent
+# indépendamment. Comme la base mémoire, le défaut est relatif au répertoire
+# de travail ; il est surchargeable par `ATHENA_AUTH_DB`.
+DEFAULT_AUTH_DB = "auth.db"
+# Les bornes de sécurité ont **une** source de vérité : le store d'auth, qui
+# les applique. La configuration n'en est qu'une vue exprimée dans ses unités
+# (jours, minutes), pour ne pas pouvoir diverger des valeurs réellement
+# utilisées.
+DEFAULT_CONSOLE_TICKET_DAYS = DEFAULT_TICKET_TTL_SECONDS // (24 * 60 * 60)
+DEFAULT_CONSOLE_TICKET_REFRESH_SECONDS = DEFAULT_TICKET_REFRESH_SECONDS
+DEFAULT_AUTH_PASSWORD_MIN_LENGTH = DEFAULT_PASSWORD_MIN_LENGTH
+DEFAULT_AUTH_LOGIN_MAX_ATTEMPTS = DEFAULT_LOGIN_MAX_ATTEMPTS
+DEFAULT_AUTH_LOGIN_BLOCK_MINUTES = DEFAULT_LOGIN_BLOCK_SECONDS // 60
+DEFAULT_AUTH_SETUP_MAX_ATTEMPTS = DEFAULT_SETUP_MAX_ATTEMPTS
 # Modèle de Consolidation : Flash-Lite, disponible sur l'échelle gratuite. Le
 # précédent défaut (`gemini-2.0-flash`) a été retiré et renvoyait 404.
 DEFAULT_CONSOLIDATION_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_WEBHOOK_HOST = "127.0.0.1"
 DEFAULT_WEBHOOK_PORT = 8766
 # La Console web est une surface d'observation (ADR-0003) : port dédié,
-# loopback par défaut, sans authentification en v1, comme le Webhook.
+# loopback par défaut, et authentification applicative depuis l'ADR-0017.
 DEFAULT_CONSOLE_HOST = "127.0.0.1"
 DEFAULT_CONSOLE_PORT = 8767
 # Build de la SPA servi par la Console. Le répertoire est relatif au répertoire
@@ -148,11 +171,13 @@ class MemoryConfig(BaseModel):
 
 
 class WebhookConfig(BaseModel):
-    """Paramètres de l'adaptateur Webhook HTTP (ADR-0011).
+    """Paramètres de l'adaptateur Webhook HTTP (ADR-0011, ADR-0017).
 
     Lié à ``127.0.0.1`` par défaut : la surface n'est ouverte qu'à la machine
-    locale, sans authentification. L'exposition au LAN (jeton partagé) est hors
-    périmètre de ce lot.
+    locale tant qu'on ne la déplace pas. Depuis l'ADR-0017, elle exige un
+    **Jeton d'accès** de nature ``source`` en ``Authorization: Bearer`` ; la
+    Source du Jeton fait autorité et une Source de corps contradictoire est
+    refusée.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -173,12 +198,15 @@ class WebhookConfig(BaseModel):
 
 
 class ConsoleConfig(BaseModel):
-    """Paramètres de la Console web (ADR-0003, ADR-0016).
+    """Paramètres de la Console web (ADR-0003, ADR-0016, ADR-0017).
 
     Surface d'observation servie sur son propre port, **liée à ``127.0.0.1``
-    par défaut** : elle n'est joignable que depuis la machine du serveur et
-    reste sans authentification en v1. Elle est **activée par défaut**, comme
-    le Webhook, et se désactive par ``ATHENA_CONSOLE_ENABLED=0``.
+    par défaut** : elle n'est joignable que depuis la machine du serveur tant
+    qu'on ne la déplace pas. Elle est **activée par défaut**, comme le Webhook,
+    et se désactive par ``ATHENA_CONSOLE_ENABLED=0``. Depuis l'ADR-0017, toute
+    route d'API hors identité exige un Ticket Console ; ``auth=None`` au
+    constructeur de l'adaptateur ne reste qu'un seam de test unitaire, jamais un
+    mode de production.
 
     Défauts : ``enabled=True``, ``host="127.0.0.1"``, ``port=8767``,
     ``static_dir="web/dist"`` pour le build de la SPA et ``trace_buffer=500``
@@ -213,6 +241,43 @@ class ConsoleConfig(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
+class AuthConfig(BaseModel):
+    """Paramètres du module d'authentification (spec #75).
+
+    La base d'auth est **distincte** de la mémoire ; elle est créée sans
+    infrastructure de migration (``CREATE TABLE IF NOT EXISTS``). Les valeurs
+    sont des bornes de sécurité, jamais des secrets : le Code d'installation,
+    les Tickets Console et les Jetons d'accès sont générés au démarrage ou à la
+    demande.
+
+    Défauts : ``auth.db``, Ticket de 30 jours glissants rafraîchi au plus une
+    fois par heure, mot de passe d'au moins 12 caractères, blocage après
+    cinq échecs pendant quinze minutes. Surchargeables par ``ATHENA_AUTH_DB``,
+    ``ATHENA_CONSOLE_TICKET_DAYS``, ``ATHENA_CONSOLE_TICKET_REFRESH_SECONDS``,
+    ``ATHENA_AUTH_PASSWORD_MIN_LENGTH``, ``ATHENA_AUTH_LOGIN_MAX_ATTEMPTS``,
+    ``ATHENA_AUTH_LOGIN_BLOCK_MINUTES`` et ``ATHENA_AUTH_SETUP_MAX_ATTEMPTS``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    db_path: str = Field(default=DEFAULT_AUTH_DB, min_length=1)
+    ticket_days: int = Field(default=DEFAULT_CONSOLE_TICKET_DAYS, ge=1)
+    ticket_refresh_seconds: int = Field(
+        default=DEFAULT_CONSOLE_TICKET_REFRESH_SECONDS, ge=0
+    )
+    password_min_length: int = Field(
+        default=DEFAULT_AUTH_PASSWORD_MIN_LENGTH, ge=1
+    )
+    login_max_attempts: int = Field(default=DEFAULT_AUTH_LOGIN_MAX_ATTEMPTS, ge=1)
+    login_block_minutes: int = Field(default=DEFAULT_AUTH_LOGIN_BLOCK_MINUTES, ge=1)
+    setup_max_attempts: int = Field(default=DEFAULT_AUTH_SETUP_MAX_ATTEMPTS, ge=1)
+
+    @field_validator("db_path", mode="before")
+    @classmethod
+    def _strip_db_path(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
 class PluginsConfig(BaseModel):
     """Emplacements des plugins serveur (ADR-0014).
 
@@ -243,6 +308,7 @@ class AppConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     webhook: WebhookConfig = Field(default_factory=WebhookConfig)
     console: ConsoleConfig = Field(default_factory=ConsoleConfig)
+    auth: AuthConfig = Field(default_factory=AuthConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
     log_level: LogLevel = LogLevel.INFO
     log_dir: str = Field(default=DEFAULT_LOG_DIR, min_length=1)
@@ -377,6 +443,32 @@ def load_config(
         plugins=PluginsConfig(
             directory=merged.get("ATHENA_PLUGINS_DIR", DEFAULT_PLUGINS_DIR),
             state_path=merged.get("ATHENA_PLUGINS_STATE", DEFAULT_PLUGINS_STATE),
+        ),
+        auth=AuthConfig(
+            db_path=merged.get("ATHENA_AUTH_DB", DEFAULT_AUTH_DB),
+            ticket_days=merged.get(
+                "ATHENA_CONSOLE_TICKET_DAYS", str(DEFAULT_CONSOLE_TICKET_DAYS)
+            ),
+            ticket_refresh_seconds=merged.get(
+                "ATHENA_CONSOLE_TICKET_REFRESH_SECONDS",
+                str(DEFAULT_CONSOLE_TICKET_REFRESH_SECONDS),
+            ),
+            password_min_length=merged.get(
+                "ATHENA_AUTH_PASSWORD_MIN_LENGTH",
+                str(DEFAULT_AUTH_PASSWORD_MIN_LENGTH),
+            ),
+            login_max_attempts=merged.get(
+                "ATHENA_AUTH_LOGIN_MAX_ATTEMPTS",
+                str(DEFAULT_AUTH_LOGIN_MAX_ATTEMPTS),
+            ),
+            login_block_minutes=merged.get(
+                "ATHENA_AUTH_LOGIN_BLOCK_MINUTES",
+                str(DEFAULT_AUTH_LOGIN_BLOCK_MINUTES),
+            ),
+            setup_max_attempts=merged.get(
+                "ATHENA_AUTH_SETUP_MAX_ATTEMPTS",
+                str(DEFAULT_AUTH_SETUP_MAX_ATTEMPTS),
+            ),
         ),
         log_level=merged.get("LOG_LEVEL", "INFO"),
         log_dir=merged.get("ATHENA_LOG_DIR", DEFAULT_LOG_DIR),

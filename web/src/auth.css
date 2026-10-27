@@ -1,0 +1,50 @@
+/* Écrans d'installation et de connexion : carte centrée, champs partagés. */
+
+.auth {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 2rem 1rem;
+}
+
+.auth__card {
+  width: min(28rem, 100%);
+}
+
+.auth__subtitle {
+  margin: 0 0 1.25rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.auth__form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.auth__hint {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.auth__actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0.25rem;
+}
+
+@media (max-width: 40rem) {
+  .auth {
+    padding: 1rem;
+  }
+
+  .auth__actions {
+    justify-content: stretch;
+  }
+
+  .auth__actions .button {
+    width: 100%;
+  }
+}

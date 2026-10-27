@@ -8,7 +8,7 @@ from protocol import Error, SessionEnded, SessionStarted
 from client.audio_io import Audio
 from client.config import AppConfig
 from client.state import ClientState
-from client.ws_client import Transport
+from client.ws_client import AccessTokenError, Transport
 
 log = logging.getLogger("athena.client")
 
@@ -59,7 +59,11 @@ class ClientApp:
 
     async def run(self) -> None:
         self._stopped.clear()
-        tasks = [asyncio.create_task(self._transport.run())]
+        # La tâche du transport est suivie à part : une erreur d'authentification
+        # doit remonter jusqu'au point d'entrée au lieu d'être avalée par le
+        # démontage.
+        transport_task = asyncio.create_task(self._transport.run())
+        tasks = [transport_task]
 
         try:
             await self._audio.start_input()
@@ -71,9 +75,13 @@ class ClientApp:
         finally:
             for task in tasks:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
             await self._audio.close()
             await self._transport.disconnect()
+
+        failure = results[0]
+        if isinstance(failure, AccessTokenError):
+            raise failure
 
     def stop(self) -> None:
         self._stopped.set()

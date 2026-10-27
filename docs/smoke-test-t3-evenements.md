@@ -17,18 +17,28 @@ s'écrit donc `.venv/bin/python`).
 - Les dépendances à jour (ajoute `aiohttp`) : `uv sync`.
 - **Un Client connecté** : sans lui, le noyau juge quand même l'Événement, mais
   `_registered_client_id` est vide et l'Annonce n'a **aucune cible** — personne ne l'entend.
+- Un **Compte** et deux **Jetons d'accès** (ADR-0017) : un `client` pour le Client audio, un
+  `source` pour le Webhook. L'installation et la création des Jetons se font depuis la
+  Console (`http://127.0.0.1:8767`, panneau Jetons), comme au smoke test T1.
 
 Créez un fichier `.env` à la racine (lu par le serveur) :
 
 ```dotenv
 GEMINI_API_KEY=votre-cle
 ATHENA_USER_ID=owner
-# Webhook (ADR-0011) : lié à localhost par défaut, aucun jeton
+# Webhook (ADR-0017) : lié à localhost par défaut, exige un Jeton `source`
 # ATHENA_WEBHOOK_ENABLED=1
 # ATHENA_WEBHOOK_HOST=127.0.0.1
 # ATHENA_WEBHOOK_PORT=8766
 # Verbeux : ajoute les décisions détaillées au flux (sinon niveau INFO)
 # ATHENA_DEBUG_DECISIONS=1
+```
+
+Dans le shell qui lance les `curl`, exportez le Jeton du Webhook (secret affiché une seule
+fois à la création) :
+
+```sh
+export ATHENA_WEBHOOK_TOKEN=ath_…
 ```
 
 ## 1. Démarrer le serveur
@@ -47,6 +57,7 @@ l'étape 3 la confirme).
 Dans un second terminal :
 
 ```sh
+export ATHENA_ACCESS_TOKEN=ath_…   # Jeton de nature client
 python -m client
 ```
 
@@ -58,6 +69,7 @@ Session ; le fait serait alors mis en File et jugé au retour au Repos.)
 
 ```sh
 curl -i -X POST http://127.0.0.1:8766/events \
+  -H "Authorization: Bearer $ATHENA_WEBHOOK_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"source": "maison", "content": "La porte d entree vient de s ouvrir"}'
 ```
@@ -81,10 +93,11 @@ Dans le terminal du serveur, cherchez (l'ordre est celui du Canal unique) :
 - après l'échéance : `[core] EventJudge` (`events` = taille du lot) puis
   `[judge] judgment_done` (`announce`) — le verdict vient d'un **modèle texte** ;
 - si le verdict annonce (`announce=true`) : une **seule** Connexion Live d'Annonce — une
-  Session ordinaire (prompt système, Activation mémoire, Tools) augmentée de l'instruction
-  d'Annonce (ADR-0013). `[gemini] connected`, puis `announcement_facts_sent` (les faits bruts
-  de l'Événement entrent en contexte, sans être prononcés) et `announcement_sent` (la phrase
-  du juge, qui déclenche la parole) ;
+  Session ouverte par un Événement (prompt système, Activation mémoire, instruction de
+  plugin) mais **sans aucun Tool** (ADR-0017), augmentée de l'instruction d'Annonce
+  (ADR-0013). `[gemini] connected`, puis `announcement_facts_sent` (les faits bruts de
+  l'Événement entrent en contexte, sans être prononcés) et `announcement_sent` (la phrase du
+  juge, qui déclenche la parole) ;
 - si le LLM parle : `[core] LlmTranscription` puis `[core] AnnounceSessionStarted` avec
   `auto=true` — le Client reçoit une **Annonce proactive** et le fait entre au Journal en
   rôle `event` ;
@@ -94,21 +107,38 @@ Dans le terminal du serveur, cherchez (l'ordre est celui du Canal unique) :
 ## 5. Cas d'erreur
 
 ```sh
-# 400 : contenu vide
+# 401 : sans Jeton, ou avec un Jeton invalide / de nature client
 curl -i -X POST http://127.0.0.1:8766/events -H 'Content-Type: application/json' \
+  -d '{"source": "maison", "content": "sans jeton"}'
+curl -i -X POST http://127.0.0.1:8766/events \
+  -H "Authorization: Bearer $ATHENA_WEBHOOK_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"source": "autre-source", "content": "source contradictoire"}'   # 403
+
+# 400 : contenu vide
+curl -i -X POST http://127.0.0.1:8766/events \
+  -H "Authorization: Bearer $ATHENA_WEBHOOK_TOKEN" \
+  -H 'Content-Type: application/json' \
   -d '{"source": "maison", "content": "   "}'
 
 # 415 : mauvais Content-Type
-curl -i -X POST http://127.0.0.1:8766/events -H 'Content-Type: text/plain' -d 'hello'
+curl -i -X POST http://127.0.0.1:8766/events \
+  -H "Authorization: Bearer $ATHENA_WEBHOOK_TOKEN" \
+  -H 'Content-Type: text/plain' -d 'hello'
 
 # 413 : contenu au-delà de 4096 caractères
-curl -i -X POST http://127.0.0.1:8766/events -H 'Content-Type: application/json' \
+curl -i -X POST http://127.0.0.1:8766/events \
+  -H "Authorization: Bearer $ATHENA_WEBHOOK_TOKEN" \
+  -H 'Content-Type: application/json' \
   -d "{\"content\": \"$(printf 'x%.0s' {1..4097})\"}"
 
-# 404 : chemin inconnu ; 405 : mauvaise méthode
+# 404 : chemin inconnu ; 405 : mauvaise méthode (le routage précède l'auth)
 curl -i -X POST http://127.0.0.1:8766/nope -H 'Content-Type: application/json' -d '{}'
 curl -i http://127.0.0.1:8766/events
 ```
+
+Le 401 porte `WWW-Authenticate: Bearer`. La Source du Jeton fait autorité : un corps sans
+`source` est accepté et prend la Source du Jeton ; un corps qui la contredit est refusé `403`.
 
 ## 6. Rafale et dédup intra-fenêtre
 
@@ -116,7 +146,9 @@ Répétez plusieurs fois la même requête **dans les 5 s** :
 
 ```sh
 for i in 1 2 3; do
-  curl -s -X POST http://127.0.0.1:8766/events -H 'Content-Type: application/json' \
+  curl -s -X POST http://127.0.0.1:8766/events \
+    -H "Authorization: Bearer $ATHENA_WEBHOOK_TOKEN" \
+    -H 'Content-Type: application/json' \
     -d '{"source": "maison", "content": "La porte vient de s ouvrir"}'
 done
 ```
@@ -137,14 +169,20 @@ python -m pytest protocol/tests server/tests client/tests -q
 ```
 
 La couture de l'adaptateur est couverte par `server/tests/test_webhook_adapter.py` (succès,
-Source par défaut, champs vides, JSON invalide, Content-Type, taille, 404, 405) ; la config par
-`server/tests/test_app_config.py` ; le câblage `App.run → push_event` par
-`server/tests/test_app_root.py`.
+Source par défaut, champs vides, JSON invalide, Content-Type, taille, 404, 405) et
+`server/tests/test_webhook_auth.py` (Jeton `source`, Source autoritaire, contradiction,
+révocation) ; la config par `server/tests/test_app_config.py` ; le câblage
+`App.run → push_event` par `server/tests/test_app_root.py`.
 
 ## Résultat du run
 
 **Date** : 2026-10-17 · **Machine** : poste de dev Linux · **Python** : 3.14 (venv locale
 `.venv`, à exécuter depuis la racine du dépôt) · `aiohttp` 3.14.5.
+
+> Run **antérieur à l'authentification des surfaces** (#75 / ADR-0017) : les `curl` du run
+> n'envoyaient ni Jeton `source` ni Ticket, et le Client n'envoyait pas de Jeton `client`.
+> Les traces et verdicts restent valables ; depuis, chaque `POST /events` porte
+> `Authorization: Bearer $ATHENA_WEBHOOK_TOKEN` et le handshake Client un Jeton `client`.
 
 **Ce qui a été exécuté pour de vrai** (chemin non-voix : audio/VAD humain non automatisable) —
 serveur réel `WS_PORT=8791 ATHENA_WEBHOOK_PORT=8792`, base mémoire temporaire, `curl` réel :

@@ -4,6 +4,11 @@
 
 accepted
 
+Précisé par l'ADR-0017 : `GET /api/session` est une route d'**identité** de la Console (état
+d'authentification et d'installation), pas un instantané de lecture du noyau. C'est
+l'exception explicite à la règle de route de lecture unique ; toute lecture d'état continue de
+passer par `App.snapshot()`.
+
 ## Contexte
 
 La Console web doit montrer l'état vivant du serveur : Session en cours, Client actif,

@@ -19,6 +19,7 @@ from server.app.config import (
     DEFAULT_WEBHOOK_HOST,
     DEFAULT_WEBHOOK_PORT,
     AppConfig,
+    AuthConfig,
     ConsoleConfig,
     LogLevel,
     MemoryConfig,
@@ -305,6 +306,61 @@ def test_console_reads_and_coerces_environment() -> None:
     ],
 )
 def test_invalid_console_config_raises_clear_validation_error(overrides) -> None:
+    with pytest.raises(ValidationError):
+        load_config(env={"GEMINI_API_KEY": "k", **overrides}, env_file=None)
+
+
+def test_auth_defaults_are_safe_and_live_in_a_separate_database() -> None:
+    cfg = load_config(env={"GEMINI_API_KEY": "k"}, env_file=None)
+
+    assert cfg.auth == AuthConfig()
+    assert cfg.auth.db_path == "auth.db"
+    assert cfg.auth.db_path != cfg.memory.db_path
+    assert cfg.auth.ticket_days == 30
+    assert cfg.auth.ticket_refresh_seconds == 3600
+    assert cfg.auth.password_min_length == 12
+    assert cfg.auth.login_max_attempts == 5
+    assert cfg.auth.login_block_minutes == 15
+    assert cfg.auth.setup_max_attempts == 5
+
+
+def test_auth_reads_and_coerces_its_environment() -> None:
+    cfg = load_config(
+        env={
+            "GEMINI_API_KEY": "k",
+            "ATHENA_AUTH_DB": "state/auth.db",
+            "ATHENA_CONSOLE_TICKET_DAYS": "7",
+            "ATHENA_CONSOLE_TICKET_REFRESH_SECONDS": "0",
+            "ATHENA_AUTH_PASSWORD_MIN_LENGTH": "16",
+            "ATHENA_AUTH_LOGIN_MAX_ATTEMPTS": "3",
+            "ATHENA_AUTH_LOGIN_BLOCK_MINUTES": "5",
+            "ATHENA_AUTH_SETUP_MAX_ATTEMPTS": "2",
+        },
+        env_file=None,
+    )
+    assert cfg.auth.db_path == "state/auth.db"
+    assert cfg.auth.ticket_days == 7
+    assert cfg.auth.ticket_refresh_seconds == 0
+    assert cfg.auth.password_min_length == 16
+    assert cfg.auth.login_max_attempts == 3
+    assert cfg.auth.login_block_minutes == 5
+    assert cfg.auth.setup_max_attempts == 2
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"ATHENA_AUTH_DB": "   "},
+        {"ATHENA_CONSOLE_TICKET_DAYS": "0"},
+        {"ATHENA_CONSOLE_TICKET_REFRESH_SECONDS": "-1"},
+        {"ATHENA_AUTH_PASSWORD_MIN_LENGTH": "0"},
+        {"ATHENA_AUTH_LOGIN_MAX_ATTEMPTS": "0"},
+        {"ATHENA_AUTH_LOGIN_BLOCK_MINUTES": "0"},
+        {"ATHENA_AUTH_SETUP_MAX_ATTEMPTS": "0"},
+        {"ATHENA_CONSOLE_TICKET_DAYS": "not-a-number"},
+    ],
+)
+def test_invalid_auth_config_raises_clear_validation_error(overrides) -> None:
     with pytest.raises(ValidationError):
         load_config(env={"GEMINI_API_KEY": "k", **overrides}, env_file=None)
 

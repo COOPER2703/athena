@@ -199,3 +199,219 @@ class TraceEntry(NamedTuple):
 
 class TraceSink(Protocol):
     def emit(self, entry: TraceEntry) -> None: ...
+
+
+class AuthError(Exception):
+    """Échec d'une opération d'authentification, porteur d'un code stable.
+
+    Le code appartient au vocabulaire du port (``invalid_code``,
+    ``already_installed``, ``invalid_credentials``, ``too_many_attempts``,
+    ``weak_password``, ``invalid_username``) : les surfaces le traduisent en
+    statut HTTP, le port ne connaît pas HTTP. ``retry_after`` accompagne
+    ``too_many_attempts`` avec le nombre de secondes restantes.
+    """
+
+    def __init__(self, code: str, *, retry_after: float | None = None) -> None:
+        super().__init__(code)
+        self.code = code
+        self.retry_after = retry_after
+
+
+@dataclass(frozen=True, slots=True)
+class Account:
+    """Le Compte unique de l'admin : identité d'accès, distincte de l'Utilisateur."""
+
+    id: str
+    username: str
+
+
+@dataclass(frozen=True, slots=True)
+class IssuedTicket:
+    """Ticket Console fraîchement ouvert, avec son secret en clair (une fois).
+
+    Le secret n'est jamais réaffiché ni stocké : la surface le dépose dans le
+    cookie ``HttpOnly`` puis l'oublie.
+    """
+
+    account: Account
+    ticket_id: str
+    secret: str
+    expires_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class AccessToken:
+    """Un Jeton d'accès tel que la Console le montre.
+
+    Le secret et son empreinte n'y figurent **jamais** : seul le préfixe
+    affichable reste, pour qu'un humain reconnaisse le Jeton sans pouvoir s'en
+    servir. ``source`` n'est renseignée que pour la nature ``source`` (Webhook) ;
+    ``revoked_at`` porte la révocation, qui reste visible après coup.
+    """
+
+    id: str
+    name: str
+    kind: str
+    source: str | None
+    prefix: str
+    created_at: float
+    last_used_at: float | None = None
+    revoked_at: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class IssuedAccessToken:
+    """Jeton fraîchement créé, avec son secret en clair (une seule fois).
+
+    Le secret n'est ni relisible ni stocké : la surface l'affiche une fois puis
+    l'oublie. ``token`` est la ligne durable, sans secret.
+    """
+
+    token: AccessToken
+    secret: str
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedTicket:
+    """Ticket Console valide, résolu en Compte.
+
+    ``refreshed`` signale que l'expiration glissante a été repoussée pendant
+    cette vérification : la surface peut alors reposer le cookie. Le store
+    n'écrit qu'au plus une fois par intervalle de rafraîchissement.
+    """
+
+    account: Account
+    expires_at: float
+    refreshed: bool
+
+
+class AuthService(Protocol):
+    """Port d'authentification des surfaces publiques (spec #75).
+
+    Les adaptateurs (Console, transport, Webhook) ne connaissent que cette
+    interface, jamais le schéma SQL ni Argon2. L'implémentation vit dans
+    ``server/adapters/auth``. Les Ticket Console (#76), les Jetons d'accès
+    (#78) et le changement de mot de passe (#77) sont déclarés ici de façon
+    additive ; les consommateurs de Jetons (#79 transport, #80 Webhook) n'ont
+    que ``authenticate_token`` et ``mark_token_used`` à appeler.
+    """
+
+    @property
+    def setup_required(self) -> bool:
+        """Vrai tant qu'aucun Compte n'existe : l'instance n'est pas installée."""
+        ...
+
+    @property
+    def ticket_ttl(self) -> int:
+        """Durée de validité d'un Ticket Console, en secondes."""
+        ...
+
+    @property
+    def password_min_length(self) -> int:
+        """Longueur minimale du mot de passe imposée côté serveur."""
+        ...
+
+    def announce_installation_code(self) -> str | None:
+        """Écrit le Code d'installation au démarrage, s'il en faut un.
+
+        Sans Compte, génère (une fois par démarrage) le code à usage unique et
+        l'émet dans le flux de traces — donc dans le journal. Avec un Compte,
+        ne fait rien et renvoie ``None`` : le code ne doit jamais réapparaître.
+        """
+        ...
+
+    async def install(
+        self, code: str, username: str, password: str
+    ) -> IssuedTicket:
+        """Crée l'unique Compte et ouvre un Ticket Console.
+
+        Lève ``AuthError`` : ``invalid_code`` (code erroné ou consommé),
+        ``already_installed`` (un Compte existe), ``weak_password``,
+        ``invalid_username`` ou ``too_many_attempts``.
+        """
+        ...
+
+    async def login(self, username: str, password: str) -> IssuedTicket:
+        """Vérifie les identifiants et ouvre un Ticket Console.
+
+        Lève ``AuthError`` : ``invalid_credentials`` (même code pour un
+        utilisateur inconnu et un mot de passe faux, pour ne rien révéler) ou
+        ``too_many_attempts`` après le seuil d'échecs.
+        """
+        ...
+
+    async def authenticate_ticket(self, secret: str) -> AuthenticatedTicket | None:
+        """Résout un secret de cookie en Compte, ou ``None`` s'il est invalide.
+
+        Un ticket révoqué ou expiré est refusé immédiatement ; un ticket actif
+        voit son expiration repoussée au plus une fois par intervalle.
+        """
+        ...
+
+    async def revoke_ticket(self, secret: str) -> None:
+        """Révoque un Ticket Console (déconnexion du navigateur courant)."""
+        ...
+
+    async def list_tokens(self) -> list[AccessToken]:
+        """Liste les Jetons d'accès, révoqués compris, sans secret ni empreinte."""
+        ...
+
+    async def create_token(
+        self, *, name: str, kind: str, source: str | None = None
+    ) -> IssuedAccessToken:
+        """Crée un Jeton nommé et renvoie son secret en clair, une seule fois.
+
+        ``kind`` vaut ``client`` (transport des Clients) ou ``source`` (Webhook) ;
+        ``source`` est obligatoire pour ``source``, interdite pour ``client``.
+        Lève ``AuthError`` : ``invalid_token_name``, ``invalid_kind``,
+        ``invalid_source``.
+        """
+        ...
+
+    async def revoke_token(self, token_id: str) -> AccessToken | None:
+        """Révoque un Jeton ; ``None`` si l'identifiant est inconnu.
+
+        La révocation prend effet à la validation suivante, sans redémarrage. Un
+        Jeton déjà révoqué garde sa date de révocation d'origine.
+        """
+        ...
+
+    async def authenticate_token(
+        self, secret: str, kind: str
+    ) -> AccessToken | None:
+        """Résout un secret en Jeton de la nature demandée, ou ``None``.
+
+        Refuse un secret inconnu, révoqué, ou d'une autre nature : un Jeton
+        ``source`` ne vaut pas pour le transport, et réciproquement.
+        """
+        ...
+
+    async def mark_token_used(self, token_id: str) -> None:
+        """Enregistre la dernière utilisation, au plus une fois par minute.
+
+        Le transport et le Webhook appellent ceci après chaque usage ; l'écriture
+        est bornée par la résolution du store pour ne pas écrire par trame.
+        """
+        ...
+
+    async def revoke_account_tickets(self, account_id: str) -> None:
+        """Révoque tous les Tickets Console d'un Compte (« déconnecter partout »).
+
+        L'effet est immédiat : chaque vérification relit la base, donc un Ticket
+        révoqué est refusé dès la requête suivante, y compris pour l'upgrade du
+        flux de Traces. Un Ticket déjà révoqué est ignoré.
+        """
+        ...
+
+    async def change_password(
+        self, secret: str, current_password: str, new_password: str
+    ) -> None:
+        """Change le mot de passe du Compte, preuve de l'actuel à l'appui.
+
+        ``secret`` identifie le Ticket Console courant : il reste valide après
+        le changement, tandis que **les autres** Tickets du Compte sont
+        révoqués. Lève ``AuthError`` : ``invalid_password`` si le mot de passe
+        actuel est faux, ``weak_password`` si le nouveau est trop court,
+        ``unauthorized`` si le Ticket a disparu entre-temps.
+        """
+        ...

@@ -75,7 +75,9 @@ def test_tap_then_speak_yields_audio_response() -> None:
             await wait_until(lambda: bool(sink.of_kind("started")))
 
             audio = MicAudio()
-            ws = WsTransport(ClientConfig(server_url=_url(transport)))
+            ws = WsTransport(
+                ClientConfig(server_url=_url(transport), access_token="ath_test")
+            )
             client = ClientApp(AppConfig(), audio=audio, transport=ws)
             client_task = asyncio.create_task(client.run())
             try:

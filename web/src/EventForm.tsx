@@ -6,16 +6,16 @@ import {
   characterCount,
   submitDraft,
 } from "./events";
+import type { Feedback } from "./feedback";
 import "./event-form.css";
 
-/** Retour d'envoi affiché sous le formulaire. */
-type Feedback =
-  | { kind: "success"; message: string }
-  | { kind: "error"; message: string }
-  | null;
-
 /** Formulaire d'injection d'un Événement dans le Canal d'événements. */
-export function EventForm() {
+export function EventForm({
+  onUnauthorized,
+}: {
+  /** Appelé quand l'injection est refusée par un 401 (Ticket expiré). */
+  onUnauthorized?: () => void;
+} = {}) {
   const [source, setSource] = useState(DEFAULT_SOURCE);
   const [content, setContent] = useState("");
   const [feedback, setFeedback] = useState<Feedback>(null);
@@ -36,6 +36,8 @@ export function EventForm() {
       if (result.ok) {
         setFeedback({ kind: "success", message: result.message });
         setContent("");
+      } else if (result.unauthorized === true) {
+        onUnauthorized?.();
       } else {
         setFeedback({ kind: "error", message: result.message });
       }

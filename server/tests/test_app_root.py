@@ -10,12 +10,20 @@ from typing import Callable, TypeVar
 import aiohttp
 import websockets
 
-from conftest import FakeJudge, RecordingTraceSink, wait_until
+from conftest import (
+    FakeJudge,
+    RecordingTraceSink,
+    console_session,
+    install_console,
+    wait_until,
+)
 from protocol import Register, Registered, SessionEndReason, decode, encode
 from server import __version__
+from server.adapters.auth import SqliteAuthStore
 from server.adapters.console import ConsoleAdapter
 from server.app.config import (
     AppConfig,
+    AuthConfig,
     ConsoleConfig,
     GeminiConfig,
     PluginsConfig,
@@ -481,6 +489,7 @@ def test_build_app_installs_logging_bridge_debug_only_when_flag_on(
                 debug_decisions=False,
                 log_level="WARNING",
                 log_dir=str(tmp_path),
+                auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
             )
         )
         assert root.level == logging.WARNING
@@ -576,6 +585,47 @@ def test_pushed_event_at_rest_judges_then_opens_an_announcement_connection() -> 
             assert announcement.connection_id == opened.connection_id
             assert announcement.text == "La porte est ouverte"
             assert clock.scheduled[-1] == (opened.connection_id, ANNOUNCE_TIMEOUT)
+
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+        finally:
+            if not runner.done():
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_announcement_connection_carries_none_of_the_kernel_tools() -> None:
+    """Bout en bout : les Tools du noyau existent et sont servis à une Session
+    demandée, mais la Connexion d'Annonce est ouverte sans aucun outil (#81)."""
+
+    async def scenario() -> None:
+        memory = FakeMemory()
+        registry = ToolRegistry()
+        register_memory_tools(registry, memory, "alice")
+        transport, gemini, clock, sink, app = _build(
+            memory,
+            tools=registry,
+            announce_prompt="JUGE",
+            judge=FakeJudge(message="La porte est ouverte"),
+        )
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: transport.started)
+            await transport.feed(ClientRegistered(client_id="c1"))
+
+            app.push_event("matrix", "porte ouverte")
+            await wait_until(
+                lambda: (EVENT_WINDOW_TIMER_ID, EVENT_WINDOW_TIMEOUT)
+                in clock.scheduled
+            )
+            await clock.fire(EVENT_WINDOW_TIMER_ID)
+
+            await wait_until(lambda: gemini.of_type(OpenLiveConnection))
+            # Les Tools existent bel et bien ; ils ne partent simplement pas.
+            assert registry.specs()
+            assert gemini.of_type(OpenLiveConnection)[0].tools == ()
 
             app.request_shutdown()
             await asyncio.wait_for(runner, 1.0)
@@ -743,13 +793,15 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-async def _connect_when_ready(url: str) -> websockets.ClientConnection:
+async def _connect_when_ready(
+    url: str, *, headers: dict[str, str] | None = None
+) -> websockets.ClientConnection:
     """Attend que le transport serveur écoute, puis ouvre la connexion."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + 1.0
     while True:
         try:
-            return await websockets.connect(url)
+            return await websockets.connect(url, additional_headers=headers)
         except OSError:
             if loop.time() > deadline:
                 raise
@@ -781,12 +833,18 @@ def test_build_app_announces_the_kernel_and_plugin_tools_on_registration(
                 directory=str(plugins_dir), state_path=str(state_path)
             ),
             log_dir=str(tmp_path),
+            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
         )
         app = build_app(config, secrets=EnvSecretResolver({}), env={}, env_file=None)
+        # Le transport exige un Jeton de nature ``client`` : il est créé dans la
+        # même base que celle que ``build_app`` ouvre.
+        store = SqliteAuthStore(db_path=str(tmp_path / "auth.db"))
+        issued = await store.create_token(name="desktop", kind="client")
         runner = asyncio.create_task(app.run())
         try:
             async with await _connect_when_ready(
-                f"ws://127.0.0.1:{port}"
+                f"ws://127.0.0.1:{port}",
+                headers={"Authorization": f"Bearer {issued.secret}"},
             ) as ws:
                 await ws.send(
                     encode(Register(client_name="desktop", platform="linux"))
@@ -811,6 +869,7 @@ def test_build_app_does_not_wire_a_disabled_console(tmp_path: Path) -> None:
             gemini=GeminiConfig(api_key="test-key"),
             console=ConsoleConfig(enabled=False),
             log_dir=str(tmp_path),
+            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
         )
     )
 
@@ -823,21 +882,23 @@ def test_build_app_wires_an_enabled_console(tmp_path: Path) -> None:
             gemini=GeminiConfig(api_key="test-key"),
             console=ConsoleConfig(port=_free_port()),
             log_dir=str(tmp_path),
+            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
         )
     )
 
     assert isinstance(app.console, ConsoleAdapter)
 
 
-async def _snapshot_when_ready(url: str) -> dict:
+async def _snapshot_when_ready(
+    http: aiohttp.ClientSession, url: str
+) -> dict:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + 2.0
     while True:
         try:
-            async with aiohttp.ClientSession() as http:
-                async with http.get(url) as response:
-                    assert response.status == 200
-                    return await response.json()
+            async with http.get(url) as response:
+                assert response.status == 200
+                return await response.json()
         except aiohttp.ClientConnectorError:
             if loop.time() > deadline:
                 raise
@@ -873,6 +934,7 @@ def test_build_app_serves_the_configured_build_at_the_root(
                 state_path=str(tmp_path / "plugins.json"),
             ),
             log_dir=str(tmp_path),
+            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
         )
         app = build_app(config, secrets=EnvSecretResolver({}), env={}, env_file=None)
         runner = asyncio.create_task(app.run())
@@ -925,13 +987,17 @@ def test_build_app_serves_plugins_and_safe_config_in_the_snapshot(
                 directory=str(plugins_dir), state_path=str(state_path)
             ),
             log_dir=str(tmp_path),
+            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
         )
         app = build_app(config, secrets=EnvSecretResolver({}), env={}, env_file=None)
         runner = asyncio.create_task(app.run())
         try:
-            snapshot = await _snapshot_when_ready(
-                f"http://127.0.0.1:{console_port}/api/status"
-            )
+            base_url = f"http://127.0.0.1:{console_port}"
+            async with console_session(base_url) as http:
+                await install_console(http, base_url, tmp_path / "server.log")
+                snapshot = await _snapshot_when_ready(
+                    http, f"{base_url}/api/status"
+                )
 
             assert snapshot["v"] == 1
             assert snapshot["plugins"] == [

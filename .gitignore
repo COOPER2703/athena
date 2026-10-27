@@ -7,6 +7,7 @@ __pycache__/
 *.egg-info/
 .env
 athena_memory.db
+auth.db
 node_modules/
 web/dist/
 plugins.json
