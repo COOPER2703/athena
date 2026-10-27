@@ -162,7 +162,6 @@ export async function login(
   );
   return normalizeAuth(body);
 }
-
 /** Liste les Jetons d'accès ; le contrat ne contient jamais de secret. */
 export async function listTokens(
   fetcher: Fetcher = fetch,
@@ -203,6 +202,46 @@ export async function revokeToken(
   await requestJson(
     `/api/tokens/${encodeURIComponent(id)}`,
     { method: "DELETE" },
+    fetcher,
+  );
+}
+
+/** Change le mot de passe du Compte, preuve du mot de passe actuel à l'appui. */
+export async function changePassword(
+  payload: { current_password: string; new_password: string },
+  fetcher: Fetcher = fetch,
+): Promise<void> {
+  await requestJson(
+    "/api/password",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    fetcher,
+  );
+}
+
+/** Révoque le Ticket Console courant ; le serveur efface le cookie. */
+export async function logout(fetcher: Fetcher = fetch): Promise<void> {
+  await requestJson(
+    "/api/logout",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    },
+    fetcher,
+  );
+}
+
+/** Révoque tous les Tickets Console du Compte (« déconnecter partout »). */
+export async function logoutAll(fetcher: Fetcher = fetch): Promise<void> {
+  await requestJson(
+    "/api/logout-all",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    },
     fetcher,
   );
 }

@@ -2,10 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ApiError,
+  changePassword,
   createToken,
   fetchSession,
   listTokens,
   login,
+  logout,
+  logoutAll,
   requestJson,
   revokeToken,
   setupAccount,
@@ -127,6 +130,44 @@ describe("session et formulaires", () => {
       username: "admin",
       password: "secret",
     });
+  });
+
+  it("change le mot de passe avec les deux champs du contrat", async () => {
+    const fetcher = vi.fn(async (_input: string, _init: RequestInit) =>
+      response(200, { v: 1, changed: true }),
+    );
+    await changePassword(
+      { current_password: "ancien", new_password: "nouveau" },
+      fetcher,
+    );
+    const [path, init] = fetcher.mock.calls[0] ?? [];
+    expect(path).toBe("/api/password");
+    expect(init).toMatchObject({
+      method: "POST",
+      credentials: "same-origin",
+    });
+    expect(JSON.parse(String(init?.body))).toEqual({
+      current_password: "ancien",
+      new_password: "nouveau",
+    });
+  });
+
+  it("déconnecte le navigateur courant et tous les autres", async () => {
+    const fetcher = vi.fn(async (_input: string, _init: RequestInit) =>
+      response(200, { v: 1, authenticated: false }),
+    );
+    await logout(fetcher);
+    await logoutAll(fetcher);
+    expect(fetcher.mock.calls.map(([path]) => path)).toEqual([
+      "/api/logout",
+      "/api/logout-all",
+    ]);
+    for (const [, init] of fetcher.mock.calls) {
+      expect(init).toMatchObject({
+        method: "POST",
+        credentials: "same-origin",
+      });
+    }
   });
 });
 

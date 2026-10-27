@@ -25,6 +25,11 @@ LOGIN_PATH = "/api/login"
 # Jetons d'accès (spec #75, ticket #78) : authentifiés par le Ticket Console.
 # La révocation porte sur un Jeton précis, d'où le segment d'identifiant.
 TOKENS_PATH = "/api/tokens"
+# Déconnexion du navigateur courant, déconnexion de tous les navigateurs du
+# Compte, et changement de mot de passe (spec #75, ticket #77).
+LOGOUT_PATH = "/api/logout"
+LOGOUT_ALL_PATH = "/api/logout-all"
+PASSWORD_PATH = "/api/password"
 # Sonde de supervision : publique, réponse fixe, aucun état applicatif.
 HEALTH_PATH = "/healthz"
 # Nom stable et explicite du cookie qui porte le Ticket Console. Le préfixe

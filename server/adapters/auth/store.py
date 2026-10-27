@@ -313,6 +313,63 @@ class SqliteAuthStore:
             )
             db.commit()
 
+    async def revoke_account_tickets(self, account_id: str) -> None:
+        """« Déconnecter partout » : tous les Tickets du Compte tombent d'un coup."""
+        now = self._now()
+        with self._lock:
+            db = self._get_db()
+            db.execute(
+                "UPDATE console_tickets SET revoked_at = ?"
+                " WHERE account_id = ? AND revoked_at IS NULL",
+                (now, account_id),
+            )
+            db.commit()
+
+    async def change_password(
+        self, secret: str, current_password: str, new_password: str
+    ) -> None:
+        # Le Ticket courant est résolu en même temps que le hash du Compte : le
+        # changement ne peut pas viser un autre Compte que celui du cookie.
+        with self._lock:
+            row = self._get_db().execute(
+                "SELECT t.id, t.account_id, a.password_hash"
+                " FROM console_tickets AS t"
+                " JOIN accounts AS a ON a.id = t.account_id"
+                " WHERE t.secret_hash = ? AND t.revoked_at IS NULL",
+                (_digest(secret),),
+            ).fetchone()
+        if row is None:
+            # Révoqué ou expiré entre le middleware et le handler : la surface
+            # répondra 401, comme pour tout Ticket invalide.
+            raise AuthError("unauthorized")
+        ticket_id, account_id, password_hash = row
+
+        try:
+            await asyncio.to_thread(
+                self._hasher.verify, password_hash, current_password
+            )
+        except (VerificationError, InvalidHashError):
+            raise AuthError("invalid_password")
+        if len(new_password) < self._password_min_length:
+            raise AuthError("weak_password")
+
+        new_hash = await asyncio.to_thread(self._hasher.hash, new_password)
+        now = self._now()
+        with self._lock:
+            db = self._get_db()
+            db.execute(
+                "UPDATE accounts SET password_hash = ? WHERE id = ?",
+                (new_hash, account_id),
+            )
+            # Le Ticket courant survit ; tous les autres navigateurs du Compte
+            # perdent leur accès immédiatement.
+            db.execute(
+                "UPDATE console_tickets SET revoked_at = ?"
+                " WHERE account_id = ? AND id != ? AND revoked_at IS NULL",
+                (now, account_id, ticket_id),
+            )
+            db.commit()
+
     # --- Jetons d'accès (spec #75, ticket #78) -----------------------------
 
     async def list_tokens(self) -> list[AccessToken]:

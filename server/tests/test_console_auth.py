@@ -22,6 +22,9 @@ from server.adapters.console.contract import (
     EVENTS_PATH,
     HEALTH_PATH,
     LOGIN_PATH,
+    LOGOUT_ALL_PATH,
+    LOGOUT_PATH,
+    PASSWORD_PATH,
     SESSION_PATH,
     SETUP_PATH,
     STATUS_PATH,
@@ -30,6 +33,7 @@ from server.adapters.console.contract import (
 )
 
 PASSWORD = "correct horse battery staple"
+NEW_PASSWORD = "an entirely different passphrase"
 WEAK_PASSWORD = "short"
 
 
@@ -580,6 +584,236 @@ def test_a_revoked_ticket_is_refused_on_the_very_next_request(
                 async with http.get(f"{console.url}{STATUS_PATH}") as response:
                     assert response.status == 401
                     assert (await _json(response))["error"] == "unauthorized"
+        finally:
+            await console.stop()
+
+    asyncio.run(scenario())
+
+
+def _ticket_secret(response: aiohttp.ClientResponse) -> str:
+    """Secret porté par le ``Set-Cookie`` d'installation ou de connexion."""
+    [cookie] = _set_cookies(response)
+    return cookie.split(";", 1)[0].split("=", 1)[1]
+
+
+async def _login(
+    console: Console,
+    http: aiohttp.ClientSession,
+    password: str = PASSWORD,
+) -> aiohttp.ClientResponse:
+    return await http.post(
+        f"{console.url}{LOGIN_PATH}",
+        json={"username": "admin", "password": password},
+    )
+
+
+def test_changing_the_password_requires_the_current_one(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        console = Console(tmp_path)
+        await console.start()
+        try:
+            async with console.client() as http:
+                async with await _install(console, http) as response:
+                    assert response.status == 200
+
+                # Sans le mot de passe actuel — vide ou faux — le changement est
+                # refusé, et surtout le mot de passe reste inchangé.
+                for current in ("", "not the current password"):
+                    async with http.post(
+                        f"{console.url}{PASSWORD_PATH}",
+                        json={
+                            "current_password": current,
+                            "new_password": NEW_PASSWORD,
+                        },
+                    ) as response:
+                        assert response.status == 403
+                        assert (await _json(response))["error"] == "invalid_password"
+
+                # Le nouveau mot de passe subit la même longueur minimale que
+                # celui de l'installation.
+                async with http.post(
+                    f"{console.url}{PASSWORD_PATH}",
+                    json={
+                        "current_password": PASSWORD,
+                        "new_password": WEAK_PASSWORD,
+                    },
+                ) as response:
+                    assert response.status == 400
+                    assert (await _json(response))["error"] == "weak_password"
+
+                async with console.client() as other:
+                    async with await _login(console, other) as response:
+                        assert response.status == 200
+
+                async with console.client() as other:
+                    async with await _login(console, other, NEW_PASSWORD) as response:
+                        assert response.status == 401
+        finally:
+            await console.stop()
+
+    asyncio.run(scenario())
+
+
+def test_changing_the_password_switches_it_and_revokes_other_tickets(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        console = Console(tmp_path)
+        await console.start()
+        try:
+            async with console.client() as current:
+                async with await _install(console, current) as response:
+                    assert response.status == 200
+
+                async with console.client() as other:
+                    async with await _login(console, other) as response:
+                        assert response.status == 200
+                        other_secret = _ticket_secret(response)
+
+                    async with current.post(
+                        f"{console.url}{PASSWORD_PATH}",
+                        json={
+                            "current_password": PASSWORD,
+                            "new_password": NEW_PASSWORD,
+                        },
+                    ) as response:
+                        assert response.status == 200
+                        assert await _json(response) == {"v": 1, "changed": True}
+
+                    # Le Ticket courant survit au changement...
+                    async with current.get(f"{console.url}{STATUS_PATH}") as response:
+                        assert response.status == 200
+
+                    # ...les autres Tickets Console du Compte sont révoqués
+                    # immédiatement.
+                    async with other.get(f"{console.url}{STATUS_PATH}") as response:
+                        assert response.status == 401
+                        assert (await _json(response))["error"] == "unauthorized"
+
+            async with console.client(cookies=False) as replay:
+                async with replay.get(
+                    f"{console.url}{STATUS_PATH}",
+                    cookies={TICKET_COOKIE: other_secret},
+                ) as response:
+                    assert response.status == 401
+
+            # L'ancien mot de passe est refusé, le nouveau accepté.
+            async with console.client() as fresh:
+                async with await _login(console, fresh) as response:
+                    assert response.status == 401
+                    assert (await _json(response))["error"] == "invalid_credentials"
+
+            async with console.client() as fresh:
+                async with await _login(console, fresh, NEW_PASSWORD) as response:
+                    assert response.status == 200
+                    assert _set_cookies(response)
+        finally:
+            await console.stop()
+
+    asyncio.run(scenario())
+
+
+def test_logout_revokes_the_current_ticket_and_clears_the_cookie(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        console = Console(tmp_path)
+        await console.start()
+        try:
+            async with console.client() as http:
+                async with await _install(console, http) as response:
+                    assert response.status == 200
+                    secret = _ticket_secret(response)
+
+                async with http.post(f"{console.url}{LOGOUT_PATH}") as response:
+                    assert response.status == 200
+                    assert await _json(response) == {"v": 1, "authenticated": False}
+                    [cookie] = _set_cookies(response)
+                    assert cookie.startswith(f"{TICKET_COOKIE}=")
+                    assert "Max-Age=0" in cookie
+                    assert "expires=Thu, 01 Jan 1970" in cookie
+
+            # Rejouer le secret révoqué ne suffit pas : le Ticket est mort, pas
+            # seulement absent du navigateur.
+            async with console.client(cookies=False) as replay:
+                async with replay.get(
+                    f"{console.url}{STATUS_PATH}",
+                    cookies={TICKET_COOKIE: secret},
+                ) as response:
+                    assert response.status == 401
+
+            async with console.client() as fresh:
+                async with await _login(console, fresh) as response:
+                    assert response.status == 200
+        finally:
+            await console.stop()
+
+    asyncio.run(scenario())
+
+
+def test_logout_all_revokes_every_ticket_of_the_account(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        console = Console(tmp_path)
+        await console.start()
+        try:
+            async with console.client() as first, console.client() as second:
+                async with await _install(console, first) as response:
+                    assert response.status == 200
+                    first_secret = _ticket_secret(response)
+                async with await _login(console, second) as response:
+                    assert response.status == 200
+
+                async with first.post(f"{console.url}{LOGOUT_ALL_PATH}") as response:
+                    assert response.status == 200
+                    assert await _json(response) == {"v": 1, "authenticated": False}
+                    [cookie] = _set_cookies(response)
+                    assert cookie.startswith(f"{TICKET_COOKIE}=")
+                    assert "Max-Age=0" in cookie
+                    assert "expires=Thu, 01 Jan 1970" in cookie
+
+                async with second.get(f"{console.url}{STATUS_PATH}") as response:
+                    assert response.status == 401
+
+                async with console.client(cookies=False) as replay:
+                    async with replay.get(
+                        f"{console.url}{STATUS_PATH}",
+                        cookies={TICKET_COOKIE: first_secret},
+                    ) as response:
+                        assert response.status == 401
+
+            # Le Compte existe toujours : « déconnecter partout » ne change pas
+            # le mot de passe.
+            async with console.client() as fresh:
+                async with await _login(console, fresh) as response:
+                    assert response.status == 200
+        finally:
+            await console.stop()
+
+    asyncio.run(scenario())
+
+
+def test_a_revoked_ticket_cannot_upgrade_the_stream(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        console = Console(tmp_path)
+        await console.start()
+        try:
+            async with console.client() as first, console.client() as second:
+                async with await _install(console, first) as response:
+                    assert response.status == 200
+                async with await _login(console, second) as response:
+                    assert response.status == 200
+
+                # Le flux s'ouvre avec un Ticket valide...
+                ws = await second.ws_connect(f"{console.url}{STREAM_PATH}")
+                await ws.close()
+
+                async with first.post(f"{console.url}{LOGOUT_ALL_PATH}") as response:
+                    assert response.status == 200
+
+                # ...et le handshake suivant est refusé avant tout upgrade.
+                with pytest.raises(aiohttp.WSServerHandshakeError) as excinfo:
+                    await second.ws_connect(f"{console.url}{STREAM_PATH}")
+                assert excinfo.value.status == 401
         finally:
             await console.stop()
 

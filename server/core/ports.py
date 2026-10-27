@@ -393,3 +393,25 @@ class AuthService(Protocol):
         est bornée par la résolution du store pour ne pas écrire par trame.
         """
         ...
+
+    async def revoke_account_tickets(self, account_id: str) -> None:
+        """Révoque tous les Tickets Console d'un Compte (« déconnecter partout »).
+
+        L'effet est immédiat : chaque vérification relit la base, donc un Ticket
+        révoqué est refusé dès la requête suivante, y compris pour l'upgrade du
+        flux de Traces. Un Ticket déjà révoqué est ignoré.
+        """
+        ...
+
+    async def change_password(
+        self, secret: str, current_password: str, new_password: str
+    ) -> None:
+        """Change le mot de passe du Compte, preuve de l'actuel à l'appui.
+
+        ``secret`` identifie le Ticket Console courant : il reste valide après
+        le changement, tandis que **les autres** Tickets du Compte sont
+        révoqués. Lève ``AuthError`` : ``invalid_password`` si le mot de passe
+        actuel est faux, ``weak_password`` si le nouveau est trop court,
+        ``unauthorized`` si le Ticket a disparu entre-temps.
+        """
+        ...

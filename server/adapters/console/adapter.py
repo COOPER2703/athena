@@ -29,6 +29,9 @@ from server.adapters.console.contract import (
     EVENTS_PATH,
     HEALTH_PATH,
     LOGIN_PATH,
+    LOGOUT_ALL_PATH,
+    LOGOUT_PATH,
+    PASSWORD_PATH,
     SESSION_PATH,
     SETUP_PATH,
     STATUS_PATH,
@@ -224,6 +227,15 @@ class ConsoleAdapter:
         app.router.add_delete(
             f"{TOKENS_PATH}/{{token_id}}",
             self._console_auth.handle_token_delete,
+        )
+        # Cycle de vie du Compte : authentifié par le middleware, donc jamais
+        # joignable sans Ticket Console valide.
+        app.router.add_post(LOGOUT_PATH, self._console_auth.handle_logout)
+        app.router.add_post(
+            LOGOUT_ALL_PATH, self._console_auth.handle_logout_all
+        )
+        app.router.add_post(
+            PASSWORD_PATH, self._console_auth.handle_password_post
         )
         # Flux de traces : WebSocket unidirectionnel, sur `/api/stream`.
         app.router.add_get(
