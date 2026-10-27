@@ -18,6 +18,7 @@ from typing import Any
 
 import aiohttp
 
+from conftest import TEST_PASSWORD
 from server.app.config import (
     AppConfig,
     AuthConfig,
@@ -29,7 +30,6 @@ from server.app.config import (
 )
 from server.app.root import build_app
 
-PASSWORD = "correct horse battery staple"
 _CODE_LINE = re.compile(r"InstallationCode .*?\{\"code\": \"([^\"]+)\"}")
 
 
@@ -133,8 +133,9 @@ def test_the_production_console_installs_from_the_journal_then_stays_closed(
                     json={
                         "code": code,
                         "username": "admin",
-                        "password": PASSWORD,
+                        "password": TEST_PASSWORD,
                     },
+                    headers={"Origin": url},
                 ) as response:
                     assert response.status == 200
                     assert (await response.json())["authenticated"] is True
@@ -196,8 +197,9 @@ def test_a_restart_with_an_account_never_publishes_an_installation_code(
                     json={
                         "code": _installation_code(journal),
                         "username": "admin",
-                        "password": PASSWORD,
+                        "password": TEST_PASSWORD,
                     },
+                    headers={"Origin": first_url},
                 ) as response:
                     assert response.status == 200
         finally:

@@ -4,12 +4,18 @@ import asyncio
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator, Callable, Iterable
+from typing import AsyncIterator, Callable, Iterable, Mapping
 
 import aiohttp
 from websockets.asyncio.client import ClientConnection
 
 from protocol import Register, Registered, ToolDeclaration, decode, encode
+from server.adapters.auth import SqliteAuthStore
+from server.adapters.console import ConsoleAdapter
+from server.adapters.console.contract import (
+    LOGIN_PATH,
+    SETUP_PATH,
+)
 from server.adapters.transport import WebSocketTransport
 from server.core import (
     EVENT_WINDOW_TIMER_ID,
@@ -66,6 +72,120 @@ class RecordingTraceSink:
         return [entry for entry in self.entries if entry.kind == kind]
 
 
+TEST_PASSWORD = "correct horse battery staple"
+
+
+class FakeClock:
+    """Horloge réglable, partagée par les tests qui traversent les seuils d'auth."""
+
+    def __init__(self, now: float = 1_000_000.0) -> None:
+        self.value = now
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
+
+
+def console_snapshot() -> Mapping[str, object]:
+    """Instantané minimal d'une Console avec une Session visible."""
+    return {
+        "session": {
+            "state": "SessionVisible",
+            "session_id": "sess-1",
+            "connection_id": "s1",
+            "active_client_id": "client-1",
+        },
+        "clients": [],
+        "plugins": [],
+        "config": {"version": "0.1.0"},
+    }
+
+
+class Console:
+    """Console démarrée sur un port éphémère avec une vraie base d'auth.
+
+    Le client HTTP se comporte comme un navigateur : il conserve le cookie
+    ``Secure`` et envoie l'``Origin`` de la page sur chaque requête. Les tests
+    qui visent précisément l'absence d'``Origin`` créent un client
+    ``client(origin=False)``.
+    """
+
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        clock: FakeClock | None = None,
+        snapshot: Callable[[], Mapping[str, object]] = console_snapshot,
+        static_dir: Path | None = None,
+        status_interval: float = 1.0,
+        **store_options: object,
+    ) -> None:
+        self.clock = clock or FakeClock()
+        self.snapshot = snapshot
+        self.store = SqliteAuthStore(
+            db_path=str(tmp_path / "auth.db"),
+            trace_sink=RecordingTraceSink(),
+            now=self.clock,
+            **store_options,
+        )
+        self.adapter = ConsoleAdapter(
+            port=0,
+            auth=self.store,
+            static_dir=static_dir or (tmp_path / "missing-build"),
+            status_interval=status_interval,
+        )
+        self.pushed: list[tuple[str, str]] = []
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.adapter.port}"
+
+    async def start(self) -> None:
+        await self.adapter.start(
+            self.snapshot,
+            lambda source, content: self.pushed.append((source, content)),
+        )
+
+    async def stop(self) -> None:
+        await self.adapter.stop()
+
+    def client(
+        self, *, cookies: bool = True, origin: bool = True
+    ) -> aiohttp.ClientSession:
+        jar = (
+            aiohttp.CookieJar(unsafe=True, treat_as_secure_origin=self.url)
+            if cookies
+            else aiohttp.DummyCookieJar()
+        )
+        headers = {"Origin": self.url} if origin else {}
+        return aiohttp.ClientSession(cookie_jar=jar, headers=headers)
+
+    def install_code(self) -> str:
+        code = self.store.announce_installation_code()
+        assert code is not None
+        return code
+
+    async def install(
+        self,
+        http: aiohttp.ClientSession,
+        *,
+        username: str = "admin",
+        password: str = TEST_PASSWORD,
+    ) -> None:
+        """Installe le Compte par la vraie route ; le jar garde le Ticket."""
+        async with http.post(
+            f"{self.url}{SETUP_PATH}",
+            json={
+                "code": self.install_code(),
+                "username": username,
+                "password": password,
+            },
+        ) as response:
+            assert response.status == 200, await response.text()
+
+
 async def wait_until(predicate: Callable[[], bool], timeout: float = 1.0) -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
@@ -76,7 +196,6 @@ async def wait_until(predicate: Callable[[], bool], timeout: float = 1.0) -> Non
 
 
 _INSTALLATION_CODE = re.compile(r'"code": "([^"]+)"')
-TEST_PASSWORD = "correct horse battery staple"
 
 
 async def read_installation_code(path: Path, timeout: float = 5.0) -> str:
@@ -94,11 +213,16 @@ async def read_installation_code(path: Path, timeout: float = 5.0) -> str:
 
 
 def console_session(base_url: str) -> aiohttp.ClientSession:
-    """Client HTTP qui accepte le cookie ``Secure`` de la Console en test."""
+    """Client HTTP de Console : cookie ``Secure`` accepté, ``Origin`` de page.
+
+    Il se comporte comme le navigateur de la Console : les requêtes mutantes
+    portent l'origine de l'hôte servi, exigée par le contrôle CSRF (ADR-0017).
+    """
     return aiohttp.ClientSession(
         cookie_jar=aiohttp.CookieJar(
             unsafe=True, treat_as_secure_origin=base_url
-        )
+        ),
+        headers={"Origin": base_url},
     )
 
 

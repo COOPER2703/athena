@@ -52,6 +52,10 @@ DEFAULT_PASSWORD_MIN_LENGTH = 12
 DEFAULT_LOGIN_MAX_ATTEMPTS = 5
 DEFAULT_LOGIN_BLOCK_SECONDS = 15 * 60
 DEFAULT_SETUP_MAX_ATTEMPTS = 5
+# Plafond des noms suivis par le compteur d'échecs. Sans borne, un attaquant
+# créerait une entrée par nom aléatoire et ferait croître la mémoire sans fin ;
+# les entrées expirées sont purgées et les plus anciennes évincées.
+DEFAULT_MAX_TRACKED_ATTEMPTS = 1024
 # Dernière utilisation d'un Jeton : écrite au plus une fois par minute et par
 # Jeton, pour ne pas dégrader le transport avec de l'observabilité (spec #75).
 DEFAULT_LAST_USED_RESOLUTION_SECONDS = 60
@@ -133,11 +137,13 @@ def _token_from_row(row: tuple[object, ...]) -> AccessToken:
 class _Attempts:
     """Compteur d'échecs en mémoire, par clé (nom d'utilisateur ou installation)."""
 
-    __slots__ = ("failures", "locked_until")
+    __slots__ = ("failures", "locked_until", "last_failure")
 
     def __init__(self) -> None:
         self.failures = 0
         self.locked_until = 0.0
+        # Dernière écriture : sert à purger et à évincer les plus anciennes.
+        self.last_failure = 0.0
 
 
 class SqliteAuthStore:
@@ -161,6 +167,7 @@ class SqliteAuthStore:
         login_max_attempts: int = DEFAULT_LOGIN_MAX_ATTEMPTS,
         login_block_seconds: float = DEFAULT_LOGIN_BLOCK_SECONDS,
         setup_max_attempts: int = DEFAULT_SETUP_MAX_ATTEMPTS,
+        max_tracked_attempts: int = DEFAULT_MAX_TRACKED_ATTEMPTS,
         last_used_resolution_seconds: float = DEFAULT_LAST_USED_RESOLUTION_SECONDS,
     ) -> None:
         self._db_path = db_path
@@ -172,6 +179,7 @@ class SqliteAuthStore:
         self._login_max_attempts = login_max_attempts
         self._login_block = login_block_seconds
         self._setup_max_attempts = setup_max_attempts
+        self._max_tracked_attempts = max(1, max_tracked_attempts)
         self._last_used_resolution = last_used_resolution_seconds
         # Paramètres par défaut de la bibliothèque : Argon2id, mémoire dure.
         self._hasher = PasswordHasher()
@@ -195,6 +203,11 @@ class SqliteAuthStore:
     @property
     def password_min_length(self) -> int:
         return self._password_min_length
+
+    @property
+    def tracked_attempts(self) -> int:
+        """Nombre de noms suivis par le compteur : toujours borné par le plafond."""
+        return len(self._attempts)
 
     def announce_installation_code(self) -> str | None:
         """Émet le Code d'installation, une fois par démarrage, sans Compte."""
@@ -220,7 +233,7 @@ class SqliteAuthStore:
             raise AuthError("already_installed")
 
         now = self._now()
-        self._check_attempts(_SETUP_KEY, now, self._setup_max_attempts)
+        self._check_attempts(_SETUP_KEY, now)
 
         expected = self._installation_code
         if expected is None or not hmac.compare_digest(str(code), expected):
@@ -245,7 +258,7 @@ class SqliteAuthStore:
     async def login(self, username: str, password: str) -> IssuedTicket:
         now = self._now()
         key = username.strip()
-        self._check_attempts(key, now, self._login_max_attempts)
+        self._check_attempts(key, now)
 
         row = self._account_row(key)
         if row is None:
@@ -563,7 +576,7 @@ class SqliteAuthStore:
         self._raise_if_locked(key, now)
         raise AuthError("invalid_credentials")
 
-    def _check_attempts(self, key: str, now: float, limit: int) -> None:
+    def _check_attempts(self, key: str, now: float) -> None:
         state = self._attempts.get(key)
         if state is None:
             return
@@ -578,10 +591,50 @@ class SqliteAuthStore:
     def _record_failure(
         self, key: str, now: float, limit: int, block_seconds: float
     ) -> None:
-        state = self._attempts.setdefault(key, _Attempts())
+        self._prune_attempts(now)
+        state = self._attempts.get(key)
+        if state is None:
+            self._make_room(now)
+            state = _Attempts()
+            self._attempts[key] = state
         state.failures += 1
+        state.last_failure = now
         if state.failures >= limit:
             state.locked_until = now + block_seconds
+
+    def _prune_attempts(self, now: float) -> None:
+        """Retire les noms dont la fenêtre de blocage est finie et oubliée."""
+        if not self._attempts:
+            return
+        stale = [
+            key
+            for key, state in self._attempts.items()
+            if state.locked_until <= now
+            and now - state.last_failure >= self._login_block
+        ]
+        for key in stale:
+            del self._attempts[key]
+
+    def _make_room(self, now: float) -> None:
+        """Évince le nom le plus ancien avant d'en suivre un nouveau.
+
+        Les noms **actuellement bloqués** sont conservés en priorité : évincer
+        un verrou en cours ouvrirait le contournement que le plafond doit
+        éviter. Si tous sont bloqués, le plus ancien cède quand même pour que la
+        borne reste une borne.
+        """
+        if len(self._attempts) < self._max_tracked_attempts:
+            return
+        unlocked = [
+            (state.last_failure, key)
+            for key, state in self._attempts.items()
+            if state.locked_until <= now
+        ]
+        candidates = unlocked or [
+            (state.last_failure, key) for key, state in self._attempts.items()
+        ]
+        _, oldest = min(candidates)
+        del self._attempts[oldest]
 
     def _raise_if_locked(self, key: str, now: float) -> None:
         state = self._attempts.get(key)

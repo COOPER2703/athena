@@ -10,6 +10,8 @@
  * confondre avec le **Ticket Console** du navigateur.
  */
 
+import { formatTokenDate } from "./format";
+
 /** Nature d'un Jeton : le transport des Clients, ou une source du Webhook. */
 export type TokenKind = "client" | "source";
 
@@ -130,24 +132,6 @@ export function tokenTargetLabel(token: AccessToken): string {
 /** État lisible d'un Jeton : la révocation reste visible après coup. */
 export function tokenStatusLabel(token: AccessToken): string {
   return token.revokedAt === null ? "Actif" : "Révoqué";
-}
-
-function pad(value: number, width = 2): string {
-  return String(value).padStart(width, "0");
-}
-
-/** Date courte en heure locale (`jj/mm/aaaa hh:mm`), ou un tiret si absente. */
-export function formatTokenDate(secondsValue: number | null): string {
-  if (secondsValue === null || !Number.isFinite(secondsValue)) {
-    return "—";
-  }
-  const date = new Date(secondsValue * 1000);
-  if (Number.isNaN(date.getTime())) {
-    return "—";
-  }
-  return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()} ${pad(
-    date.getHours(),
-  )}:${pad(date.getMinutes())}`;
 }
 
 /** Dernière utilisation : un Jeton jamais présenté le dit explicitement. */

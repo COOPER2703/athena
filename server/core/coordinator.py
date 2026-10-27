@@ -45,6 +45,7 @@ from server.core.plugins import PluginRegistry
 from server.core.ports import EventJudge, Judgment, MemoryStore, ToolSpec
 from server.core.state import SessionState
 from server.core.tools import ToolRegistry
+from server.core.untrusted import flatten_untrusted, sanitize_untrusted
 
 _TRACE_SOURCE = "core"
 IDLE_TIMEOUT = 30.0
@@ -543,11 +544,15 @@ class Coordinator:
         (**un fait = une ligne**) et les occurrences de l'en-tête
         ``[ÉVÉNEMENTS]`` sont retirées : un contenu ne peut ni fabriquer un
         second fait, ni simuler un nouveau bloc, ni fermer l'étiquette de Source
-        (#81).
+        (#81). La règle d'aplatissement et de neutralisation est partagée avec
+        le juge (``server.core.untrusted``).
         """
-        source = " ".join(event.source.splitlines()).replace("]", ")")
-        content = " ".join(event.content.splitlines())
-        content = _EVENT_HEADER_TOKEN.sub(_HEADER_REDACTED, content)
+        source = flatten_untrusted(event.source).replace("]", ")")
+        content = sanitize_untrusted(
+            event.content,
+            forbidden=_EVENT_HEADER_TOKEN,
+            replacement=_HEADER_REDACTED,
+        )
         return f"[{source}] {content}"
 
     @classmethod

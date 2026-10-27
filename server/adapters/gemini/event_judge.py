@@ -7,6 +7,7 @@ from typing import Callable, Sequence
 
 from server.adapters.trace import NullTraceSink, emit
 from server.core.ports import Judgment, TraceSink
+from server.core.untrusted import sanitize_untrusted
 
 _TRACE_SOURCE = "judge"
 
@@ -53,9 +54,11 @@ def _render_facts(facts: Sequence[str]) -> str:
     Le contenu externe est aplati sur une ligne et ses occurrences des bornes
     sont retirées : il ne peut ni forger une seconde ligne, ni refermer le bloc,
     ni en ouvrir un autre (#81). Le prompt, lui, déclare ce bloc non fiable.
+    La règle est partagée avec le bloc de faits du noyau
+    (``server.core.untrusted``) ; seules les bornes diffèrent.
     """
     lines = [
-        f"- {_DELIMITER.sub(_NEUTRALISED, ' '.join(fact.splitlines()))}"
+        f"- {sanitize_untrusted(fact, forbidden=_DELIMITER, replacement=_NEUTRALISED)}"
         for fact in facts
     ]
     return "\n".join([_FACTS_START, *lines, _FACTS_END])

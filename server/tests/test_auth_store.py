@@ -14,24 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from conftest import RecordingTraceSink
+from conftest import FakeClock, RecordingTraceSink, TEST_PASSWORD
 from server.adapters.auth import SqliteAuthStore
 from server.core.ports import AuthError
-
-PASSWORD = "correct horse battery staple"
-
-
-class FakeClock:
-    """Horloge injectée : les seuils d'expiration et de blocage sont réels."""
-
-    def __init__(self, now: float = 1_000_000.0) -> None:
-        self.value = now
-
-    def __call__(self) -> float:
-        return self.value
-
-    def advance(self, seconds: float) -> None:
-        self.value += seconds
 
 
 def _store(
@@ -63,11 +48,11 @@ def test_install_accepts_only_the_code_announced_at_startup(tmp_path: Path) -> N
         assert store.setup_required is True
 
         with pytest.raises(AuthError) as excinfo:
-            await store.install("not-the-code", "admin", PASSWORD)
+            await store.install("not-the-code", "admin", TEST_PASSWORD)
         assert excinfo.value.code == "invalid_code"
         assert store.setup_required is True
 
-        ticket = await store.install(code, "admin", PASSWORD)
+        ticket = await store.install(code, "admin", TEST_PASSWORD)
         assert ticket.account.username == "admin"
         assert store.setup_required is False
         assert (await store.authenticate_ticket(ticket.secret)) is not None
@@ -79,7 +64,7 @@ def test_no_code_is_announced_once_an_account_exists(tmp_path: Path) -> None:
     async def scenario() -> None:
         sink = RecordingTraceSink()
         store = _store(tmp_path, sink=sink)
-        await store.install(_announced_code(store, sink), "admin", PASSWORD)
+        await store.install(_announced_code(store, sink), "admin", TEST_PASSWORD)
 
         assert store.announce_installation_code() is None
         assert [entry.kind for entry in sink.entries] == ["InstallationCode"]
@@ -99,7 +84,7 @@ def test_a_second_install_is_refused_even_with_the_right_code(
         sink = RecordingTraceSink()
         store = _store(tmp_path, sink=sink)
         code = _announced_code(store, sink)
-        await store.install(code, "admin", PASSWORD)
+        await store.install(code, "admin", TEST_PASSWORD)
 
         with pytest.raises(AuthError) as excinfo:
             await store.install(code, "intruder", "another long password")
@@ -113,12 +98,12 @@ def test_the_password_is_stored_as_an_argon2id_hash(tmp_path: Path) -> None:
     async def scenario() -> None:
         sink = RecordingTraceSink()
         store = _store(tmp_path, sink=sink)
-        await store.install(_announced_code(store, sink), "admin", PASSWORD)
+        await store.install(_announced_code(store, sink), "admin", TEST_PASSWORD)
 
     asyncio.run(scenario())
 
     stored = (tmp_path / "auth.db").read_bytes()
-    assert PASSWORD.encode() not in stored
+    assert TEST_PASSWORD.encode() not in stored
     assert b"$argon2id$" in stored
 
 
@@ -134,7 +119,7 @@ def test_the_server_refuses_a_password_below_the_minimum(tmp_path: Path) -> None
         assert excinfo.value.code == "weak_password"
         assert store.setup_required is True
 
-        ticket = await store.install(code, "admin", PASSWORD)
+        ticket = await store.install(code, "admin", TEST_PASSWORD)
         assert ticket.account.username == "admin"
 
     asyncio.run(scenario())
@@ -146,15 +131,15 @@ def test_login_refuses_unknown_user_and_wrong_password_alike(
     async def scenario() -> None:
         sink = RecordingTraceSink()
         store = _store(tmp_path, sink=sink)
-        await store.install(_announced_code(store, sink), "admin", PASSWORD)
+        await store.install(_announced_code(store, sink), "admin", TEST_PASSWORD)
 
         wrong_password = await _login_error(store, "admin", "not the password")
-        unknown_user = await _login_error(store, "somebody", PASSWORD)
+        unknown_user = await _login_error(store, "somebody", TEST_PASSWORD)
 
         assert wrong_password.code == "invalid_credentials"
         assert unknown_user.code == "invalid_credentials"
 
-        ticket = await store.login("admin", PASSWORD)
+        ticket = await store.login("admin", TEST_PASSWORD)
         session = await store.authenticate_ticket(ticket.secret)
         assert session is not None
         assert session.account.username == "admin"
@@ -177,7 +162,7 @@ def test_five_failures_lock_the_login_for_fifteen_minutes_then_lift(
         clock = FakeClock()
         sink = RecordingTraceSink()
         store = _store(tmp_path, clock=clock, sink=sink)
-        await store.install(_announced_code(store, sink), "admin", PASSWORD)
+        await store.install(_announced_code(store, sink), "admin", TEST_PASSWORD)
 
         for _ in range(4):
             assert (await _login_error(store, "admin", "wrong")).code == (
@@ -189,7 +174,7 @@ def test_five_failures_lock_the_login_for_fifteen_minutes_then_lift(
         assert locked.retry_after == pytest.approx(15 * 60)
 
         # Même le bon mot de passe est refusé pendant le blocage.
-        still_locked = await _login_error(store, "admin", PASSWORD)
+        still_locked = await _login_error(store, "admin", TEST_PASSWORD)
         assert still_locked.code == "too_many_attempts"
         assert still_locked.retry_after is not None
         assert 0 < still_locked.retry_after <= 15 * 60
@@ -197,7 +182,7 @@ def test_five_failures_lock_the_login_for_fifteen_minutes_then_lift(
         clock.advance(15 * 60)
 
         # Le blocage se lève seul, sans redémarrage.
-        ticket = await store.login("admin", PASSWORD)
+        ticket = await store.login("admin", TEST_PASSWORD)
         assert ticket.account.username == "admin"
 
         # Un succès remet le compteur à zéro : quatre échecs restent des 401.
@@ -209,6 +194,52 @@ def test_five_failures_lock_the_login_for_fifteen_minutes_then_lift(
     asyncio.run(scenario())
 
 
+def test_the_attempt_counter_is_bounded_while_lockout_still_holds(
+    tmp_path: Path,
+) -> None:
+    """Un attaquant ne peut pas faire croître la mémoire sans borne.
+
+    Chaque nom d'utilisateur aléatoire créerait une entrée ; le compteur est
+    donc plafonné, sans relâcher la règle des cinq échecs par nom déjà bloqué.
+    """
+
+    async def scenario() -> None:
+        clock = FakeClock()
+        sink = RecordingTraceSink()
+        store = _store(
+            tmp_path, clock=clock, sink=sink, max_tracked_attempts=8
+        )
+        await store.install(_announced_code(store, sink), "admin", TEST_PASSWORD)
+
+        for _ in range(5):
+            assert (await _login_error(store, "admin", "wrong")).code in (
+                "invalid_credentials",
+                "too_many_attempts",
+            )
+
+        # Un flot de noms aléatoires ne fait pas enfler la structure au-delà du
+        # plafond, et ne lève pas le blocage du nom déjà verrouillé.
+        for index in range(20):
+            error = await _login_error(store, f"inconnu-{index}", "wrong")
+            assert error.code == "invalid_credentials"
+        assert store.tracked_attempts <= 8
+
+        still_locked = await _login_error(store, "admin", "wrong")
+        assert still_locked.code == "too_many_attempts"
+
+        clock.advance(15 * 60)
+        ticket = await store.login("admin", TEST_PASSWORD)
+        assert ticket.account.username == "admin"
+
+        # Après la levée, les entrées expirées sont purgées à l'écriture : la
+        # structure ne garde pas les noms oubliés indéfiniment.
+        for index in range(20):
+            await _login_error(store, f"autre-{index}", "wrong")
+        assert store.tracked_attempts <= 8
+
+    asyncio.run(scenario())
+
+
 def test_a_ticket_expires_after_thirty_days_and_slides_while_used(
     tmp_path: Path,
 ) -> None:
@@ -216,7 +247,7 @@ def test_a_ticket_expires_after_thirty_days_and_slides_while_used(
         clock = FakeClock()
         sink = RecordingTraceSink()
         store = _store(tmp_path, clock=clock, sink=sink)
-        ticket = await store.install(_announced_code(store, sink), "admin", PASSWORD)
+        ticket = await store.install(_announced_code(store, sink), "admin", TEST_PASSWORD)
 
         session = await store.authenticate_ticket(ticket.secret)
         assert session is not None
@@ -246,8 +277,8 @@ def test_a_revoked_ticket_is_refused_immediately(tmp_path: Path) -> None:
     async def scenario() -> None:
         sink = RecordingTraceSink()
         store = _store(tmp_path, sink=sink)
-        await store.install(_announced_code(store, sink), "admin", PASSWORD)
-        ticket = await store.login("admin", PASSWORD)
+        await store.install(_announced_code(store, sink), "admin", TEST_PASSWORD)
+        ticket = await store.login("admin", TEST_PASSWORD)
 
         await store.revoke_ticket(ticket.secret)
 
@@ -262,15 +293,15 @@ def test_setup_attempts_are_capped_globally(tmp_path: Path) -> None:
         store = _store(tmp_path, sink=sink, setup_max_attempts=2)
         code = _announced_code(store, sink)
 
-        assert (await _install_error(store, "nope", "admin", PASSWORD)).code == (
+        assert (await _install_error(store, "nope", "admin", TEST_PASSWORD)).code == (
             "invalid_code"
         )
-        limited = await _install_error(store, "nope", "admin", PASSWORD)
+        limited = await _install_error(store, "nope", "admin", TEST_PASSWORD)
         assert limited.code == "too_many_attempts"
         assert limited.retry_after is not None
 
         # Même le bon code attend la fin du blocage.
-        blocked = await _install_error(store, code, "admin", PASSWORD)
+        blocked = await _install_error(store, code, "admin", TEST_PASSWORD)
         assert blocked.code == "too_many_attempts"
 
     asyncio.run(scenario())

@@ -112,9 +112,13 @@ les méthodes mutantes (`POST`, `PUT`, `PATCH`, `DELETE`).
   d'API ne reçoit jamais une page HTML à la place d'un refus d'identité.
 - Toute route hors API continue de servir la SPA : c'est elle qui affiche l'écran de connexion.
 - Le WebSocket du flux hérite du Ticket par le cookie et le vérifie **avant** l'upgrade ; un
-  client sans Ticket est refusé avant l'ouverture de la socket applicative.
+  client sans Ticket est refusé avant l'ouverture de la socket applicative. Le Ticket est
+  ensuite revérifié pendant que le flux est ouvert : une révocation ferme le WebSocket au
+  lieu d'attendre la reconnexion.
 - `Origin` est comparé strictement à l'hôte de la requête (le schéma est ignoré pour que TLS
-  terminé par un proxy ne casse pas le contrôle) ; une origine étrangère est refusée `403`.
+  terminé par un proxy ne casse pas le contrôle) ; une origine étrangère **ou absente** est
+  refusée `403`. Un navigateur envoie toujours `Origin` sur une mutation : son absence est le
+  cas d'un client forgé.
 - `GET /healthz` est public, répond une charge fixe (`{"status": "ok"}`) et ne lit ni
   l'instantané, ni le Tampon de traces, ni aucun secret.
 

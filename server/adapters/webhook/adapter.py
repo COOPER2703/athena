@@ -14,6 +14,7 @@ from server.adapters.event_body import (
     not_serving,
     validate_event,
 )
+from server.adapters.http_auth import bearer_secret
 from server.adapters.trace import NullTraceSink
 from server.core.ports import AuthService, TraceSink
 
@@ -22,7 +23,6 @@ _TRACE_SOURCE = "webhook"
 # Le Webhook n'accepte qu'un Jeton de nature ``source`` : un Jeton ``client``
 # appartient au transport et ne doit pas ouvrir cette surface (spec #75).
 _TOKEN_KIND = "source"
-_BEARER_SCHEME = "bearer"
 _UNAUTHORIZED = Rejection(401, "missing or invalid access token")
 # Le corps peut encore déclarer une Source, mais elle ne peut pas contredire
 # celle du Jeton : l'usurpation est refusée explicitement (403), sans poussée.
@@ -35,22 +35,6 @@ EVENTS_PATH = "/events"
 # Source « identifiée par un nom fourni par l'émetteur », celui-ci peut l'omettre.
 # Avec un Jeton injecté, c'est la Source du Jeton qui sert de défaut.
 DEFAULT_SOURCE = "webhook"
-
-
-def _bearer_secret(header: str | None) -> str | None:
-    """Rend le secret d'un en-tête ``Bearer``, ou ``None`` s'il est mal formé.
-
-    Le nom du schéma est insensible à la casse (RFC 9110) ; le secret, lui, est
-    comparé tel quel. Aucun autre schéma n'est accepté : le Webhook ne connaît
-    qu'un Jeton d'accès, jamais un mot de passe ni un cookie.
-    """
-    if not header:
-        return None
-    scheme, _, secret = header.partition(" ")
-    if scheme.lower() != _BEARER_SCHEME:
-        return None
-    secret = secret.strip()
-    return secret or None
 
 
 class WebhookAdapter:
@@ -143,8 +127,9 @@ class WebhookAdapter:
             return self._reject(not_serving("webhook"))
 
         # Le Jeton fait autorité : la Source poussée est la sienne, jamais celle
-        # qu'un émetteur aurait déclarée (la contradiction est déjà refusée).
-        self._push(token_source or outcome.source, outcome.content)
+        # qu'un émetteur aurait déclarée. Le contrôle ci-dessus garantit qu'un
+        # Jeton présent et la Source retenue sont égaux.
+        self._push(outcome.source, outcome.content)
         emit_event_received(self._trace_sink, _TRACE_SOURCE, outcome)
         return web.json_response({"status": "accepted"}, status=202)
 
@@ -155,7 +140,7 @@ class WebhookAdapter:
         fait pas parser de JSON, et n'apprend rien de la validation du corps.
         """
         assert self._auth is not None
-        secret = _bearer_secret(request.headers.get("Authorization"))
+        secret = bearer_secret(request.headers.get("Authorization"))
         if secret is None:
             return None
         token = await self._auth.authenticate_token(secret, _TOKEN_KIND)

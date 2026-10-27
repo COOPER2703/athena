@@ -35,6 +35,7 @@ from server.core.ports import (
     AccessToken,
     AuthError,
     AuthService,
+    AuthenticatedTicket,
     IssuedTicket,
 )
 
@@ -44,22 +45,36 @@ Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 # possède un Ticket Console. ``/healthz`` est hors préfixe d'API et public.
 _PUBLIC_API_PATHS = frozenset({SESSION_PATH, SETUP_PATH, LOGIN_PATH})
 _MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+# Ticket résolu par le middleware, réutilisé par un handler de la même requête.
+_CONSOLE_TICKET = web.RequestKey[AuthenticatedTicket]("console_ticket")
 
-_STATUS_BY_CODE = {
-    "invalid_code": 403,
-    "already_installed": 409,
-    "invalid_credentials": 401,
+# Une seule table : ajouter un code d'auth n'exige de toucher ni un statut ni
+# un message à deux endroits. ``{min_length}`` est interpolé depuis le store.
+_AUTH_ERRORS: dict[str, tuple[int, str]] = {
+    "invalid_code": (403, "Code d'installation invalide ou déjà utilisé."),
+    "already_installed": (
+        409,
+        "Un Compte existe déjà : l'installation est fermée.",
+    ),
+    "invalid_credentials": (401, "Identifiants incorrects."),
     # Le mot de passe actuel est faux : la requête est authentifiée, mais la
     # preuve demandée manque. Un 403 évite de déclencher le retour au login.
-    "invalid_password": 403,
-    "unauthorized": 401,
-    "too_many_attempts": 429,
-    "weak_password": 400,
-    "invalid_username": 400,
-    "invalid_token_name": 400,
-    "invalid_kind": 400,
-    "invalid_source": 400,
-    "token_not_found": 404,
+    "invalid_password": (403, "Le mot de passe actuel est incorrect."),
+    "unauthorized": (401, "Ticket Console absent, expiré ou révoqué."),
+    "too_many_attempts": (429, "Trop de tentatives : réessayez plus tard."),
+    "weak_password": (
+        400,
+        "Le mot de passe doit contenir au moins {min_length} caractères.",
+    ),
+    "invalid_username": (400, "Le nom d'utilisateur ne peut pas être vide."),
+    "invalid_token_name": (400, "Le nom du Jeton d'accès ne peut pas être vide."),
+    "invalid_kind": (400, "La nature du Jeton doit être « client » ou « source »."),
+    "invalid_source": (
+        400,
+        "Une source est obligatoire pour un Jeton « source » "
+        "et interdite pour un Jeton « client ».",
+    ),
+    "token_not_found": (404, "Ce Jeton d'accès n'existe pas."),
 }
 
 
@@ -95,6 +110,14 @@ def _error(
         body["retry_after"] = seconds
         headers["Retry-After"] = str(seconds)
     return web.json_response(body, status=status, headers=headers)
+
+
+def _origin_refused() -> web.Response:
+    return _error(
+        "origin_refused",
+        403,
+        message="Origine de la requête refusée.",
+    )
 
 
 def _set_ticket_cookie(
@@ -142,6 +165,42 @@ class ConsoleAuth:
     def __init__(self, auth: AuthService | None) -> None:
         self._auth = auth
 
+    @property
+    def _service(self) -> AuthService:
+        """Service d'auth des routes et middlewares, garanti présent."""
+        assert self._auth is not None
+        return self._auth
+
+    async def _authenticate_cookie(
+        self, request: web.Request
+    ) -> tuple[str | None, AuthenticatedTicket | None]:
+        """Cookie du navigateur → Ticket résolu, ou ``(secret, None)``."""
+        secret = request.cookies.get(TICKET_COOKIE)
+        session = await self._service.authenticate_ticket(secret) if secret else None
+        return secret, session
+
+    def _unauthorized(self) -> web.Response:
+        return _error(
+            "unauthorized",
+            401,
+            message="Ticket Console absent, expiré ou révoqué.",
+        )
+
+    async def ticket_guard(self, request: web.Request) -> bool:
+        """Revérifie le Ticket d'un flux déjà ouvert (#77).
+
+        Le handshake valide le Ticket une fois ; un flux de longue durée doit
+        aussi s'arrêter quand ce Ticket est révoqué ou expiré, pour que
+        « déconnecter partout » coupe l'écoute en direct au lieu d'attendre la
+        prochaine reconnexion. Sans service d'auth, la surface reste ouverte.
+        """
+        if self._auth is None:
+            return True
+        secret = request.cookies.get(TICKET_COOKIE)
+        if secret is None:
+            return False
+        return await self._auth.authenticate_ticket(secret) is not None
+
     # --- Middlewares -------------------------------------------------------
 
     def middlewares(self) -> list[Callable[..., Awaitable[web.StreamResponse]]]:
@@ -157,8 +216,7 @@ class ConsoleAuth:
     async def _setup_middleware(
         self, request: web.Request, handler: Handler
     ) -> web.StreamResponse:
-        assert self._auth is not None
-        if self._auth.setup_required and not is_public_path(request.path):
+        if self._service.setup_required and not is_public_path(request.path):
             return _error(
                 "setup_required",
                 409,
@@ -170,26 +228,20 @@ class ConsoleAuth:
     async def _ticket_middleware(
         self, request: web.Request, handler: Handler
     ) -> web.StreamResponse:
-        assert self._auth is not None
         if is_public_path(request.path):
             return await handler(request)
 
-        secret = request.cookies.get(TICKET_COOKIE)
-        session = (
-            await self._auth.authenticate_ticket(secret) if secret else None
-        )
+        secret, session = await self._authenticate_cookie(request)
         if session is None:
-            return _error(
-                "unauthorized",
-                401,
-                message="Ticket Console absent, expiré ou révoqué.",
-            )
+            return self._unauthorized()
 
+        # Le handler réutilise ce Ticket plutôt que de le relire (logout-all).
+        request[_CONSOLE_TICKET] = session
         response = await handler(request)
         if session.refreshed and not response.prepared:
             # L'expiration glissante n'a été repoussée qu'au plus une fois par
             # heure : le cookie ne suit que ces rafraîchissements.
-            _set_ticket_cookie(response, secret, self._auth.ticket_ttl)
+            _set_ticket_cookie(response, secret, self._service.ticket_ttl)
         return response
 
     @web.middleware
@@ -198,15 +250,15 @@ class ConsoleAuth:
     ) -> web.StreamResponse:
         if request.method in _MUTATING_METHODS:
             origin = request.headers.get("Origin")
-            if origin is not None:
-                # Comparaison stricte des hôtes ; le schéma est ignoré pour que
-                # TLS terminé par le proxy ne casse pas le contrôle.
-                if urlsplit(origin).netloc.lower() != request.host.lower():
-                    return _error(
-                        "origin_refused",
-                        403,
-                        message="Origine de la requête refusée.",
-                    )
+            # Un navigateur envoie toujours ``Origin`` sur une requête mutante :
+            # son absence signale un client forgé, pas un appel légitime.
+            # Comparaison stricte des hôtes ; le schéma est ignoré pour que TLS
+            # terminé par le proxy ne casse pas le contrôle.
+            if (
+                origin is None
+                or urlsplit(origin).netloc.lower() != request.host.lower()
+            ):
+                return _origin_refused()
         return await handler(request)
 
     # --- Routes publiques --------------------------------------------------
@@ -226,26 +278,19 @@ class ConsoleAuth:
                 }
             )
 
-        authenticated = False
-        username: str | None = None
-        refreshed = False
-        secret = request.cookies.get(TICKET_COOKIE)
-        if secret:
-            session = await self._auth.authenticate_ticket(secret)
-            if session is not None:
-                authenticated = True
-                username = session.account.username
-                refreshed = session.refreshed
+        secret, session = await self._authenticate_cookie(request)
         response = web.json_response(
             {
                 "v": ENVELOPE_VERSION,
-                "setup_required": self._auth.setup_required,
-                "authenticated": authenticated,
-                "username": username,
+                "setup_required": self._service.setup_required,
+                "authenticated": session is not None,
+                "username": (
+                    session.account.username if session is not None else None
+                ),
             }
         )
-        if refreshed and secret is not None:
-            _set_ticket_cookie(response, secret, self._auth.ticket_ttl)
+        if session is not None and session.refreshed and secret is not None:
+            _set_ticket_cookie(response, secret, self._service.ticket_ttl)
         return response
 
     async def handle_setup_get(self, request: web.Request) -> web.Response:
@@ -253,18 +298,14 @@ class ConsoleAuth:
             {
                 "v": ENVELOPE_VERSION,
                 "setup_required": (
-                    self._auth.setup_required if self._auth is not None else False
+                    self._service.setup_required if self._auth is not None else False
                 ),
             }
         )
 
     async def handle_setup_post(self, request: web.Request) -> web.Response:
         if self._auth is None:
-            return _error(
-                "auth_disabled",
-                400,
-                message="L'authentification n'est pas configurée.",
-            )
+            return self._auth_disabled()
         payload = await _json_object(request)
         fields = _fields(payload, "code", "username", "password")
         if fields is None:
@@ -275,18 +316,14 @@ class ConsoleAuth:
             )
         code, username, password = fields
         try:
-            ticket = await self._auth.install(code, username, password)
+            ticket = await self._service.install(code, username, password)
         except AuthError as error:
             return self._auth_error(error)
         return self._opened(ticket)
 
     async def handle_login_post(self, request: web.Request) -> web.Response:
         if self._auth is None:
-            return _error(
-                "auth_disabled",
-                400,
-                message="L'authentification n'est pas configurée.",
-            )
+            return self._auth_disabled()
         payload = await _json_object(request)
         fields = _fields(payload, "username", "password")
         if fields is None:
@@ -297,7 +334,7 @@ class ConsoleAuth:
             )
         username, password = fields
         try:
-            ticket = await self._auth.login(username, password)
+            ticket = await self._service.login(username, password)
         except AuthError as error:
             return self._auth_error(error)
         return self._opened(ticket)
@@ -308,7 +345,7 @@ class ConsoleAuth:
         """Liste les Jetons : nom, préfixe, nature, dates. Jamais un secret."""
         if self._auth is None:
             return self._auth_disabled()
-        tokens = await self._auth.list_tokens()
+        tokens = await self._service.list_tokens()
         return web.json_response(
             {
                 "v": ENVELOPE_VERSION,
@@ -335,7 +372,7 @@ class ConsoleAuth:
                 message="Corps JSON attendu : name, kind (client|source), source.",
             )
         try:
-            issued = await self._auth.create_token(
+            issued = await self._service.create_token(
                 name=name, kind=kind, source=source
             )
         except AuthError as error:
@@ -353,7 +390,7 @@ class ConsoleAuth:
         """Révoque un Jeton individuellement ; la révocation est immédiate."""
         if self._auth is None:
             return self._auth_disabled()
-        revoked = await self._auth.revoke_token(request.match_info["token_id"])
+        revoked = await self._service.revoke_token(request.match_info["token_id"])
         if revoked is None:
             return _error(
                 "token_not_found",
@@ -372,24 +409,21 @@ class ConsoleAuth:
             return self._auth_disabled()
         secret = request.cookies.get(TICKET_COOKIE)
         if secret:
-            await self._auth.revoke_ticket(secret)
+            await self._service.revoke_ticket(secret)
         return self._signed_out()
 
     async def handle_logout_all(self, request: web.Request) -> web.Response:
         """« Déconnecter partout » : tous les Tickets du Compte sont révoqués."""
         if self._auth is None:
             return self._auth_disabled()
-        secret = request.cookies.get(TICKET_COOKIE)
-        session = (
-            await self._auth.authenticate_ticket(secret) if secret else None
-        )
+        # Le middleware a déjà résolu et validé ce Ticket ; le relire serait une
+        # requête SQLite inutile (et une fenêtre de course de plus).
+        session = request.get(_CONSOLE_TICKET)
         if session is None:
-            return _error(
-                "unauthorized",
-                401,
-                message="Ticket Console absent, expiré ou révoqué.",
-            )
-        await self._auth.revoke_account_tickets(session.account.id)
+            _, session = await self._authenticate_cookie(request)
+        if session is None:
+            return self._unauthorized()
+        await self._service.revoke_account_tickets(session.account.id)
         return self._signed_out()
 
     async def handle_password_post(self, request: web.Request) -> web.Response:
@@ -407,13 +441,9 @@ class ConsoleAuth:
         current_password, new_password = fields
         secret = request.cookies.get(TICKET_COOKIE)
         if secret is None:
-            return _error(
-                "unauthorized",
-                401,
-                message="Ticket Console absent, expiré ou révoqué.",
-            )
+            return self._unauthorized()
         try:
-            await self._auth.change_password(
+            await self._service.change_password(
                 secret, current_password, new_password
             )
         except AuthError as error:
@@ -439,7 +469,6 @@ class ConsoleAuth:
         return response
 
     def _opened(self, ticket: IssuedTicket) -> web.Response:
-        assert self._auth is not None
         response = web.json_response(
             {
                 "v": ENVELOPE_VERSION,
@@ -447,42 +476,21 @@ class ConsoleAuth:
                 "username": ticket.account.username,
             }
         )
-        _set_ticket_cookie(response, ticket.secret, self._auth.ticket_ttl)
+        _set_ticket_cookie(response, ticket.secret, self._service.ticket_ttl)
         return response
 
     def _auth_error(self, error: AuthError) -> web.Response:
-        assert self._auth is not None
-        status = _STATUS_BY_CODE.get(error.code, 400)
-        message = _MESSAGE_BY_CODE.get(error.code, "Requête d'authentification refusée.")
-        if error.code == "weak_password":
-            message = (
-                "Le mot de passe doit contenir au moins "
-                f"{self._auth.password_min_length} caractères."
-            )
+        status, message = _AUTH_ERRORS.get(
+            error.code, (400, "Requête d'authentification refusée.")
+        )
         return _error(
             error.code,
             status,
-            message=message,
+            message=message.replace(
+                "{min_length}", str(self._service.password_min_length)
+            ),
             retry_after=error.retry_after,
         )
-
-
-_MESSAGE_BY_CODE = {
-    "invalid_code": "Code d'installation invalide ou déjà utilisé.",
-    "already_installed": "Un Compte existe déjà : l'installation est fermée.",
-    "invalid_credentials": "Identifiants incorrects.",
-    "invalid_password": "Le mot de passe actuel est incorrect.",
-    "unauthorized": "Ticket Console absent, expiré ou révoqué.",
-    "too_many_attempts": "Trop de tentatives : réessayez plus tard.",
-    "invalid_username": "Le nom d'utilisateur ne peut pas être vide.",
-    "invalid_token_name": "Le nom du Jeton d'accès ne peut pas être vide.",
-    "invalid_kind": "La nature du Jeton doit être « client » ou « source ».",
-    "invalid_source": (
-        "Une source est obligatoire pour un Jeton « source » "
-        "et interdite pour un Jeton « client »."
-    ),
-    "token_not_found": "Ce Jeton d'accès n'existe pas.",
-}
 
 
 def _token_json(token: AccessToken) -> dict[str, object]:

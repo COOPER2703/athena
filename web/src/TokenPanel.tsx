@@ -2,10 +2,11 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 
 import { createToken, listTokens, revokeToken } from "./api";
 import { isUnauthorized } from "./auth";
+import type { Feedback } from "./feedback";
+import { formatTokenDate } from "./format";
 import {
   SECRET_ONCE_WARNING,
   formatLastUsed,
-  formatTokenDate,
   tokenStatusLabel,
   tokenTargetLabel,
   validateTokenDraft,
@@ -14,13 +15,8 @@ import {
   type TokenDraft,
   type TokenKind,
 } from "./tokens";
+import { useLatestRef } from "./useLatestRef";
 import "./token-panel.css";
-
-/** Retour d'action affiché sous le formulaire. */
-type Feedback =
-  | { kind: "success"; message: string }
-  | { kind: "error"; message: string }
-  | null;
 
 const EMPTY_DRAFT: TokenDraft = { name: "", kind: "client", source: "" };
 
@@ -56,8 +52,7 @@ export function TokenPanel({
 
   // Une réponse arrivée après le démontage ne doit pas ressusciter un secret.
   const mounted = useRef(true);
-  const unauthorized = useRef(onUnauthorized);
-  unauthorized.current = onUnauthorized;
+  const unauthorized = useLatestRef(onUnauthorized);
 
   useEffect(() => {
     mounted.current = true;
