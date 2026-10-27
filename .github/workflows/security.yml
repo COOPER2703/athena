@@ -50,9 +50,11 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y portaudio19-dev
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]" pip-audit
+      # --skip-editable : le projet lui-même (`athena`, installé en -e) n'existe
+      # pas sur PyPI, il ne peut pas être audité.
       # --strict : toute vuln non ignorée fait échouer le job.
       # Faux positif : ajouter `--ignore-vuln <ID>` ici, avec un commentaire.
-      - run: python -m pip_audit --strict --desc
+      - run: python -m pip_audit --strict --skip-editable --desc
 
   # Audit des dépendances du front (prod + dev : vite/tsc cassés = build cassé).
   web-audit:
