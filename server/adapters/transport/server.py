@@ -20,6 +20,7 @@ from protocol import (
     decode,
     encode,
 )
+from server.adapters.http_auth import bearer_secret
 from server.adapters.trace import NullTraceSink, emit
 from server.adapters.transport.translation import outbound_message, translate_inbound
 from server.core.commands import (
@@ -36,24 +37,6 @@ _TRACE_SOURCE = "transport"
 # Nature du Jeton d'accès admise au handshake du transport : un Jeton créé
 # pour le Webhook (``source``) ne vaut jamais pour une connexion Client.
 _CLIENT_TOKEN_KIND = "client"
-
-
-def _bearer_secret(header: str | None) -> str | None:
-    """Extrait le secret d'un en-tête ``Authorization: Bearer``, ou ``None``.
-
-    Le schéma est insensible à la casse (RFC 7235) ; le secret est un jeton
-    opaque sans espace. Tout en-tête absent, d'un autre schéma ou malformé est
-    refusé, sans tenter d'interpréter le reste.
-    """
-    if not header:
-        return None
-    scheme, separator, credentials = header.partition(" ")
-    if not separator or scheme.lower() != "bearer":
-        return None
-    secret = credentials.strip()
-    if not secret or any(character.isspace() for character in secret):
-        return None
-    return secret
 
 
 # Une liste statique (tests, usages simples) ou un fournisseur relu à chaque
@@ -193,7 +176,7 @@ class WebSocketTransport:
         """
         auth = self._auth
         assert auth is not None
-        secret = _bearer_secret(request.headers.get("Authorization"))
+        secret = bearer_secret(request.headers.get("Authorization"))
         token = (
             None
             if secret is None

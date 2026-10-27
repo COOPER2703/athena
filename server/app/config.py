@@ -7,6 +7,14 @@ from typing import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from server.adapters.auth.store import (
+    DEFAULT_LOGIN_BLOCK_SECONDS,
+    DEFAULT_LOGIN_MAX_ATTEMPTS,
+    DEFAULT_PASSWORD_MIN_LENGTH,
+    DEFAULT_SETUP_MAX_ATTEMPTS,
+    DEFAULT_TICKET_REFRESH_SECONDS,
+    DEFAULT_TICKET_TTL_SECONDS,
+)
 from server.adapters.memory.embedder import DEFAULT_EMBED_MODEL
 from server.app.secrets import EnvSecretResolver, SecretResolver
 
@@ -23,12 +31,16 @@ DEFAULT_MEMORY_DB = "athena_memory.db"
 # indépendamment. Comme la base mémoire, le défaut est relatif au répertoire
 # de travail ; il est surchargeable par `ATHENA_AUTH_DB`.
 DEFAULT_AUTH_DB = "auth.db"
-DEFAULT_CONSOLE_TICKET_DAYS = 30
-DEFAULT_CONSOLE_TICKET_REFRESH_SECONDS = 60 * 60
-DEFAULT_AUTH_PASSWORD_MIN_LENGTH = 12
-DEFAULT_AUTH_LOGIN_MAX_ATTEMPTS = 5
-DEFAULT_AUTH_LOGIN_BLOCK_MINUTES = 15
-DEFAULT_AUTH_SETUP_MAX_ATTEMPTS = 5
+# Les bornes de sécurité ont **une** source de vérité : le store d'auth, qui
+# les applique. La configuration n'en est qu'une vue exprimée dans ses unités
+# (jours, minutes), pour ne pas pouvoir diverger des valeurs réellement
+# utilisées.
+DEFAULT_CONSOLE_TICKET_DAYS = DEFAULT_TICKET_TTL_SECONDS // (24 * 60 * 60)
+DEFAULT_CONSOLE_TICKET_REFRESH_SECONDS = DEFAULT_TICKET_REFRESH_SECONDS
+DEFAULT_AUTH_PASSWORD_MIN_LENGTH = DEFAULT_PASSWORD_MIN_LENGTH
+DEFAULT_AUTH_LOGIN_MAX_ATTEMPTS = DEFAULT_LOGIN_MAX_ATTEMPTS
+DEFAULT_AUTH_LOGIN_BLOCK_MINUTES = DEFAULT_LOGIN_BLOCK_SECONDS // 60
+DEFAULT_AUTH_SETUP_MAX_ATTEMPTS = DEFAULT_SETUP_MAX_ATTEMPTS
 # Modèle de Consolidation : Flash-Lite, disponible sur l'échelle gratuite. Le
 # précédent défaut (`gemini-2.0-flash`) a été retiré et renvoyait 404.
 DEFAULT_CONSOLIDATION_MODEL = "gemini-3.1-flash-lite"
