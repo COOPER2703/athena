@@ -97,7 +97,9 @@ def test_announcement_instruction_carries_the_plugin_instruction_too() -> None:
     assert live.instruction == (
         "SYSTÈME\n\n" + PLUGIN_INSTRUCTION + "\n\nANNONCE\n\nMÉMOIRE"
     )
-    assert [spec.name for spec in live.tools] == ["hass__turn_on"]
+    # L'instruction de plugin reste dans le prompt, mais les Tools du plugin ne
+    # sont **pas** déclarés : une Session d'Annonce n'a aucun outil (#81).
+    assert live.tools == ()
 
 
 def test_two_plugin_instructions_are_composed_in_a_deterministic_order() -> None:
