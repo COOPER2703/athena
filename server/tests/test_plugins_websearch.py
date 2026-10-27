@@ -424,7 +424,8 @@ TOOL_PARAMETERS: dict[str, Any] = {
     "required": ["query"],
 }
 
-# Texte exact de la spec #101, section « Instruction de plugin ».
+# Texte exact de la spec #101, section « Instruction de plugin », suivi de la
+# ligne sur les résultats vides demandée par #103 (stories 4 et 5).
 INSTRUCTION = (
     "`web_search` interroge le web. Utilise-le pour toute question factuelle, "
     "d'actualité ou de culture générale dont tu n'es pas sûre, et jamais pour "
@@ -434,7 +435,10 @@ INSTRUCTION = (
     "Quand tu réponds, attribue à la source par son nom ; ne lis jamais une URL "
     "à haute voix et ne récite pas d'extrait brut.\n"
     "Si les sources se contredisent, dis-le au lieu de trancher. Si la recherche "
-    "échoue, dis-le simplement et propose de réessayer."
+    "échoue, dis-le simplement et propose de réessayer.\n"
+    "Si les extraits ne contiennent pas la réponse, dis que tu ne sais pas ; si la "
+    "recherche ne rend aucun résultat, dis que tu n'as rien trouvé, sans rien "
+    "inventer."
 )
 
 
@@ -766,6 +770,7 @@ def test_zero_results_is_a_success_not_an_error(tmp_path: Path) -> None:
                 # Zéro résultat est un succès : à l'Instruction de dire à
                 # l'oral qu'elle n'a rien trouvé.
                 assert payload == {"status": "ok", "count": 0, "results": []}
+                assert "aucun résultat" in live.instruction()
                 [search] = sink.of_kind("Search")
                 assert search.payload["results"] == 0
                 assert search.payload["credits"] == 1

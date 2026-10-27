@@ -126,7 +126,10 @@ INSTRUCTION = (
     "Quand tu réponds, attribue à la source par son nom ; ne lis jamais une URL "
     "à haute voix et ne récite pas d'extrait brut.\n"
     "Si les sources se contredisent, dis-le au lieu de trancher. Si la recherche "
-    "échoue, dis-le simplement et propose de réessayer."
+    "échoue, dis-le simplement et propose de réessayer.\n"
+    "Si les extraits ne contiennent pas la réponse, dis que tu ne sais pas ; si la "
+    "recherche ne rend aucun résultat, dis que tu n'as rien trouvé, sans rien "
+    "inventer."
 )
 
 _UNREACHABLE_MESSAGE = (
