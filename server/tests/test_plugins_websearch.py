@@ -9,12 +9,12 @@ import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Sequence
 
 import pytest
 import websockets
 
-from conftest import RecordingTraceSink, _url, register, wait_until
+from conftest import FakeJudge, RecordingTraceSink, _url, register, wait_until
 from protocol import SessionStart, encode
 from server.adapters.gemini import GeminiLiveAdapter
 from server.adapters.plugins import PluginLoader
@@ -23,6 +23,7 @@ from server.adapters.transport import WebSocketTransport
 from server.app.clock import AsyncioClock
 from server.app.root import App
 from server.app.secrets import EnvSecretResolver
+from server.app.trace import FanOutTraceSink, FileTraceSink
 from server.core.plugins import PluginContext, PluginRegistry
 from tavily_stub import TavilyStub
 
@@ -148,24 +149,30 @@ async def _running_app(
     registry: PluginRegistry | None = None,
     loader: PluginLoader | None = None,
     retry_interval: float = 5.0,
+    announce_prompt: str = "",
+    judge: Any = None,
+    extra_sinks: Sequence[Any] = (),
 ) -> AsyncIterator[
     tuple[Any, _ToolLiveConnect, WebSocketTransport, RecordingTraceSink]
 ]:
     sink = RecordingTraceSink()
-    transport = WebSocketTransport(host="127.0.0.1", port=0, trace_sink=sink)
+    trace_sink = FanOutTraceSink(sink, *extra_sinks) if extra_sinks else sink
+    transport = WebSocketTransport(host="127.0.0.1", port=0, trace_sink=trace_sink)
     live = _ToolLiveConnect()
     gemini = GeminiLiveAdapter(
         api_key="test-key",
         model="gemini-live",
         voice="Aoede",
         live_connect=live,
-        trace_sink=sink,
+        trace_sink=trace_sink,
     )
     app = App(
         transport=transport,
         gemini=gemini,
         clock=AsyncioClock(),
-        trace_sink=sink,
+        trace_sink=trace_sink,
+        announce_prompt=announce_prompt,
+        judge=judge,
         plugins=registry,
         plugin_loader=loader,
         plugin_retry_interval=retry_interval,
@@ -237,6 +244,7 @@ def _plugins(
     secret: str = SECRET,
     search_timeout: float | None = None,
     cache_ttl: float | None = None,
+    extra_sinks: Sequence[Any] = (),
 ) -> tuple[PluginRegistry, PluginLoader]:
     plugins_dir, state_path = _install_websearch(
         tmp_path,
@@ -246,11 +254,12 @@ def _plugins(
         cache_ttl=cache_ttl,
     )
     registry = PluginRegistry()
+    trace_sink = FanOutTraceSink(sink, *extra_sinks) if extra_sinks else sink
     loader = PluginLoader(
         directory=plugins_dir,
         state_path=state_path,
         secrets=EnvSecretResolver({SECRET_VARIABLE: secret}),
-        trace_sink=sink,
+        trace_sink=trace_sink,
     )
     return registry, loader
 
@@ -1365,3 +1374,105 @@ def test_unreachable_engine_during_a_session_is_a_sentence_not_a_crash(
 
     asyncio.run(scenario())
 
+
+# ---------------------------------------------------------------------------
+# #105 — Recette : la porte d'Annonce reste fermée et le secret ne fuit pas.
+#
+# Même seam que le reste du fichier. L'Annonce se prouve à la frontière
+# App/Gemini (la Connexion Live réellement ouverte) ; la non-fuite se prouve
+# sur les trois surfaces observables : Traces, instantané et journal rendu.
+# ---------------------------------------------------------------------------
+
+
+def test_an_announcement_session_declares_no_web_search(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with TavilyStub() as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
+            async with _running_app(
+                registry=registry,
+                loader=loader,
+                announce_prompt="ANNONCE",
+                judge=FakeJudge(message="La porte est ouverte"),
+            ) as (app, live, transport, app_sink):
+                assert app.plugins.states["websearch"] == "activated"
+                # Le Tool existe bien dans le registre : c'est le gate de
+                # l'Annonce, pas une absence de plugin, qui le retire.
+                assert app.tools.owner_of("web_search") == "websearch"
+
+                async with websockets.connect(_url(transport)) as ws:
+                    await register(ws, transport, client_name="desktop", drain=False)
+                    await wait_until(
+                        lambda: any(
+                            entry.kind == "ClientRegistered"
+                            for entry in app_sink.entries
+                        )
+                    )
+                    app.push_event("matrix", "porte ouverte")
+                    # La fenêtre de regroupement dure 5 s (ADR-0007) avant que
+                    # le noyau n'ouvre la Connexion Live d'Annonce.
+                    await wait_until(
+                        lambda: bool(app_sink.of_kind("EventJudge")),
+                        timeout=7.0,
+                    )
+
+                # L'instruction de plugin reste dans le prompt (ADR-0017)…
+                assert INSTRUCTION in live.instruction()
+                assert "ANNONCE" in live.instruction()
+                # …mais la Connexion Live est ouverte sans aucun outil, donc
+                # sans `web_search` : une Annonce ne peut pas chercher.
+                assert live.declarations() == []
+                assert app.plugins.states["websearch"] == "activated"
+
+    asyncio.run(scenario())
+
+
+def test_the_api_key_never_reaches_a_trace_a_log_or_the_snapshot(
+    tmp_path: Path,
+) -> None:
+    log_path = tmp_path / "logs" / "server.log"
+    log = FileTraceSink(log_path, min_level="debug")
+    try:
+
+        async def scenario() -> None:
+            async with TavilyStub() as stub:
+                # Le même journal rendu reçoit les Traces du plugin (sonde et
+                # recherches) et celles de l'App (Session, ToolCall).
+                plugin_sink = RecordingTraceSink()
+                registry, loader = _plugins(
+                    tmp_path, plugin_sink, stub.base_url, extra_sinks=[log]
+                )
+                async with _running_app(
+                    registry=registry, loader=loader, extra_sinks=[log]
+                ) as (app, live, transport, app_sink):
+                    async with _live_session(transport, live) as session:
+                        payload = await _call(
+                            session, "web_search", {"query": "question secrète"}
+                        )
+
+                    assert payload["status"] == "ok"
+                    # La clé part réellement au moteur : le test n'est pas vide.
+                    assert set(stub.auth_tokens) == {f"Bearer {SECRET}"}
+
+                    traces = [
+                        entry.payload
+                        for entry in (*app_sink.entries, *plugin_sink.entries)
+                    ]
+                    assert SECRET not in json.dumps(traces, default=str)
+                    assert SECRET not in json.dumps(
+                        app.snapshot(), default=str
+                    )
+                    assert SECRET not in json.dumps(
+                        app.plugins.states, default=str
+                    )
+
+        asyncio.run(scenario())
+    finally:
+        log.close()
+
+    rendered = log_path.read_text(encoding="utf-8")
+    # Le journal porte bien la sonde et la recherche : l'absence de clé est
+    # une vraie absence, pas un fichier vide.
+    assert "CreditsRemaining" in rendered
+    assert "Search" in rendered
+    assert SECRET not in rendered
