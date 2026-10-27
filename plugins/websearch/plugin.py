@@ -15,6 +15,8 @@ une panne devient une phrase rendue au modèle.
 from __future__ import annotations
 
 import asyncio
+import re
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
@@ -44,9 +46,21 @@ SEARCH_TIMEOUT = 8.0
 # Budget de contexte (ADR-0018) : dix extraits, deux fragments par source.
 MAX_RESULTS = 10
 CHUNKS_PER_SOURCE = 2
+# Un extrait ne dépasse pas 600 caractères, l'ensemble 6 000 (ADR-0018).
+MAX_EXCERPT_CHARS = 600
+MAX_EXCERPT_TOTAL = 6000
 
 # Credits qu'un appel consomme, par profondeur (ADR-0018).
 CREDITS_PER_DEPTH = {"fast": 1, "basic": 1, "advanced": 2}
+
+# Cache des recherches (ADR-0018) : en mémoire seulement, borné en taille et en
+# âge. Lus à chaque opération pour que les tests puissent les réduire sur une
+# copie du module.
+CACHE_MAX_ENTRIES = 32
+CACHE_TTL = 300.0
+
+# Clé de cache : requête normalisée, topic, fenêtre, langue et profondeur.
+CacheKey = tuple[str, str, str | None, str, str]
 
 TOOL_NAME = "web_search"
 TOOL_DESCRIPTION = (
@@ -121,6 +135,19 @@ _STATUS_MESSAGE = (
 )
 
 Trace = Callable[..., None]
+
+
+@dataclass(frozen=True, slots=True)
+class _CacheEntry:
+    """Une charge de recherche réussie et l'instant où elle a été obtenue."""
+
+    payload: Mapping[str, Any]
+    stored_at: float
+
+
+# Le cache vit avec le module : une retente de ``create()`` (moteur réparé) ne
+# jette pas les recherches déjà payées. Aucune persistance, aucun disque.
+_CACHE: OrderedDict[CacheKey, _CacheEntry] = OrderedDict()
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,6 +353,55 @@ def _request_body(
     return body
 
 
+# Ponctuation finale ignorée par la clé de cache : « c'est qui ? » et
+# « c'est qui » sont la même question.
+_TRAILING_PUNCTUATION = re.compile(r"[\s.!?,;:…]+$")
+
+
+def _normalize_query(query: str) -> str:
+    """Casse, espaces et ponctuation finale ne distinguent pas deux requêtes."""
+    collapsed = " ".join(query.split()).casefold()
+    return _TRAILING_PUNCTUATION.sub("", collapsed)
+
+
+def _cache_key(
+    settings: _Settings,
+    query: str,
+    topic: str,
+    time_range: str | None,
+) -> CacheKey:
+    """Deux recherches ne se confondent que si tous leurs paramètres concordent."""
+    return (
+        _normalize_query(query),
+        topic,
+        time_range,
+        settings.language,
+        settings.search_depth,
+    )
+
+
+def _cache_get(key: CacheKey, now: float) -> Mapping[str, Any] | None:
+    """Rend la charge encore fraîche, ou l'oublie si son TTL est passé."""
+    entry = _CACHE.get(key)
+    if entry is None:
+        return None
+    if now - entry.stored_at >= CACHE_TTL:
+        del _CACHE[key]
+        return None
+    _CACHE.move_to_end(key)
+    return entry.payload
+
+
+def _cache_store(key: CacheKey, payload: Mapping[str, Any], now: float) -> None:
+    """Mémorise une recherche réussie et jette la plus ancienne au-delà du plafond."""
+    if CACHE_MAX_ENTRIES <= 0:
+        return
+    _CACHE[key] = _CacheEntry(payload=payload, stored_at=now)
+    _CACHE.move_to_end(key)
+    while len(_CACHE) > CACHE_MAX_ENTRIES:
+        _CACHE.popitem(last=False)
+
+
 async def _search(
     settings: _Settings,
     arguments: Mapping[str, object],
@@ -333,16 +409,32 @@ async def _search(
 ) -> Mapping[str, object]:
     """Interroge le moteur et rend des Extraits de recherche, ou une erreur.
 
-    Aucune exception ne remonte : une panne devient une phrase en français que
-    le modèle peut dire à voix haute (ADR-0018). Un timeout n'est pas retenté :
-    une reprise doublerait la latence d'une conversation en cours.
+    Une question déjà posée et encore fraîche rend la même charge sans requête
+    HTTP : la Console voit ``hit`` dans la Trace et zéro crédit consommé. Une
+    erreur n'entre jamais au cache, sans quoi une panne passagère collerait à
+    la question. Aucune exception ne remonte : une panne devient une phrase en
+    français que le modèle peut dire à haute voix (ADR-0018). Un timeout n'est
+    pas retenté : une reprise doublerait la latence d'une conversation en
+    cours.
     """
     query = str(arguments.get("query", "")).strip()
     topic = _choice(arguments.get("topic"), TOPICS) or DEFAULT_TOPIC
     time_range = _choice(arguments.get("time_range"), TIME_RANGES)
     payload = _request_body(settings, query, topic, time_range)
+    key = _cache_key(settings, query, topic, time_range)
     loop = asyncio.get_running_loop()
     started = loop.time()
+    cached = _cache_get(key, started)
+    if cached is not None:
+        _trace_search(
+            trace,
+            query,
+            payload,
+            started,
+            results=len(cached["results"]),
+            cache="hit",
+        )
+        return cached
     try:
         async with _client(settings, SEARCH_TIMEOUT) as client:
             response = await client.post(settings.base_url + "/search", json=payload)
@@ -375,8 +467,35 @@ async def _search(
         _trace_search(trace, query, payload, started, reason="unreadable body")
         return _error(_UNREADABLE_MESSAGE)
 
-    _trace_search(trace, query, payload, started, results=len(results))
-    return {"status": "ok", "count": len(results), "results": results}
+    response_payload = {"status": "ok", "count": len(results), "results": results}
+    _cache_store(key, response_payload, loop.time())
+    _trace_search(trace, query, payload, started, results=len(results), cache="miss")
+    return response_payload
+
+
+# Terminateurs de phrase et caractères qui peuvent les suivre (guillemets).
+_SENTENCE_ENDS = ".!?…"
+_SENTENCE_TAIL = " \n\t\"'»”)"
+
+
+def _cut_excerpt(text: str, limit: int) -> tuple[str, bool]:
+    """Coupe ``text`` à ``limit`` en reculant vers la fin propre la plus proche.
+
+    Trois paliers, du plus lisible au plus brutal : fin de phrase, puis fin de
+    mot, puis coupe nette. Le second membre dit si l'extrait est incomplet.
+    """
+    if len(text) <= limit:
+        return text, False
+    window = text[:limit]
+    for index in range(len(window) - 1, -1, -1):
+        if window[index] not in _SENTENCE_ENDS:
+            continue
+        if index + 1 == len(window) or window[index + 1] in _SENTENCE_TAIL:
+            return window[: index + 1].rstrip(), True
+    for index in range(len(window) - 1, 0, -1):
+        if window[index].isspace():
+            return window[:index].rstrip(), True
+    return window.rstrip(), True
 
 
 def _extracts(body: object) -> list[dict[str, object]]:
@@ -385,20 +504,32 @@ def _extracts(body: object) -> list[dict[str, object]]:
     Une réponse sans liste ``results`` est *illisible*, pas vide : la confondre
     avec zéro résultat ferait passer une panne pour une absence d'information.
     ``published_date`` n'apparaît que si le moteur la fournit ; l'absence de
-    date ne fait jamais disparaître un résultat.
+    date ne fait jamais disparaître un résultat. Un extrait coupé porte
+    ``truncated`` : le modèle sait que le texte n'est pas complet, et un
+    résultat intact ne porte jamais de faux indicateur.
     """
     if not isinstance(body, dict) or not isinstance(body.get("results"), list):
         raise ValueError("unexpected search body")
     raw = body["results"]
     extracts: list[dict[str, object]] = []
+    remaining = MAX_EXCERPT_TOTAL
     for item in raw:
         if not isinstance(item, dict):
             continue
+        # Le budget total se partage dans l'ordre du moteur : un résultat
+        # au-delà du plafond garde son titre et son URL, sans extrait.
+        excerpt, truncated = _cut_excerpt(
+            str(item.get("content") or ""),
+            min(MAX_EXCERPT_CHARS, max(remaining, 0)),
+        )
+        remaining -= len(excerpt)
         extract: dict[str, object] = {
             "title": str(item.get("title") or ""),
             "url": str(item.get("url") or ""),
-            "excerpt": str(item.get("content") or ""),
+            "excerpt": excerpt,
         }
+        if truncated:
+            extract["truncated"] = True
         published = item.get("published_date")
         if isinstance(published, str) and published.strip():
             extract["published_date"] = published.strip()
@@ -427,8 +558,9 @@ def _trace_search(
     *,
     results: int = 0,
     reason: str | None = None,
+    cache: str = "miss",
 ) -> None:
-    """Trace une recherche : requête, paramètres, durée, résultats, crédits."""
+    """Trace une recherche : requête, paramètres, durée, résultats, cache, crédits."""
     entry: dict[str, object] = {
         "query": query,
         # Les paramètres effectivement partis au moteur : ni plus, ni moins.
@@ -439,7 +571,9 @@ def _trace_search(
         },
         "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 1),
         "results": results,
-        "credits": 0 if reason else _credits(payload),
+        "cache": cache,
+        # Un hit et une erreur ne consomment aucun crédit.
+        "credits": 0 if reason is not None or cache == "hit" else _credits(payload),
     }
     if reason is not None:
         entry["status"] = "error"
