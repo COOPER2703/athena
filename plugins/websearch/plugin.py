@@ -204,11 +204,21 @@ def _settings(context: PluginContext) -> _Settings:
     return _Settings(
         base_url=text("base_url", DEFAULT_BASE_URL).rstrip("/"),
         api_key=str(context.secrets.get("api_key", "")),
-        search_depth=text("search_depth", DEFAULT_SEARCH_DEPTH),
+        search_depth=_depth(text("search_depth", DEFAULT_SEARCH_DEPTH)),
         language=text("language", DEFAULT_LANGUAGE),
         country=text("country", DEFAULT_COUNTRY),
         strict_language=_as_flag(text("strict_language", DEFAULT_STRICT_LANGUAGE)),
     )
+
+
+def _depth(value: str) -> str:
+    """Retient une profondeur que le moteur connaît, sinon ``basic``.
+
+    Les clés de ``CREDITS_PER_DEPTH`` sont les seules valeurs acceptées par
+    Tavily ; une faute de frappe dans ``plugins.json`` ne doit pas partir au
+    moteur ni fausser le compte de crédits.
+    """
+    return value if value in CREDITS_PER_DEPTH else DEFAULT_SEARCH_DEPTH
 
 
 def _as_flag(value: str) -> bool:

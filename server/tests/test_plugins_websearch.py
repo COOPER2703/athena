@@ -572,6 +572,37 @@ def test_configured_depth_language_and_country_reach_the_engine(
     asyncio.run(scenario())
 
 
+def test_an_unknown_search_depth_falls_back_to_basic(tmp_path: Path) -> None:
+    """Seules ``fast``, ``basic`` et ``advanced`` ont un sens pour le moteur."""
+
+    async def scenario() -> None:
+        async with TavilyStub() as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(
+                tmp_path, sink, stub.base_url, config={"search_depth": "turbo"}
+            )
+            async with _running_app(registry=registry, loader=loader) as (
+                _,
+                live,
+                transport,
+                _,
+            ):
+                async with _live_session(transport, live) as session:
+                    payload = await _call(
+                        session, "web_search", {"query": "profondeur inconnue"}
+                    )
+
+                assert payload["status"] == "ok"
+                [request] = stub.search_requests
+                assert request["body"]["search_depth"] == "basic"
+                [search] = sink.of_kind("Search")
+                assert search.payload["params"]["search_depth"] == "basic"
+                # ``basic`` coûte un crédit : la valeur refusée n'en invente pas.
+                assert search.payload["credits"] == 1
+
+    asyncio.run(scenario())
+
+
 # ---------------------------------------------------------------------------
 # Pannes : un appel ne lève jamais, la Session et le plugin survivent.
 # ---------------------------------------------------------------------------
