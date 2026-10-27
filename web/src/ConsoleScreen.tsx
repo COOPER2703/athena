@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { AccountPanel } from "./AccountPanel";
 import { fetchSession, fetchStatus } from "./api";
 import { isUnauthorized } from "./auth";
 import { EventForm } from "./EventForm";
@@ -14,6 +15,8 @@ interface ConsoleScreenProps {
   username: string;
   /** Appelé au premier 401 : Ticket Console expiré ou révoqué. */
   onUnauthorized: () => void;
+  /** Appelé après une déconnexion voulue : retour à l'écran de connexion. */
+  onSignedOut: (message?: string) => void;
 }
 
 /**
@@ -25,7 +28,11 @@ interface ConsoleScreenProps {
  * l'ouverture) remonte à `App` par `onUnauthorized`, qui ferme cet écran —
  * donc le flux — et revient à la connexion.
  */
-export function ConsoleScreen({ username, onUnauthorized }: ConsoleScreenProps) {
+export function ConsoleScreen({
+  username,
+  onUnauthorized,
+  onSignedOut,
+}: ConsoleScreenProps) {
   const [fetched, setFetched] = useState<StatusData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -153,6 +160,12 @@ export function ConsoleScreen({ username, onUnauthorized }: ConsoleScreenProps) 
         ) : null}
 
         {status !== null ? <ConfigPanel config={status.config} /> : null}
+
+        <AccountPanel
+          username={username}
+          onUnauthorized={onUnauthorized}
+          onSignedOut={onSignedOut}
+        />
 
         <TraceFeed feed={stream.feed} connection={stream.connection} />
 

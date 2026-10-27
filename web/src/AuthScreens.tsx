@@ -1,11 +1,9 @@
 import { useState, type FormEvent } from "react";
 
+import { MIN_PASSWORD_LENGTH } from "./account";
 import { authErrorMessage, errorStatus } from "./auth";
 import { login, setupAccount } from "./api";
 import "./auth.css";
-
-/** Longueur minimale affichée ; le serveur reste l'autorité (400 explicite). */
-const MIN_PASSWORD_LENGTH = 12;
 
 interface SetupScreenProps {
   /** Appelé avec le nom du Compte après création et ouverture du Ticket. */

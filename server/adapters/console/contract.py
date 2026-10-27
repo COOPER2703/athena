@@ -22,6 +22,11 @@ STREAM_PATH = "/api/stream"
 SESSION_PATH = "/api/session"
 SETUP_PATH = "/api/setup"
 LOGIN_PATH = "/api/login"
+# Déconnexion du navigateur courant, déconnexion de tous les navigateurs du
+# Compte, et changement de mot de passe (spec #75, ticket #77).
+LOGOUT_PATH = "/api/logout"
+LOGOUT_ALL_PATH = "/api/logout-all"
+PASSWORD_PATH = "/api/password"
 # Sonde de supervision : publique, réponse fixe, aucun état applicatif.
 HEALTH_PATH = "/healthz"
 # Nom stable et explicite du cookie qui porte le Ticket Console. Le préfixe
