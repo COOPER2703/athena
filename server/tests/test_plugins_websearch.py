@@ -198,7 +198,6 @@ def _install_websearch(
     base_url: str,
     *,
     config: dict[str, str] | None = None,
-    secret: str = SECRET,
     search_timeout: float | None = None,
 ) -> tuple[Path, Path]:
     """Copie le vrai plugin et écrit un fichier d'état qui l'active."""
@@ -236,7 +235,6 @@ def _plugins(
         tmp_path,
         base_url,
         config=config,
-        secret=secret,
         search_timeout=search_timeout,
     )
     registry = PluginRegistry()
