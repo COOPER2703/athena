@@ -469,6 +469,11 @@ def test_web_search_is_declared_and_returns_sourced_excerpts(tmp_path: Path) -> 
                     assert dict(declared["web_search"].parameters_json_schema) == (
                         TOOL_PARAMETERS
                     )
+                    # Le vocabulaire du glossaire : des Extraits de recherche,
+                    # jamais des « pages ».
+                    description = declared["web_search"].description
+                    assert "extraits de recherche" in description
+                    assert "page" not in description.lower()
                     # L'Instruction de plugin est composée dans le prompt système
                     # de la Session qui déclare le Tool.
                     assert INSTRUCTION in live.instruction()

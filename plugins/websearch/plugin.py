@@ -80,7 +80,7 @@ class CacheKey:
 
 TOOL_NAME = "web_search"
 TOOL_DESCRIPTION = (
-    "Cherche sur le web et renvoie des extraits de pages sourcés "
+    "Cherche sur le web et renvoie des extraits de recherche sourcés "
     "(titre, URL, extrait, date de publication)."
 )
 
