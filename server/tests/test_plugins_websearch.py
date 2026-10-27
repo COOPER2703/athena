@@ -672,8 +672,12 @@ def test_search_timeout_returns_a_french_error_and_the_session_survives(
                     )
                     assert slow["status"] == "error"
                     assert "temps" in slow["message"]
-                    assert sink.of_kind("Search")[-1].payload["status"] == "error"
-                    assert sink.of_kind("Search")[-1].payload["credits"] == 0
+                    # Un seul POST : pas de reprise qui doublerait la latence.
+                    assert len(stub.search_requests) == 1
+                    timed_out = sink.of_kind("Search")[-1].payload
+                    assert timed_out["status"] == "error"
+                    assert timed_out["reason"] == "timeout"
+                    assert timed_out["credits"] == 0
 
                     # Le moteur répond de nouveau : la Session et le plugin
                     # n'ont pas bougé.
@@ -682,6 +686,7 @@ def test_search_timeout_returns_a_french_error_and_the_session_survives(
                         session, "web_search", {"query": "question rapide"}
                     )
                     assert recovered["status"] == "ok"
+                    assert len(stub.search_requests) == 2
                 assert app.plugins.states["websearch"] == "activated"
                 assert not app_sink.of_kind("SessionClosed")
 
@@ -914,42 +919,6 @@ def test_unreadable_body_becomes_a_french_error_not_zero_results(
                 [search] = sink.of_kind("Search")
                 assert search.payload["status"] == "error"
                 assert search.payload["reason"] == "unreadable body"
-
-    asyncio.run(scenario())
-
-
-def test_timeout_after_eight_seconds_is_a_single_attempt(
-    tmp_path: Path,
-) -> None:
-    """Le budget réel est de 8 s ; le test le réduit sur la copie du module."""
-
-    async def scenario() -> None:
-        async with TavilyStub(delay=1.0) as stub:
-            sink = RecordingTraceSink()
-            registry, loader = _plugins(
-                tmp_path, sink, stub.base_url, search_timeout=0.2
-            )
-            async with _running_app(registry=registry, loader=loader) as (
-                app,
-                live,
-                transport,
-                app_sink,
-            ):
-                async with _live_session(transport, live) as session:
-                    payload = await _call(
-                        session, "web_search", {"query": "moteur muet"}
-                    )
-
-                assert payload["status"] == "error"
-                assert "temps" in payload["message"]
-                # Un seul POST : pas de reprise qui doublerait la latence.
-                assert len(stub.search_requests) == 1
-                assert app.plugins.states["websearch"] == "activated"
-                assert not app_sink.of_kind("SessionClosed")
-
-                [search] = sink.of_kind("Search")
-                assert search.payload["status"] == "error"
-                assert search.payload["reason"] == "timeout"
 
     asyncio.run(scenario())
 
