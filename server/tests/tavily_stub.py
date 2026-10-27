@@ -41,7 +41,6 @@ DEFAULT_RESULTS: tuple[dict[str, Any], ...] = (
 class TavilyStub:
     """Moteur de test et ce que le test veut observer."""
 
-    api_key: str = "tvly-test-key"
     host: str = "127.0.0.1"
     port: int = 0
     usage_status: int = 200
@@ -52,7 +51,6 @@ class TavilyStub:
     # réponse illisible (JSON tronqué, forme inattendue) sans toucher au plugin.
     raw_search_body: bytes | None = None
     results: tuple[dict[str, Any], ...] = DEFAULT_RESULTS
-    answer: str = ""
     delay: float = 0.0
     requests: list[dict[str, Any]] = field(default_factory=list)
     _server: uvicorn.Server | None = field(default=None, init=False, repr=False)
@@ -70,10 +68,6 @@ class TavilyStub:
     @property
     def search_requests(self) -> list[dict[str, Any]]:
         return [request for request in self.requests if request["path"] == SEARCH_PATH]
-
-    @property
-    def usage_requests(self) -> list[dict[str, Any]]:
-        return [request for request in self.requests if request["path"] == USAGE_PATH]
 
     async def start(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -138,7 +132,6 @@ class TavilyStub:
                 "method": scope["method"],
                 "path": scope["path"],
                 "authorization": headers.get("authorization"),
-                "content_type": headers.get("content-type"),
                 "body": body,
             }
         )
@@ -164,7 +157,6 @@ class TavilyStub:
                 self.search_status,
                 {
                     "query": body.get("query", ""),
-                    "answer": self.answer,
                     "results": list(self.results),
                     "response_time": 0.12,
                 },

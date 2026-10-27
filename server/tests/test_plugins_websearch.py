@@ -935,8 +935,9 @@ def test_unreadable_body_becomes_a_french_error_not_zero_results(
 def _long_text(length: int) -> str:
     """Texte continu de ``length`` caractères, fait de phrases terminées.
 
-    La coupe à 3 000 caractères tombe au milieu d'une phrase : c'est au plugin
-    de reculer jusqu'à la dernière fin propre.
+    Le plugin n'en garde qu'un extrait de 600 caractères au plus : la coupe
+    tombe au milieu d'une phrase, c'est à lui de reculer jusqu'à la dernière
+    fin propre.
     """
     sentence = "La finale a été remportée par l'équipe locale. "
     return (sentence * (length // len(sentence) + 1))[:length]
