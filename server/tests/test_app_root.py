@@ -587,6 +587,47 @@ def test_pushed_event_at_rest_judges_then_opens_an_announcement_connection() -> 
     asyncio.run(scenario())
 
 
+def test_announcement_connection_carries_none_of_the_kernel_tools() -> None:
+    """Bout en bout : les Tools du noyau existent et sont servis à une Session
+    demandée, mais la Connexion d'Annonce est ouverte sans aucun outil (#81)."""
+
+    async def scenario() -> None:
+        memory = FakeMemory()
+        registry = ToolRegistry()
+        register_memory_tools(registry, memory, "alice")
+        transport, gemini, clock, sink, app = _build(
+            memory,
+            tools=registry,
+            announce_prompt="JUGE",
+            judge=FakeJudge(message="La porte est ouverte"),
+        )
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: transport.started)
+            await transport.feed(ClientRegistered(client_id="c1"))
+
+            app.push_event("matrix", "porte ouverte")
+            await wait_until(
+                lambda: (EVENT_WINDOW_TIMER_ID, EVENT_WINDOW_TIMEOUT)
+                in clock.scheduled
+            )
+            await clock.fire(EVENT_WINDOW_TIMER_ID)
+
+            await wait_until(lambda: gemini.of_type(OpenLiveConnection))
+            # Les Tools existent bel et bien ; ils ne partent simplement pas.
+            assert registry.specs()
+            assert gemini.of_type(OpenLiveConnection)[0].tools == ()
+
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+        finally:
+            if not runner.done():
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
 def test_load_judge_prompt_reads_the_versioned_file() -> None:
     prompt = load_judge_prompt()
 

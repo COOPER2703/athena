@@ -158,7 +158,7 @@ INFO [core] Activation {"connection_id": "s1", "context_chars": 0, "has_context"
 
 `context_chars` peut être non nul si la mémoire contient déjà un profil épinglé. L'instruction
 est **figée à l'ouverture** de la Session : c'est aussi vrai pour une Annonce proactive
-(ADR-0013), qui déclare les mêmes Tools et reçoit la même instruction.
+(ADR-0013), qui reçoit la même instruction et les mêmes faits, mais **aucun Tool** (`#81`).
 
 ## 5. « Allume la lumière du salon »
 
