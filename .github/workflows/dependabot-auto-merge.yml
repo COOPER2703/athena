@@ -1,0 +1,109 @@
+name: Dependabot auto-merge
+
+# Active l'auto-merge GitHub sur les PR Dependabot (patch + minor).
+# GitHub ne fusionne que lorsque TOUS les checks requis sont verts :
+#   - CI / test, CI / web                    (ci.yml)
+#   - Security / dependency-review, python-audit, web-audit, secrets-scan
+# Ces checks doivent être déclarés dans la protection de branche `main`,
+# sinon `--auto` fusionne immédiatement, sans attendre les tests.
+#
+# Les majors ne sont jamais fusionnés : ils restent en revue humaine.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  schedule:
+    # `main` exige une branche à jour : après chaque merge, les PR Dependabot
+    # passent en « branch out of date » et n'en sortent jamais seules.
+    - cron: "0 4 * * *"
+  workflow_dispatch: # rattrapage manuel du job `refresh-branches`
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write # création du label `automerge`
+
+concurrency:
+  group: dependabot-automerge-${{ github.event.pull_request.number || github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  auto-merge:
+    # Dependabot uniquement, et jamais une PR venant d'un fork.
+    if: >
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.repository == github.event.pull_request.head.repo.full_name
+    runs-on: ubuntu-latest
+    # Pas de checkout : gh a besoin de savoir sur quel dépôt taper.
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Métadonnées Dependabot
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Préparer les labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create automerge --color 0e8a16 --description "Fusion auto Dependabot" --force
+          gh label create "needs-review" --color d93f0b --description "Mise à jour majeure : revue humaine" --force
+
+      - name: Activer l'auto-merge (patch + minor)
+        if: >
+          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+          steps.meta.outputs.update-type == 'version-update:semver-minor'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          DEP: ${{ steps.meta.outputs.dependency-names }}
+          FROM: ${{ steps.meta.outputs.previous-version }}
+          TO: ${{ steps.meta.outputs.new-version }}
+          TYPE: ${{ steps.meta.outputs.update-type }}
+        run: |
+          gh pr edit "$PR" --add-label automerge
+          if [ "$(gh pr view "$PR" --json autoMergeRequest --jq '.autoMergeRequest != null')" = "true" ]; then
+            echo "Auto-merge déjà armé sur #$PR."
+            exit 0
+          fi
+          gh pr comment "$PR" --body "Auto-merge activé : \`${DEP}\` ${FROM} → ${TO} (${TYPE}). Fusion dès que CI + Security sont verts."
+          gh pr merge --auto --squash "$PR"
+
+      - name: Marquer les majors pour revue humaine
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          DEP: ${{ steps.meta.outputs.dependency-names }}
+          FROM: ${{ steps.meta.outputs.previous-version }}
+          TO: ${{ steps.meta.outputs.new-version }}
+        run: |
+          gh pr edit "$PR" --add-label "needs-review"
+          gh pr comment "$PR" --body "Mise à jour **majeure** de \`${DEP}\` (${FROM} → ${TO}) : auto-merge désactivé, relecture du changelog nécessaire."
+
+  # GitHub ne remet jamais une branche à jour tout seul : sans ce rattrapage,
+  # toute PR ouverte avant un merge de main reste bloquée en « out of date »
+  # (la protection exige une branche à jour) et n'est jamais fusionnée.
+  #
+  # On passe par la commande Dependabot, pas par `gh pr update-branch` : un
+  # push fait avec GITHUB_TOKEN rend les runs suivants « action_required »
+  # (GitHub demande une approbation manuelle), ce qui bloquerait tout.
+  refresh-branches:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Demander un rebase des PR Dependabot en retard
+        run: |
+          gh pr list --author "app/dependabot" --state open \
+            --json number,mergeStateStatus \
+            --jq '.[] | select(.mergeStateStatus == "BEHIND") | .number' |
+            while read -r pr; do
+              gh pr comment "$pr" --body "@dependabot rebase"
+              echo "#$pr : rebase demandé"
+            done
