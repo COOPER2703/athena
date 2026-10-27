@@ -22,6 +22,9 @@ STREAM_PATH = "/api/stream"
 SESSION_PATH = "/api/session"
 SETUP_PATH = "/api/setup"
 LOGIN_PATH = "/api/login"
+# Jetons d'accès (spec #75, ticket #78) : authentifiés par le Ticket Console.
+# La révocation porte sur un Jeton précis, d'où le segment d'identifiant.
+TOKENS_PATH = "/api/tokens"
 # Sonde de supervision : publique, réponse fixe, aucun état applicatif.
 HEALTH_PATH = "/healthz"
 # Nom stable et explicite du cookie qui porte le Ticket Console. Le préfixe
