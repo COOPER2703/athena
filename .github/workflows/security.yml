@@ -37,24 +37,24 @@ jobs:
           fail-on-severity: high
           comment-summary-in-pr: on-failure
 
-  # Audit de l'environnement Python réellement installé (mêmes deps que ci.yml).
+  # Audit des versions réellement exécutées : celles de `uv.lock` (et non ce
+  # qu'un `pip install` frais résoudrait, qui masquerait les CVE du lock).
   python-audit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - run: sudo apt-get update && sudo apt-get install -y portaudio19-dev
-      - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]" pip-audit
-      # --skip-editable : le projet lui-même (`athena`, installé en -e) n'existe
-      # pas sur PyPI, il ne peut pas être audité.
-      # --strict : toute vuln non ignorée fait échouer le job.
+      - name: Exporter les versions verrouillées
+        run: uv export --frozen --no-emit-project --no-hashes --all-extras -o requirements-audit.txt
+      - run: python -m pip install --upgrade pip pip-audit
+      # Le code de sortie de pip-audit est déjà 1 dès qu'une vuln est trouvée.
       # Faux positif : ajouter `--ignore-vuln <ID>` ici, avec un commentaire.
-      - run: python -m pip_audit --strict --skip-editable --desc
+      - run: python -m pip_audit -r requirements-audit.txt --desc
 
   # Audit des dépendances du front (prod + dev : vite/tsc cassés = build cassé).
   web-audit:
