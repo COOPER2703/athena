@@ -12,6 +12,11 @@ name: Dependabot auto-merge
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
+  schedule:
+    # `main` exige une branche à jour : après chaque merge, les PR Dependabot
+    # passent en « branch out of date » et n'en sortent jamais seules.
+    - cron: "0 4 * * *"
+  workflow_dispatch: # rattrapage manuel du job `refresh-branches`
 
 permissions:
   contents: write
@@ -19,13 +24,14 @@ permissions:
   issues: write # création du label `automerge`
 
 concurrency:
-  group: dependabot-automerge-${{ github.event.pull_request.number }}
+  group: dependabot-automerge-${{ github.event.pull_request.number || github.workflow }}
   cancel-in-progress: true
 
 jobs:
   auto-merge:
     # Dependabot uniquement, et jamais une PR venant d'un fork.
     if: >
+      github.event_name == 'pull_request' &&
       github.event.pull_request.user.login == 'dependabot[bot]' &&
       github.repository == github.event.pull_request.head.repo.full_name
     runs-on: ubuntu-latest
@@ -80,3 +86,24 @@ jobs:
         run: |
           gh pr edit "$PR" --add-label "needs-review"
           gh pr comment "$PR" --body "Mise à jour **majeure** de \`${DEP}\` (${FROM} → ${TO}) : auto-merge désactivé, relecture du changelog nécessaire."
+
+  # GitHub ne remet jamais une branche à jour tout seul : sans ce rattrapage,
+  # toute PR ouverte avant un merge de main reste bloquée en « out of date »
+  # (la protection exige une branche à jour) et n'est jamais fusionnée.
+  refresh-branches:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Remettre les PR Dependabot à jour
+        run: |
+          gh pr list --author "app/dependabot" --state open --json number --jq '.[].number' |
+            while read -r pr; do
+              if gh pr update-branch "$pr" >/dev/null 2>&1; then
+                echo "#$pr : branche mise à jour"
+              else
+                echo "#$pr : déjà à jour (ou conflit)"
+              fi
+            done
