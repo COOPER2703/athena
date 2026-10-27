@@ -2,12 +2,16 @@ version: 2
 # Une seule PR par groupe et par semaine : moins de bruit, et un seul run CI
 # à valider par écosystème.
 updates:
-  - package-ecosystem: "pip"
+  # Écosystème `uv` et non `pip` : Dependabot met à jour `uv.lock`, le seul
+  # état réellement exécuté (et audité par le job `python-audit`), au lieu de
+  # relever les planchers de pyproject.toml à chaque sortie de version.
+  - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 5
+    versioning-strategy: lockfile-only
     groups:
       python-minor:
         applies-to: version-updates
@@ -17,11 +21,12 @@ updates:
       # `make generate` : un bump casse
       # test_generated_header_version_matches_runtime (cf. PR #86). Le bump se
       # fait à la main : pyproject + `make generate` + revue du diff généré.
-      # `applies-to: version-updates` laisse passer les security updates.
+      # Conséquence assumée : les alertes de sécurité sur ces deux paquets ne
+      # produisent pas de PR automatique, elles restent visibles côté
+      # Security > Dependabot alerts. `applies-to` n'est pas accepté ici
+      # (propriété réservée à `groups`).
       - dependency-name: "protobuf"
-        applies-to: version-updates
       - dependency-name: "grpcio-tools"
-        applies-to: version-updates
 
   - package-ecosystem: "npm"
     directory: "/web"
