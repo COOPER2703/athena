@@ -264,8 +264,9 @@ async def _probe(settings: _Settings, trace: Trace) -> None:
             f"(HTTP {response.status_code})"
         )
     if response.status_code >= 500:
+        # Le moteur répond : sa sonde est en défaut, le plugin ne l'est pas.
         trace(
-            "ProbeUnavailable",
+            "ProbeDegraded",
             {"status": response.status_code},
             level="warning",
         )

@@ -393,6 +393,40 @@ def test_exhausted_quota_is_traced_as_a_warning(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_a_probe_5xx_is_traced_as_degraded_without_blocking_the_start(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with TavilyStub(usage_status=503) as stub:
+            sink = RecordingTraceSink()
+            registry, loader = _plugins(tmp_path, sink, stub.base_url)
+            async with _running_app(registry=registry, loader=loader) as (
+                app,
+                live,
+                transport,
+                _,
+            ):
+                # Le moteur répond : c'est sa sonde qui est en défaut, pas le
+                # plugin. Le démarrage reste actif et la Trace le dit.
+                assert app.plugins.states["websearch"] == "activated"
+                [degraded] = sink.of_kind("ProbeDegraded")
+                assert degraded.payload["status"] == 503
+                assert not sink.of_kind("ProbeFailed")
+                # L'ancien nom, qui se lisait comme un PluginUnavailable levé,
+                # ne doit plus apparaître : le plugin, lui, est sain.
+                assert not sink.of_kind("ProbeUnavailable")
+
+                async with _live_session(transport, live) as session:
+                    payload = await _call(
+                        session, "web_search", {"query": "après une sonde en défaut"}
+                    )
+
+                assert payload["status"] == "ok"
+                assert app.plugins.states["websearch"] == "activated"
+
+    asyncio.run(scenario())
+
+
 # ---------------------------------------------------------------------------
 # Tool de bout en bout : App → Gemini → registre → plugin → HTTP.
 # ---------------------------------------------------------------------------
