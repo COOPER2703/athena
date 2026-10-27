@@ -35,7 +35,7 @@ DEFAULT_CONSOLIDATION_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_WEBHOOK_HOST = "127.0.0.1"
 DEFAULT_WEBHOOK_PORT = 8766
 # La Console web est une surface d'observation (ADR-0003) : port dédié,
-# loopback par défaut, sans authentification en v1, comme le Webhook.
+# loopback par défaut, et authentification applicative depuis l'ADR-0017.
 DEFAULT_CONSOLE_HOST = "127.0.0.1"
 DEFAULT_CONSOLE_PORT = 8767
 # Build de la SPA servi par la Console. Le répertoire est relatif au répertoire
@@ -159,11 +159,13 @@ class MemoryConfig(BaseModel):
 
 
 class WebhookConfig(BaseModel):
-    """Paramètres de l'adaptateur Webhook HTTP (ADR-0011).
+    """Paramètres de l'adaptateur Webhook HTTP (ADR-0011, ADR-0017).
 
     Lié à ``127.0.0.1`` par défaut : la surface n'est ouverte qu'à la machine
-    locale, sans authentification. L'exposition au LAN (jeton partagé) est hors
-    périmètre de ce lot.
+    locale tant qu'on ne la déplace pas. Depuis l'ADR-0017, elle exige un
+    **Jeton d'accès** de nature ``source`` en ``Authorization: Bearer`` ; la
+    Source du Jeton fait autorité et une Source de corps contradictoire est
+    refusée.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -184,14 +186,15 @@ class WebhookConfig(BaseModel):
 
 
 class ConsoleConfig(BaseModel):
-    """Paramètres de la Console web (ADR-0003, ADR-0016).
+    """Paramètres de la Console web (ADR-0003, ADR-0016, ADR-0017).
 
     Surface d'observation servie sur son propre port, **liée à ``127.0.0.1``
-    par défaut** : elle n'est joignable que depuis la machine du serveur. Elle
-    est **activée par défaut**, comme le Webhook, et se désactive par
-    ``ATHENA_CONSOLE_ENABLED=0``. Depuis la spec #75, toute route d'API hors
-    identité exige un Ticket Console : le mode ouvert n'est plus qu'un défaut
-    de test quand aucun service d'auth n'est injecté.
+    par défaut** : elle n'est joignable que depuis la machine du serveur tant
+    qu'on ne la déplace pas. Elle est **activée par défaut**, comme le Webhook,
+    et se désactive par ``ATHENA_CONSOLE_ENABLED=0``. Depuis l'ADR-0017, toute
+    route d'API hors identité exige un Ticket Console ; ``auth=None`` au
+    constructeur de l'adaptateur ne reste qu'un seam de test unitaire, jamais un
+    mode de production.
 
     Défauts : ``enabled=True``, ``host="127.0.0.1"``, ``port=8767``,
     ``static_dir="web/dist"`` pour le build de la SPA et ``trace_buffer=500``

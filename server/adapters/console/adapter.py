@@ -3,9 +3,9 @@
 La Console web n'est **pas** un Client (GLOSSARY) : elle ne parle pas le
 Protocole partagé, ne s'enregistre pas et ne reçoit pas d'audio. Cet adaptateur
 sert une API JSON distincte, sur son propre port, lié à ``127.0.0.1`` par
-défaut. Exposée au réseau, elle exige un **Ticket Console** pour toute route
-d'API hors identité (spec #75) ; seule la SPA et les routes d'installation et
-de connexion restent publiques.
+défaut. Elle exige un **Ticket Console** pour toute route d'API hors identité
+(ADR-0017) ; seule la SPA et les routes d'installation et de connexion restent
+publiques.
 
 Il ne connaît ni le Coordinator ni ``SessionState`` : la racine de composition
 lui injecte une callable ``snapshot`` qui rend un dict déjà sérialisable en

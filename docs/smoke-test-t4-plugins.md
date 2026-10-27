@@ -17,6 +17,10 @@ s'écrit donc `.venv/bin/python`).
 - Le protocole généré : `python protocol/proto/generate.py` (ou `make generate`).
 - Un micro et un haut-parleur accessibles au client (`pyaudio`).
 - Les dépendances à jour, dont le client MCP : `uv sync`.
+- Un **Compte** et deux **Jetons d'accès** Athena (ADR-0017) : un `client` pour
+  `python -m client`, un `source` pour le `curl` du scénario 9. Voir le smoke test T1 pour
+  l'installation et la création depuis la Console. Ne pas confondre ces Jetons avec le
+  **jeton d'accès longue durée** de Home Assistant (`ATHENA_PLUGIN_HOMEASSISTANT_TOKEN`).
 - **Un Home Assistant réel**, joignable depuis la machine qui lance Athena, avec :
   - l'intégration **Model Context Protocol Server** installée ;
   - un **jeton d'accès longue durée** ;
@@ -145,6 +149,7 @@ INFO     [app] started {"state": "Idle"}
 Dans un second terminal :
 
 ```sh
+export ATHENA_ACCESS_TOKEN=ath_…   # Jeton de nature client
 python -m client
 ```
 
@@ -281,7 +286,9 @@ Prouvez que le reste fonctionne :
    fermeture par inactivité, ou relancez `python -m client`) et poussez un fait :
 
    ```sh
+   export ATHENA_WEBHOOK_TOKEN=ath_…   # Jeton de nature source
    curl -i -X POST http://127.0.0.1:8766/events \
+     -H "Authorization: Bearer $ATHENA_WEBHOOK_TOKEN" \
      -H 'Content-Type: application/json' \
      -d '{"source": "maison", "content": "La porte d entree vient de s ouvrir"}'
    ```
@@ -374,7 +381,7 @@ pas déplacer la cible des Annonces) :
 
 ```sh
 .venv/bin/python - <<'PY'
-import asyncio
+import asyncio, os
 
 import websockets
 
@@ -382,7 +389,10 @@ from protocol import Register, decode, encode
 
 
 async def main() -> None:
-    async with websockets.connect("ws://127.0.0.1:8765") as ws:
+    headers = {"Authorization": f"Bearer {os.environ['ATHENA_ACCESS_TOKEN']}"}
+    async with websockets.connect(
+        "ws://127.0.0.1:8765", additional_headers=headers
+    ) as ws:
         await ws.send(
             encode(Register(client_name="smoke-tools", platform="linux"))
         )
@@ -395,6 +405,9 @@ async def main() -> None:
 asyncio.run(main())
 PY
 ```
+
+Le handshake exige un Jeton `client` dans `ATHENA_ACCESS_TOKEN` (ADR-0017) : sans lui, le
+serveur répond `401` + `WWW-Authenticate: Bearer` avant toute trame.
 
 Attendu (l'ordre et les noms Home Assistant dépendent de votre instance et de votre
 exposition) :
@@ -453,6 +466,8 @@ Les scénarios ci-dessus s'appuient sur :
   Connexion Live suivante ;
 - `server/tests/test_transport_server.py` — `Registered.server_tools` et relecture du
   fournisseur à chaque enregistrement ;
+- `server/tests/test_transport_auth.py` et `client/tests/test_ws_client.py` — Jeton `client`
+  au handshake, refus `401`, Jeton `source` refusé et message client explicite ;
 - `server/tests/test_server_main.py` — code de sortie 2 sur plugin cassé ;
 - `server/tests/test_app_secrets.py` — secrets de plugin lus depuis `.env`, priorité à
   l'environnement du processus.

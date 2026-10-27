@@ -79,6 +79,10 @@ class WebSocketTransport:
     (``execute``). Il n'existe aucune notion de Client actif : l'envoi est
     toujours ciblé par ``client_id``.
 
+    Le handshake exige un Jeton d'accès de nature ``client`` en
+    ``Authorization: Bearer``, validé avant tout traitement de trame
+    (ADR-0017). Le Protocole partagé n'est pas modifié.
+
     L'observabilité passe exclusivement par le ``TraceSink`` injecté (ADR-0004).
     """
 

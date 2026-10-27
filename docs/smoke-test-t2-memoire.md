@@ -15,6 +15,8 @@ Toutes les commandes de ce document se lancent **depuis la racine du dépôt**
 - Un micro et un haut-parleur accessibles au client (`pyaudio`).
 - Les dépendances mémoire pré-installées : `sentence-transformers`, `sqlite-vec`,
   `numpy` (modèle local `all-MiniLM-L6-v2` en cache).
+- Un **Compte** et un **Jeton d'accès** de nature `client` (ADR-0017), créés comme au smoke
+  test T1 : le Client exige `ATHENA_ACCESS_TOKEN`.
 
 Créez un fichier `.env` à la racine du dépôt (lu par le serveur) :
 
@@ -49,6 +51,7 @@ apparaître dès le démarrage.
 Dans un second terminal :
 
 ```sh
+export ATHENA_ACCESS_TOKEN=ath_…   # Jeton de nature client
 python -m client
 ```
 
@@ -199,6 +202,10 @@ Consolidation (fenêtre, dédup, rétention, marqueur) et le câblage de la raci
 **Date** : 2026-10-11 · **Machine** : poste de dev Linux · **Python** : 3.12.13
 (venv locale `.venv`, à exécuter depuis la racine du dépôt) ·
 `sentence-transformers` 6.1.0, `torch` 2.14.1+cpu, `sqlite-vec`.
+
+> Run **antérieur à l'authentification des surfaces** (#75 / ADR-0017) : les clients
+> WebSocket factices du run n'envoyaient pas de Jeton. Depuis, tout `Register` exige un Jeton
+> `client` en `Authorization: Bearer` au handshake, avant toute trame.
 
 **Ce qui a été exécuté pour de vrai** (chemin non-voix, audio/VAD humain non
 automatisable) :

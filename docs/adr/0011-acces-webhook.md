@@ -4,6 +4,10 @@
 
 accepted
 
+Amendé par l'ADR-0017 : le Webhook exige un **Jeton d'accès** de nature `source` en
+`Authorization: Bearer`, et la Source du Jeton fait autorité. L'exposition au LAN n'est donc
+plus renvoyée à un lot ultérieur ; `127.0.0.1` reste le défaut.
+
 ## Contexte
 
 Le Canal d'événements (ADR-0007 / ADR-0010) est complet côté noyau — File plafonnée et

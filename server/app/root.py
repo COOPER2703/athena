@@ -490,7 +490,8 @@ def build_app(
 
     # Authentification applicative : base dédiée, comme la mémoire, et jamais
     # de secret par défaut. Les surfaces reçoivent ce service par leur
-    # constructeur ; seule la Console l'utilise dans ce lot.
+    # constructeur : Console, transport et Webhook partagent le même store,
+    # donc la révocation vaut partout sans redémarrage (ADR-0017).
     auth = SqliteAuthStore(
         db_path=config.auth.db_path,
         trace_sink=trace_sink,

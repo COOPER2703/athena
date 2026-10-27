@@ -105,18 +105,20 @@ _Avoid_: file d'événements, buffer, queue
 
 **Webhook**:
 Le transport HTTP par lequel une application externe pousse un Événement dans le Canal
-d'événements. N'est pas un concept du noyau, seulement un moyen d'accès.
+d'événements. N'est pas un concept du noyau, seulement un moyen d'accès. Depuis l'ADR-0017,
+il exige un **Jeton d'accès** de nature `source`, dont la Source fait autorité.
 _Avoid_: endpoint, callback, hook
 
 ### Console
 
 **Console web**:
 La surface d'observation du serveur : une page unique servie en HTTP/JSON et WebSocket sur
-un port dédié, liée à `127.0.0.1` par défaut, sans authentification en v1. Elle lit un
-**instantané de lecture** de l'état (Session, Clients, Plugins, configuration non sensible)
-et le flux de **Traces** rejoué depuis le **Tampon de traces**. Ce n'est **pas un Client** :
-elle ne parle pas le Protocole partagé, ne s'enregistre pas, ne reçoit pas d'audio et ne
-démarre pas de Session (ADR-0003, ADR-0016).
+un port dédié, liée à `127.0.0.1` par défaut. Depuis l'ADR-0017, toute route d'API hors
+identité exige un **Ticket Console** ; seules la SPA, `/healthz`, `/api/session`, `/api/setup`
+et `/api/login` restent publiques. Elle lit un **instantané de lecture** de l'état (Session,
+Clients, Plugins, configuration non sensible) et le flux de **Traces** rejoué depuis le
+**Tampon de traces**. Ce n'est **pas un Client** : elle ne parle pas le Protocole partagé, ne
+s'enregistre pas, ne reçoit pas d'audio et ne démarre pas de Session (ADR-0003, ADR-0016).
 _Avoid_: dashboard, UI, interface web, client web
 
 **Trace**:
@@ -195,15 +197,45 @@ _Avoid_: `ha-mcp` (serveur tiers), MCP connecté côté Gemini, API REST HA
 
 ### Identité
 
-**User**:
+**User** (Utilisateur):
 La personne propriétaire de la mémoire, identifiée par un `user_id` partagé entre tous ses
-appareils.
+appareils. Se distingue du **Compte**, qui est l'identité d'accès à la Console.
 _Avoid_: Client, device, compte
 
 **Client**:
 Un appareil connecté au serveur (desktop, Android, iOS, web), identifié par un `client_id`
 distinct du `user_id`, nommé par un `client_name` et une `platform`.
 _Avoid_: User, device, utilisateur
+
+### Authentification
+
+**Compte**:
+L'identité d'accès de l'administrateur d'une instance : un nom d'utilisateur et un mot de
+passe haché en Argon2id. Unique en v1, sans inscription publique ni rôle. Se distingue de
+l'**Utilisateur** (`User` : la personne dont Athena se souvient) et du **Client** (l'appareil).
+_Avoid_: user, compte utilisateur, profil, login
+
+**Ticket Console**:
+L'état authentifié d'un navigateur sur la Console, matérialisé par le cookie `athena_ticket`
+(`HttpOnly; Secure; SameSite=Strict`, `Path=/`), valable 30 jours glissants et révocable
+(déconnexion, « déconnecter partout »). Il authentifie aussi le WebSocket du flux de Traces.
+Se distingue de la **Session** (conversation Live), de la **Connexion Live** (lien Gemini) et
+du **Jeton d'accès** (machine).
+_Avoid_: session, session web, cookie de session, login
+
+**Jeton d'accès**:
+Le credential d'une machine — Client desktop, appareil à venir, source du Webhook — nommé,
+révocable individuellement, sans expiration et présenté en `Authorization: Bearer`. Sa nature
+est `client` (transport) ou `source` (Webhook) ; un Jeton ne vaut jamais sur l'autre surface.
+Son secret, préfixé `ath_`, n'est affiché qu'à la création ; seule son empreinte SHA-256 est
+stockée.
+_Avoid_: token, API key, clé d'API, mot de passe, ticket
+
+**Code d'installation**:
+Le code à usage unique généré au démarrage tant qu'aucun **Compte** n'existe, écrit dans le
+journal, et exigé par l'écran d'installation pour créer l'unique Compte. Il vit en mémoire
+seulement, ne survit pas au redémarrage et ne peut plus servir dès qu'un Compte existe.
+_Avoid_: mot de passe d'installation, code d'invitation, secret de setup
 
 ### Clients
 

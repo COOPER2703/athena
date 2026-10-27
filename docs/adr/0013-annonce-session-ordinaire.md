@@ -8,6 +8,11 @@ Amende l'ADR-0012 : la Connexion d'Annonce n'est plus une Connexion minimale (in
 dédiée, sans mémoire ni Tools) qui ne reçoit que la phrase du juge ; c'est une **Session
 ordinaire** qui reçoit aussi les faits bruts de l'Événement.
 
+Amendé par l'ADR-0017 : la Session d'Annonce conserve l'instruction de plugin mais n'a plus
+**aucun Tool**. Les prompts du juge et de l'Annonce déclarent en outre le contenu externe
+comme une donnée non fiable. La « Session ordinaire » de cet ADR vaut donc pour le prompt
+système, l'Activation mémoire et les faits — pas pour les Tools.
+
 ## Contexte
 
 L'ADR-0012 réduisait la Connexion d'Annonce au strict nécessaire : une instruction dédiée
