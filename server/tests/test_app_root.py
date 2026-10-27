@@ -19,6 +19,7 @@ from conftest import (
 )
 from protocol import Register, Registered, SessionEndReason, decode, encode
 from server import __version__
+from server.adapters.auth import SqliteAuthStore
 from server.adapters.console import ConsoleAdapter
 from server.app.config import (
     AppConfig,
@@ -792,13 +793,15 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-async def _connect_when_ready(url: str) -> websockets.ClientConnection:
+async def _connect_when_ready(
+    url: str, *, headers: dict[str, str] | None = None
+) -> websockets.ClientConnection:
     """Attend que le transport serveur écoute, puis ouvre la connexion."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + 1.0
     while True:
         try:
-            return await websockets.connect(url)
+            return await websockets.connect(url, additional_headers=headers)
         except OSError:
             if loop.time() > deadline:
                 raise
@@ -833,10 +836,15 @@ def test_build_app_announces_the_kernel_and_plugin_tools_on_registration(
             auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
         )
         app = build_app(config, secrets=EnvSecretResolver({}), env={}, env_file=None)
+        # Le transport exige un Jeton de nature ``client`` : il est créé dans la
+        # même base que celle que ``build_app`` ouvre.
+        store = SqliteAuthStore(db_path=str(tmp_path / "auth.db"))
+        issued = await store.create_token(name="desktop", kind="client")
         runner = asyncio.create_task(app.run())
         try:
             async with await _connect_when_ready(
-                f"ws://127.0.0.1:{port}"
+                f"ws://127.0.0.1:{port}",
+                headers={"Authorization": f"Bearer {issued.secret}"},
             ) as ws:
                 await ws.send(
                     encode(Register(client_name="desktop", platform="linux"))

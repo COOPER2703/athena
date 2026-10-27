@@ -24,7 +24,7 @@ from server.core import (
     Trace,
 )
 from server.core.events import ClientRegistered
-from server.core.ports import TraceEntry
+from server.core.ports import AuthService, TraceEntry
 
 
 class FakeJudge:
@@ -134,12 +134,14 @@ async def running_transport(
     *,
     sink: RecordingTraceSink | None = None,
     server_tools: list[str] | Callable[[], Iterable[str]] | None = None,
+    auth: AuthService | None = None,
 ) -> AsyncIterator[WebSocketTransport]:
     transport = WebSocketTransport(
         host="127.0.0.1",
         port=0,
         server_tools=server_tools,
         trace_sink=sink,
+        auth=auth,
     )
     await transport.start()
     try:

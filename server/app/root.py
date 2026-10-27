@@ -525,6 +525,9 @@ def build_app(
         port=config.server.port,
         server_tools=server_tool_names(plugins),
         trace_sink=trace_sink,
+        # Même store que la Console : une révocation prononcée depuis la
+        # surface d'observation vaut pour le transport, sans redémarrage.
+        auth=auth,
     )
     gemini = GeminiLiveAdapter(
         api_key=config.gemini.api_key,
