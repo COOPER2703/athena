@@ -17,3 +17,14 @@ API_PREFIX = "/api"
 STATUS_PATH = "/api/status"
 EVENTS_PATH = "/api/events"
 STREAM_PATH = "/api/stream"
+# Identité et installation de la Console (spec #75) : publiques, elles servent
+# à choisir l'écran avant toute authentification.
+SESSION_PATH = "/api/session"
+SETUP_PATH = "/api/setup"
+LOGIN_PATH = "/api/login"
+# Sonde de supervision : publique, réponse fixe, aucun état applicatif.
+HEALTH_PATH = "/healthz"
+# Nom stable et explicite du cookie qui porte le Ticket Console. Le préfixe
+# ``athena_`` évite de le confondre avec un cookie d'un autre service du même
+# hôte (le front et l'API partagent l'origine).
+TICKET_COOKIE = "athena_ticket"

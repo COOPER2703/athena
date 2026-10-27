@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Mapping, Protocol
 
 from server import __version__
+from server.adapters.auth import SqliteAuthStore
 from server.adapters.console import ConsoleAdapter
 from server.adapters.console.trace_buffer import TraceBuffer
 from server.adapters.gemini import GeminiEventJudge, GeminiLiveAdapter
@@ -47,7 +48,7 @@ from server.core.coordinator import Coordinator
 from server.core.events import Event, EventReceived, ShutdownRequested
 from server.core.memory_tools import register_memory_tools
 from server.core.plugins import PluginRegistry
-from server.core.ports import EventJudge, MemoryStore, TraceSink
+from server.core.ports import AuthService, EventJudge, MemoryStore, TraceSink
 from server.core.tools import ToolRegistry
 
 _TRACE_SOURCE = "app"
@@ -195,6 +196,7 @@ class App:
         scheduler: ConsolidationScheduler | None = None,
         webhook: WebhookServer | None = None,
         console: ConsoleServer | None = None,
+        auth: AuthService | None = None,
         snapshot_config: Mapping[str, object] | None = None,
     ) -> None:
         self._transport = transport
@@ -205,6 +207,11 @@ class App:
         self._scheduler = scheduler
         self._webhook = webhook
         self._console = console
+        # Le module d'auth est possédé par la racine de composition. L'App ne
+        # s'en sert qu'au démarrage, pour publier le Code d'installation une
+        # seule fois tant qu'aucun Compte n'existe ; les surfaces le reçoivent
+        # par leur constructeur.
+        self._auth = auth
         # Instantané non sensible de la configuration : la racine de
         # composition choisit explicitement les clés exposées, pour qu'aucun
         # secret ne puisse s'inviter dans l'instantané par accident.
@@ -306,6 +313,12 @@ class App:
         """
         await self._load_plugins()
         await self._warmup_memory()
+        # Le Code d'installation entre dans le flux de traces (donc dans le
+        # journal) avant que la moindre surface ne serve : un visiteur ne peut
+        # pas revendiquer l'instance avant que l'admin n'ait lu le code. Sans
+        # Compte seulement, et une fois par démarrage.
+        if self._auth is not None:
+            self._auth.announce_installation_code()
         await self._transport.start()
         if self._webhook is not None:
             await self._webhook.start(self.push_event)
@@ -475,6 +488,20 @@ def build_app(
         level="DEBUG" if config.debug_decisions else config.log_level,
     )
 
+    # Authentification applicative : base dédiée, comme la mémoire, et jamais
+    # de secret par défaut. Les surfaces reçoivent ce service par leur
+    # constructeur ; seule la Console l'utilise dans ce lot.
+    auth = SqliteAuthStore(
+        db_path=config.auth.db_path,
+        trace_sink=trace_sink,
+        ticket_ttl_seconds=config.auth.ticket_days * 24 * 60 * 60,
+        ticket_refresh_seconds=config.auth.ticket_refresh_seconds,
+        password_min_length=config.auth.password_min_length,
+        login_max_attempts=config.auth.login_max_attempts,
+        login_block_seconds=config.auth.login_block_minutes * 60,
+        setup_max_attempts=config.auth.setup_max_attempts,
+    )
+
     plugin_secrets = (
         secrets
         if secrets is not None
@@ -575,6 +602,7 @@ def build_app(
             static_dir=config.console.static_dir,
             trace_buffer=console_trace_buffer,
             trace_sink=trace_sink,
+            auth=auth,
         )
 
     return App(
@@ -596,6 +624,7 @@ def build_app(
         scheduler=scheduler,
         webhook=webhook,
         console=console,
+        auth=auth,
         snapshot_config={
             "model": config.gemini.model,
             "voice": config.gemini.voice,

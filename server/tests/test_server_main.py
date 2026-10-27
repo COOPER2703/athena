@@ -60,6 +60,7 @@ def test_python_m_server_starts_and_shuts_down_cleanly_on_sigint(
         "WS_HOST": "127.0.0.1",
         "WS_PORT": str(_free_port()),
         "ATHENA_MEMORY_DB": str(tmp_path / "memory.db"),
+        "ATHENA_AUTH_DB": str(tmp_path / "auth.db"),
         "ATHENA_LOG_DIR": str(tmp_path / "logs"),
         "ATHENA_CONSOLE_ENABLED": "0",
         # Le test vérifie le cycle de vie du serveur, pas le Webhook : ne pas

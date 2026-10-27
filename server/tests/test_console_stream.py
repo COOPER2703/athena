@@ -15,7 +15,7 @@ from typing import Mapping
 
 import aiohttp
 
-from conftest import wait_until
+from conftest import console_session, install_console, wait_until
 from server.adapters.console import ConsoleAdapter
 from server.adapters.console.stream import trace_frame
 from server.adapters.console.trace_buffer import (
@@ -25,6 +25,7 @@ from server.adapters.console.trace_buffer import (
 )
 from server.app.config import (
     AppConfig,
+    AuthConfig,
     ConsoleConfig,
     GeminiConfig,
     PluginsConfig,
@@ -414,6 +415,7 @@ def test_build_app_feeds_the_stream_from_the_single_trace_flow(
                 state_path=str(tmp_path / "plugins.json"),
             ),
             log_dir=str(tmp_path),
+            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
         )
         root_logger = logging.getLogger()
         original_handlers = root_logger.handlers[:]
@@ -421,9 +423,11 @@ def test_build_app_feeds_the_stream_from_the_single_trace_flow(
         app = build_app(config, secrets=None, env={}, env_file=None)
         runner = asyncio.create_task(app.run())
         try:
-            async with aiohttp.ClientSession() as http:
+            base_url = f"http://127.0.0.1:{console_port}"
+            async with console_session(base_url) as http:
+                await install_console(http, base_url, tmp_path / "server.log")
                 ws = await _connect_stream_when_ready(
-                    http, f"ws://127.0.0.1:{console_port}{STREAM_PATH}"
+                    http, f"{base_url}{STREAM_PATH}"
                 )
                 await _assert_started_and_live(ws)
         finally:

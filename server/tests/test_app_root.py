@@ -10,12 +10,19 @@ from typing import Callable, TypeVar
 import aiohttp
 import websockets
 
-from conftest import FakeJudge, RecordingTraceSink, wait_until
+from conftest import (
+    FakeJudge,
+    RecordingTraceSink,
+    console_session,
+    install_console,
+    wait_until,
+)
 from protocol import Register, Registered, SessionEndReason, decode, encode
 from server import __version__
 from server.adapters.console import ConsoleAdapter
 from server.app.config import (
     AppConfig,
+    AuthConfig,
     ConsoleConfig,
     GeminiConfig,
     PluginsConfig,
@@ -481,6 +488,7 @@ def test_build_app_installs_logging_bridge_debug_only_when_flag_on(
                 debug_decisions=False,
                 log_level="WARNING",
                 log_dir=str(tmp_path),
+                auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
             )
         )
         assert root.level == logging.WARNING
@@ -781,6 +789,7 @@ def test_build_app_announces_the_kernel_and_plugin_tools_on_registration(
                 directory=str(plugins_dir), state_path=str(state_path)
             ),
             log_dir=str(tmp_path),
+            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
         )
         app = build_app(config, secrets=EnvSecretResolver({}), env={}, env_file=None)
         runner = asyncio.create_task(app.run())
@@ -811,6 +820,7 @@ def test_build_app_does_not_wire_a_disabled_console(tmp_path: Path) -> None:
             gemini=GeminiConfig(api_key="test-key"),
             console=ConsoleConfig(enabled=False),
             log_dir=str(tmp_path),
+            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
         )
     )
 
@@ -823,21 +833,23 @@ def test_build_app_wires_an_enabled_console(tmp_path: Path) -> None:
             gemini=GeminiConfig(api_key="test-key"),
             console=ConsoleConfig(port=_free_port()),
             log_dir=str(tmp_path),
+            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
         )
     )
 
     assert isinstance(app.console, ConsoleAdapter)
 
 
-async def _snapshot_when_ready(url: str) -> dict:
+async def _snapshot_when_ready(
+    http: aiohttp.ClientSession, url: str
+) -> dict:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + 2.0
     while True:
         try:
-            async with aiohttp.ClientSession() as http:
-                async with http.get(url) as response:
-                    assert response.status == 200
-                    return await response.json()
+            async with http.get(url) as response:
+                assert response.status == 200
+                return await response.json()
         except aiohttp.ClientConnectorError:
             if loop.time() > deadline:
                 raise
@@ -873,6 +885,7 @@ def test_build_app_serves_the_configured_build_at_the_root(
                 state_path=str(tmp_path / "plugins.json"),
             ),
             log_dir=str(tmp_path),
+            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
         )
         app = build_app(config, secrets=EnvSecretResolver({}), env={}, env_file=None)
         runner = asyncio.create_task(app.run())
@@ -925,13 +938,17 @@ def test_build_app_serves_plugins_and_safe_config_in_the_snapshot(
                 directory=str(plugins_dir), state_path=str(state_path)
             ),
             log_dir=str(tmp_path),
+            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
         )
         app = build_app(config, secrets=EnvSecretResolver({}), env={}, env_file=None)
         runner = asyncio.create_task(app.run())
         try:
-            snapshot = await _snapshot_when_ready(
-                f"http://127.0.0.1:{console_port}/api/status"
-            )
+            base_url = f"http://127.0.0.1:{console_port}"
+            async with console_session(base_url) as http:
+                await install_console(http, base_url, tmp_path / "server.log")
+                snapshot = await _snapshot_when_ready(
+                    http, f"{base_url}/api/status"
+                )
 
             assert snapshot["v"] == 1
             assert snapshot["plugins"] == [
