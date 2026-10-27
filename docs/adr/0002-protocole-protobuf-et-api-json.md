@@ -12,3 +12,5 @@ commandes, WebSocket pour le temps réel). Les deux fils coexistent : chacun a s
   en Protobuf côté web (lourd pour un navigateur).
 - Conséquence : deux codecs, un par fil, et l'API JSON devient le contrat réutilisable par
   les clients mobiles.
+- L'authentification des surfaces n'ajoute aucun champ au Protocole (ADR-0017) : le Jeton
+  d'accès d'un Client passe dans l'en-tête `Authorization` du handshake HTTP.

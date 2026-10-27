@@ -62,6 +62,19 @@ dans le journal (`logs/server.log`) sous `[auth] InstallationCode` ; il n'est pl
 - `ATHENA_AUTH_LOGIN_BLOCK_MINUTES` : `15` minutes de blocage, levé automatiquement.
 - `ATHENA_AUTH_SETUP_MAX_ATTEMPTS` : `5` tentatives d'installation avant blocage.
 
+Les deux mécanismes de credential (ADR-0017) :
+
+- **Ticket Console** : cookie `athena_ticket` (`HttpOnly; Secure; SameSite=Strict`, `Path=/`),
+  30 jours glissants. Il authentifie toutes les routes d'API hors identité et le WebSocket du
+  flux ; `GET /healthz` reste public.
+- **Jeton d'accès** : `Authorization: Bearer ath_…`, nature `client` (transport) ou `source`
+  (Webhook). Le transport (`WS_HOST` / `WS_PORT`) refuse le handshake sans Jeton `client` par
+  `401` + `WWW-Authenticate: Bearer`, avant toute trame. Le Webhook
+  (`ATHENA_WEBHOOK_ENABLED` / `ATHENA_WEBHOOK_HOST` / `ATHENA_WEBHOOK_PORT`) exige un Jeton
+  `source` ; sa Source fait autorité et une Source de corps contradictoire est refusée `403`.
+- **Client desktop** : lit son Jeton dans `ATHENA_ACCESS_TOKEN` (variable de processus
+  uniquement, pas de `.env` client) et refuse de démarrer s'il manque.
+
 ### Front (`web/`)
 
 Le front est une SPA Vite + React + TypeScript strict, servie en statique par la Console.
