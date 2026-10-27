@@ -10,6 +10,7 @@ import type { StatusData } from "./status";
 import { TokenPanel } from "./TokenPanel";
 import { TraceFeed } from "./TraceFeed";
 import { useConsoleStream } from "./useConsoleStream";
+import { useLatestRef } from "./useLatestRef";
 
 interface ConsoleScreenProps {
   /** Nom du Compte connecté, affiché dans l'en-tête. */
@@ -38,8 +39,7 @@ export function ConsoleScreen({
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
 
-  const unauthorized = useRef(onUnauthorized);
-  unauthorized.current = onUnauthorized;
+  const unauthorized = useLatestRef(onUnauthorized);
   const checkingSession = useRef(false);
 
   // Une fermeture du flux **avant** la première ouverture est un handshake

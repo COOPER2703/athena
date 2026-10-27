@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import { formatTokenDate } from "./format";
 import {
   formatLastUsed,
-  formatTokenDate,
   normalizeIssuedToken,
   normalizeTokens,
   tokenStatusLabel,

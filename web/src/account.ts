@@ -6,7 +6,7 @@
  * obligatoire, longueur minimale, confirmation) soient testables sans écran.
  */
 
-import { UNAUTHORIZED_MESSAGE, errorStatus } from "./auth";
+import { UNAUTHORIZED_MESSAGE, errorCode, errorStatus } from "./auth";
 
 /** Longueur minimale affichée ; le serveur reste l'autorité (400 explicite). */
 export const MIN_PASSWORD_LENGTH = 12;
@@ -59,14 +59,6 @@ export function passwordChangePayload(
     current_password: draft.current,
     new_password: draft.next,
   };
-}
-
-function errorCode(error: unknown): string {
-  if (typeof error !== "object" || error === null) {
-    return "";
-  }
-  const code = (error as Record<string, unknown>).code;
-  return typeof code === "string" ? code : "";
 }
 
 /**

@@ -68,7 +68,8 @@ export function isUnauthorized(error: unknown): boolean {
   return errorStatus(error) === 401;
 }
 
-function errorCode(error: unknown): string {
+/** Code d'erreur porté par une erreur d'API, ou chaîne vide. */
+export function errorCode(error: unknown): string {
   if (typeof error !== "object" || error === null) {
     return "";
   }

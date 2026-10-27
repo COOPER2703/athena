@@ -6,13 +6,8 @@ import {
   characterCount,
   submitDraft,
 } from "./events";
+import type { Feedback } from "./feedback";
 import "./event-form.css";
-
-/** Retour d'envoi affiché sous le formulaire. */
-type Feedback =
-  | { kind: "success"; message: string }
-  | { kind: "error"; message: string }
-  | null;
 
 /** Formulaire d'injection d'un Événement dans le Canal d'événements. */
 export function EventForm({
