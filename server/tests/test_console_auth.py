@@ -807,6 +807,11 @@ def test_logout_all_closes_an_already_open_stream(tmp_path: Path) -> None:
                 hello = await asyncio.wait_for(ws.receive_json(), 1.0)
                 assert hello["type"] == "hello"
 
+                # Un Ticket valide survit à plusieurs revérifications : le
+                # garde ne doit pas fermer les flux légitimes.
+                await asyncio.sleep(0.2)
+                assert ws.close_code is None
+
                 async with first.post(
                     f"{console.url}{LOGOUT_ALL_PATH}",
                     headers={"Origin": console.url},

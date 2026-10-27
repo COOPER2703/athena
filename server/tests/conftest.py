@@ -12,10 +12,7 @@ from websockets.asyncio.client import ClientConnection
 from protocol import Register, Registered, ToolDeclaration, decode, encode
 from server.adapters.auth import SqliteAuthStore
 from server.adapters.console import ConsoleAdapter
-from server.adapters.console.contract import (
-    LOGIN_PATH,
-    SETUP_PATH,
-)
+from server.adapters.console.contract import SETUP_PATH
 from server.adapters.transport import WebSocketTransport
 from server.core import (
     EVENT_WINDOW_TIMER_ID,
