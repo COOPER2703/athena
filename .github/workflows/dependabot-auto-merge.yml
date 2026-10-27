@@ -65,9 +65,6 @@ jobs:
           TYPE: ${{ steps.meta.outputs.update-type }}
         run: |
           gh pr edit "$PR" --add-label automerge
-          # `main` exige une branche à jour : sans ça, une PR ouverte avant le
-          # dernier merge de main resterait bloquée en « branch out of date ».
-          gh pr update-branch "$PR" || true
           if [ "$(gh pr view "$PR" --json autoMergeRequest --jq '.autoMergeRequest != null')" = "true" ]; then
             echo "Auto-merge déjà armé sur #$PR."
             exit 0
@@ -90,6 +87,10 @@ jobs:
   # GitHub ne remet jamais une branche à jour tout seul : sans ce rattrapage,
   # toute PR ouverte avant un merge de main reste bloquée en « out of date »
   # (la protection exige une branche à jour) et n'est jamais fusionnée.
+  #
+  # On passe par la commande Dependabot, pas par `gh pr update-branch` : un
+  # push fait avec GITHUB_TOKEN rend les runs suivants « action_required »
+  # (GitHub demande une approbation manuelle), ce qui bloquerait tout.
   refresh-branches:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -97,13 +98,12 @@ jobs:
       GH_REPO: ${{ github.repository }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Remettre les PR Dependabot à jour
+      - name: Demander un rebase des PR Dependabot en retard
         run: |
-          gh pr list --author "app/dependabot" --state open --json number --jq '.[].number' |
+          gh pr list --author "app/dependabot" --state open \
+            --json number,mergeStateStatus \
+            --jq '.[] | select(.mergeStateStatus == "BEHIND") | .number' |
             while read -r pr; do
-              if gh pr update-branch "$pr" >/dev/null 2>&1; then
-                echo "#$pr : branche mise à jour"
-              else
-                echo "#$pr : déjà à jour (ou conflit)"
-              fi
+              gh pr comment "$pr" --body "@dependabot rebase"
+              echo "#$pr : rebase demandé"
             done
