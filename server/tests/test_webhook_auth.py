@@ -14,7 +14,12 @@ from pathlib import Path
 
 import aiohttp
 
-from conftest import RecordingTraceSink, console_session, install_console
+from conftest import (
+    FakeClock,
+    RecordingTraceSink,
+    console_session,
+    install_console,
+)
 from server.adapters.auth import SqliteAuthStore
 from server.adapters.webhook import (
     EVENTS_PATH,
@@ -44,17 +49,6 @@ def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return int(probe.getsockname()[1])
-
-
-class FakeClock:
-    def __init__(self, now: float = 1_000_000.0) -> None:
-        self.value = now
-
-    def __call__(self) -> float:
-        return self.value
-
-    def advance(self, seconds: float) -> None:
-        self.value += seconds
 
 
 class Recorder:

@@ -16,24 +16,9 @@ from pathlib import Path
 
 import pytest
 
-from conftest import RecordingTraceSink
+from conftest import FakeClock, RecordingTraceSink, TEST_PASSWORD
 from server.adapters.auth import SqliteAuthStore
 from server.core.ports import AuthError
-
-PASSWORD = "correct horse battery staple"
-
-
-class FakeClock:
-    """Horloge injectée : la résolution de dernière utilisation est réelle."""
-
-    def __init__(self, now: float = 1_000_000.0) -> None:
-        self.value = now
-
-    def __call__(self) -> float:
-        return self.value
-
-    def advance(self, seconds: float) -> None:
-        self.value += seconds
 
 
 def _store(
@@ -57,7 +42,7 @@ async def _installed_store(
     store = _store(tmp_path, clock=clock)
     code = store.announce_installation_code()
     assert code is not None
-    await store.install(code, "admin", PASSWORD)
+    await store.install(code, "admin", TEST_PASSWORD)
     return store
 
 

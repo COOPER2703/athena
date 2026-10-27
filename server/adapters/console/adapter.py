@@ -244,6 +244,10 @@ class ConsoleAdapter:
                 self._trace_buffer,
                 self._current_snapshot,
                 self._status_broadcaster,
+                # Le Ticket est revérifié au rythme de l'état, borné à 30 s :
+                # une révocation ferme le flux déjà ouvert (#77).
+                ticket_valid=self._console_auth.ticket_guard,
+                ticket_check_interval=min(self._status_interval, 30.0),
             ),
         )
         app.router.add_post(EVENTS_PATH, self._handle_event)

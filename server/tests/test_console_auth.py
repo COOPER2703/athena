@@ -15,9 +15,12 @@ from typing import Mapping
 import aiohttp
 import pytest
 
-from conftest import RecordingTraceSink
-from server.adapters.auth import SqliteAuthStore
-from server.adapters.console import ConsoleAdapter
+from conftest import (
+    Console,
+    FakeClock,
+    TEST_PASSWORD,
+    console_snapshot,
+)
 from server.adapters.console.contract import (
     EVENTS_PATH,
     HEALTH_PATH,
@@ -32,88 +35,8 @@ from server.adapters.console.contract import (
     TICKET_COOKIE,
 )
 
-PASSWORD = "correct horse battery staple"
 NEW_PASSWORD = "an entirely different passphrase"
 WEAK_PASSWORD = "short"
-
-
-class FakeClock:
-    def __init__(self, now: float = 1_000_000.0) -> None:
-        self.value = now
-
-    def __call__(self) -> float:
-        return self.value
-
-    def advance(self, seconds: float) -> None:
-        self.value += seconds
-
-
-def _snapshot() -> Mapping[str, object]:
-    return {
-        "session": {
-            "state": "SessionVisible",
-            "session_id": "sess-1",
-            "connection_id": "s1",
-            "active_client_id": "client-1",
-        },
-        "clients": [],
-        "plugins": [],
-        "config": {"version": "0.1.0"},
-    }
-
-
-class Console:
-    """Console démarrée avec une vraie base d'auth et un tampon de traces vide."""
-
-    def __init__(
-        self,
-        tmp_path: Path,
-        *,
-        clock: FakeClock | None = None,
-        snapshot=_snapshot,
-        static_dir: Path | None = None,
-        **store_options: object,
-    ) -> None:
-        self.clock = clock or FakeClock()
-        self.snapshot = snapshot
-        self.store = SqliteAuthStore(
-            db_path=str(tmp_path / "auth.db"),
-            trace_sink=RecordingTraceSink(),
-            now=self.clock,
-            **store_options,
-        )
-        self.adapter = ConsoleAdapter(
-            port=0,
-            auth=self.store,
-            static_dir=static_dir or (tmp_path / "missing-build"),
-        )
-        self.pushed: list[tuple[str, str]] = []
-
-    @property
-    def url(self) -> str:
-        return f"http://127.0.0.1:{self.adapter.port}"
-
-    async def start(self) -> None:
-        await self.adapter.start(
-            self.snapshot,
-            lambda source, content: self.pushed.append((source, content)),
-        )
-
-    async def stop(self) -> None:
-        await self.adapter.stop()
-
-    def client(self, *, cookies: bool = True) -> aiohttp.ClientSession:
-        jar = (
-            aiohttp.CookieJar(unsafe=True, treat_as_secure_origin=self.url)
-            if cookies
-            else aiohttp.DummyCookieJar()
-        )
-        return aiohttp.ClientSession(cookie_jar=jar)
-
-    def install_code(self) -> str:
-        code = self.store.announce_installation_code()
-        assert code is not None
-        return code
 
 
 async def _json(response: aiohttp.ClientResponse) -> dict[str, object]:
@@ -130,7 +53,11 @@ async def _install(
 ) -> aiohttp.ClientResponse:
     return await client.post(
         f"{console.url}{SETUP_PATH}",
-        json={"code": console.install_code(), "username": username, "password": PASSWORD},
+        json={
+            "code": console.install_code(),
+            "username": username,
+            "password": TEST_PASSWORD,
+        },
     )
 
 
@@ -190,7 +117,7 @@ def test_install_with_a_wrong_code_is_forbidden(tmp_path: Path) -> None:
                     json={
                         "code": "not-the-code",
                         "username": "admin",
-                        "password": PASSWORD,
+                        "password": TEST_PASSWORD,
                     },
                 ) as response:
                     assert response.status == 403
@@ -229,7 +156,7 @@ def test_install_opens_an_httponly_secure_ticket_and_unlocks_the_api(
 
                 async with http.get(f"{console.url}{STATUS_PATH}") as response:
                     assert response.status == 200
-                    assert await _json(response) == {"v": 1, **_snapshot()}
+                    assert await _json(response) == {"v": 1, **console_snapshot()}
 
                 async with http.get(f"{console.url}{SESSION_PATH}") as response:
                     assert await _json(response) == {
@@ -261,7 +188,7 @@ def test_a_second_install_is_refused_once_the_account_exists(
             async with console.client() as http:
                 async with http.post(
                     f"{console.url}{SETUP_PATH}",
-                    json={"code": code, "username": "intruder", "password": PASSWORD},
+                    json={"code": code, "username": "intruder", "password": TEST_PASSWORD},
                 ) as response:
                     assert response.status == 409
                     assert (await _json(response))["error"] == "already_installed"
@@ -321,14 +248,14 @@ def test_login_opens_a_ticket_and_failures_do_not_discriminate(
 
                 async with http.post(
                     f"{console.url}{LOGIN_PATH}",
-                    json={"username": "nobody", "password": PASSWORD},
+                    json={"username": "nobody", "password": TEST_PASSWORD},
                 ) as response:
                     assert response.status == 401
                     assert await _json(response) == wrong_password
 
                 async with http.post(
                     f"{console.url}{LOGIN_PATH}",
-                    json={"username": "admin", "password": PASSWORD},
+                    json={"username": "admin", "password": TEST_PASSWORD},
                 ) as response:
                     assert response.status == 200
                     assert await _json(response) == {
@@ -378,7 +305,7 @@ def test_five_failures_lock_the_login_with_a_retry_after_then_lift(
 
                 async with http.post(
                     f"{console.url}{LOGIN_PATH}",
-                    json={"username": "admin", "password": PASSWORD},
+                    json={"username": "admin", "password": TEST_PASSWORD},
                 ) as response:
                     assert response.status == 200
         finally:
@@ -472,7 +399,7 @@ async def _login_session(
     """Connecte le client : le jar conserve le Ticket Console."""
     async with http.post(
         f"{console.url}{LOGIN_PATH}",
-        json={"username": "admin", "password": PASSWORD},
+        json={"username": "admin", "password": TEST_PASSWORD},
     ) as response:
         assert response.status == 200
 
@@ -482,7 +409,7 @@ def test_healthz_is_public_and_never_reads_the_snapshot(tmp_path: Path) -> None:
 
     def counted_snapshot() -> Mapping[str, object]:
         reads.append(1)
-        return _snapshot()
+        return console_snapshot()
 
     async def scenario() -> None:
         console = Console(tmp_path, snapshot=counted_snapshot)
@@ -538,6 +465,54 @@ def test_a_foreign_origin_is_refused_on_mutating_requests(tmp_path: Path) -> Non
     asyncio.run(scenario())
 
 
+def test_a_mutating_request_without_an_origin_is_refused(tmp_path: Path) -> None:
+    """Un navigateur envoie toujours ``Origin`` : son absence est le cas forgé.
+
+    Le contrôle CSRF compare strictement l'origine à l'hôte servi ; une requête
+    mutante sans en-tête ne peut donc pas être distinguée d'un client forgé et
+    est refusée comme une origine étrangère.
+    """
+
+    async def scenario() -> None:
+        console = Console(tmp_path)
+        await console.start()
+        try:
+            # Le client garde le cookie mais n'envoie aucune Origin par défaut ;
+            # l'installation, elle, fournit explicitement celle de la page.
+            async with console.client(origin=False) as http:
+                async with http.post(
+                    f"{console.url}{SETUP_PATH}",
+                    json={
+                        "code": console.install_code(),
+                        "username": "admin",
+                        "password": TEST_PASSWORD,
+                    },
+                    headers={"Origin": console.url},
+                ) as response:
+                    assert response.status == 200
+
+                async with http.post(
+                    f"{console.url}{EVENTS_PATH}",
+                    json={"source": "console", "content": "sans origine"},
+                ) as response:
+                    assert response.status == 403
+                    assert (await _json(response))["error"] == "origin_refused"
+                assert console.pushed == []
+
+                # Avec l'Origin de la page servie, la même requête passe.
+                async with http.post(
+                    f"{console.url}{EVENTS_PATH}",
+                    json={"source": "console", "content": "avec origine"},
+                    headers={"Origin": console.url},
+                ) as response:
+                    assert response.status == 202
+                    assert console.pushed == [("console", "avec origine")]
+        finally:
+            await console.stop()
+
+    asyncio.run(scenario())
+
+
 def test_the_ticket_cookie_is_reissued_only_when_the_expiry_slides(
     tmp_path: Path,
 ) -> None:
@@ -569,21 +544,39 @@ def test_the_ticket_cookie_is_reissued_only_when_the_expiry_slides(
 def test_a_revoked_ticket_is_refused_on_the_very_next_request(
     tmp_path: Path,
 ) -> None:
+    """La révocation se prouve par HTTP, pas en appelant le store.
+
+    Un second navigateur se déconnecte ; son cookie capturé, rejoué sans jar,
+    ne vaut plus rien, tandis que le Ticket du premier navigateur reste valide.
+    """
+
     async def scenario() -> None:
         console = Console(tmp_path)
         await console.start()
         try:
-            async with console.client() as http:
-                async with await _install(console, http) as response:
+            async with console.client() as first, console.client() as second:
+                async with await _install(console, first) as response:
                     assert response.status == 200
-                    [cookie] = _set_cookies(response)
 
-                secret = cookie.split(";", 1)[0].split("=", 1)[1]
-                await console.store.revoke_ticket(secret)
+                async with await _login(console, second) as response:
+                    assert response.status == 200
+                    secret = _ticket_secret(response)
 
-                async with http.get(f"{console.url}{STATUS_PATH}") as response:
-                    assert response.status == 401
-                    assert (await _json(response))["error"] == "unauthorized"
+                async with second.post(f"{console.url}{LOGOUT_PATH}") as response:
+                    assert response.status == 200
+
+                # Rejouer le secret révoqué ne suffit pas : le Ticket est mort.
+                async with console.client(cookies=False) as replay:
+                    async with replay.get(
+                        f"{console.url}{STATUS_PATH}",
+                        cookies={TICKET_COOKIE: secret},
+                    ) as response:
+                        assert response.status == 401
+                        assert (await _json(response))["error"] == "unauthorized"
+
+                # La révocation est ciblée : l'autre Ticket survit.
+                async with first.get(f"{console.url}{STATUS_PATH}") as response:
+                    assert response.status == 200
         finally:
             await console.stop()
 
@@ -599,7 +592,7 @@ def _ticket_secret(response: aiohttp.ClientResponse) -> str:
 async def _login(
     console: Console,
     http: aiohttp.ClientSession,
-    password: str = PASSWORD,
+    password: str = TEST_PASSWORD,
 ) -> aiohttp.ClientResponse:
     return await http.post(
         f"{console.url}{LOGIN_PATH}",
@@ -634,7 +627,7 @@ def test_changing_the_password_requires_the_current_one(tmp_path: Path) -> None:
                 async with http.post(
                     f"{console.url}{PASSWORD_PATH}",
                     json={
-                        "current_password": PASSWORD,
+                        "current_password": TEST_PASSWORD,
                         "new_password": WEAK_PASSWORD,
                     },
                 ) as response:
@@ -673,7 +666,7 @@ def test_changing_the_password_switches_it_and_revokes_other_tickets(
                     async with current.post(
                         f"{console.url}{PASSWORD_PATH}",
                         json={
-                            "current_password": PASSWORD,
+                            "current_password": TEST_PASSWORD,
                             "new_password": NEW_PASSWORD,
                         },
                     ) as response:
@@ -786,6 +779,48 @@ def test_logout_all_revokes_every_ticket_of_the_account(tmp_path: Path) -> None:
             async with console.client() as fresh:
                 async with await _login(console, fresh) as response:
                     assert response.status == 200
+        finally:
+            await console.stop()
+
+    asyncio.run(scenario())
+
+
+def test_logout_all_closes_an_already_open_stream(tmp_path: Path) -> None:
+    """Un flux déjà ouvert ne survit pas à la révocation de son Ticket (#77).
+
+    « Déconnecter partout » doit couper l'écoute en direct, pas seulement
+    empêcher le prochain handshake : le Ticket est revérifié pendant que le
+    WebSocket est ouvert, puis le flux est fermé.
+    """
+
+    async def scenario() -> None:
+        console = Console(tmp_path, status_interval=0.05)
+        await console.start()
+        try:
+            async with console.client() as first, console.client() as second:
+                async with await _install(console, first) as response:
+                    assert response.status == 200
+                async with await _login(console, second) as response:
+                    assert response.status == 200
+
+                ws = await second.ws_connect(f"{console.url}{STREAM_PATH}")
+                hello = await asyncio.wait_for(ws.receive_json(), 1.0)
+                assert hello["type"] == "hello"
+
+                async with first.post(
+                    f"{console.url}{LOGOUT_ALL_PATH}",
+                    headers={"Origin": console.url},
+                ) as response:
+                    assert response.status == 200
+
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 2.0
+                while ws.close_code is None and loop.time() < deadline:
+                    try:
+                        await asyncio.wait_for(ws.receive(), 0.5)
+                    except asyncio.TimeoutError:
+                        pass
+                assert ws.close_code == 1008
         finally:
             await console.stop()
 

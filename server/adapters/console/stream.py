@@ -12,7 +12,7 @@ dans la boucle asyncio unique du serveur.
 from __future__ import annotations
 
 import asyncio
-from typing import Callable, Mapping
+from typing import Awaitable, Callable, Mapping
 
 from aiohttp import web
 
@@ -66,8 +66,17 @@ def stream_handler(
     buffer: TraceBuffer,
     snapshot: Callable[[], Mapping[str, object]],
     status: StatusBroadcaster | None = None,
+    *,
+    ticket_valid: Callable[[web.Request], Awaitable[bool]] | None = None,
+    ticket_check_interval: float = 1.0,
 ):
-    """Fabrique le handler WebSocket, lié au tampon, à l'instantané et au tick."""
+    """Fabrique le handler WebSocket, lié au tampon, à l'instantané et au tick.
+
+    ``ticket_valid`` revérifie périodiquement le Ticket Console du flux : un
+    Ticket révoqué ferme un socket **déjà ouvert**, sans attendre une
+    reconnexion (#77). Sans cette couture, le flux ne se referme que sur
+    l'initiative du client.
+    """
 
     async def handle(request: web.Request) -> web.StreamResponse:
         if request.headers.get("Upgrade", "").lower() != "websocket":
@@ -105,9 +114,22 @@ def stream_handler(
             async for _ in websocket:
                 pass
 
+        async def revalidate_ticket() -> None:
+            assert ticket_valid is not None
+            while not websocket.closed:
+                await asyncio.sleep(ticket_check_interval)
+                if await ticket_valid(request):
+                    continue
+                # 1008 (policy violation) : le client sait que son Ticket n'est
+                # plus valide, la reconnexion échouera elle aussi en 401.
+                await websocket.close(code=1008, message=b"Ticket Console revoked")
+                return
+
         tasks = [asyncio.create_task(send_traces()), asyncio.create_task(drain())]
         if status_subscription is not None:
             tasks.append(asyncio.create_task(send_status()))
+        if ticket_valid is not None:
+            tasks.append(asyncio.create_task(revalidate_ticket()))
         try:
             await websocket.send_json(
                 hello_frame(current_snapshot, subscription.backlog)

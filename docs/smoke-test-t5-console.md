@@ -103,13 +103,17 @@ LOG_DIR=${ATHENA_LOG_DIR:-logs}
 CODE=$(sed -n 's/.*InstallationCode.*"code": "\([^"]*\)".*/\1/p' "$LOG_DIR/server.log" | tail -n 1)
 
 curl -i -c /tmp/athena-cookies.txt -X POST http://127.0.0.1:8767/api/setup \
+  -H 'Origin: http://127.0.0.1:8767' \
   -H 'Content-Type: application/json' \
   -d "{\"code\":\"$CODE\",\"username\":\"admin\",\"password\":\"un-mot-de-passe-de-12-caracteres\"}"
 ```
 
-Attendu : `200`, `authenticated: true`, et un cookie `athena_ticket` dans la jar. Le cookie est
-`Secure` ; un navigateur traite `http://127.0.0.1` comme un contexte sûr, et `curl` accepte
-de le renvoyer sur la boucle locale. En HTTP simple sur une adresse du LAN, le navigateur
+Attendu : `200`, `authenticated: true`, et un cookie `athena_ticket` dans la jar. Toute requête
+mutante porte l'`Origin` de la page servie (`-H 'Origin: http://127.0.0.1:8767'`) : sans cet
+en-tête, comme avec une origine étrangère, elle est refusée en `403 origin_refused` — un
+navigateur l'envoie toujours, son absence signale un client forgé. Le cookie est `Secure` ;
+un navigateur traite `http://127.0.0.1` comme un contexte sûr, et `curl` accepte de le
+renvoyer sur la boucle locale. En HTTP simple sur une adresse du LAN, le navigateur
 l'ignorerait — il faut HTTPS (ADR-0017).
 
 Vérifications immédiates :
@@ -120,6 +124,7 @@ curl -s -b /tmp/athena-cookies.txt http://127.0.0.1:8767/api/session
 
 # Un second essai d'installation est refusé.
 curl -i -X POST http://127.0.0.1:8767/api/setup -H 'Content-Type: application/json' \
+  -H 'Origin: http://127.0.0.1:8767' \
   -d '{"code":"peu-importe","username":"autre","password":"un-mot-de-passe-de-12-caracteres"}'
 ```
 
@@ -129,6 +134,7 @@ l'installation par une connexion :
 
 ```sh
 curl -i -c /tmp/athena-cookies.txt -X POST http://127.0.0.1:8767/api/login \
+  -H 'Origin: http://127.0.0.1:8767' \
   -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"un-mot-de-passe-de-12-caracteres"}'
 ```
@@ -211,11 +217,13 @@ ce qui permet à l'écran de connexion de s'afficher sans Ticket.
 ```sh
 # Source par défaut : console.
 curl -i -b /tmp/athena-cookies.txt -X POST http://127.0.0.1:8767/api/events \
+  -H 'Origin: http://127.0.0.1:8767' \
   -H 'Content-Type: application/json' \
   -d '{"content": "La porte d entree vient de s ouvrir"}'
 
 # Source explicite.
 curl -i -b /tmp/athena-cookies.txt -X POST http://127.0.0.1:8767/api/events \
+  -H 'Origin: http://127.0.0.1:8767' \
   -H 'Content-Type: application/json' \
   -d '{"source": "maison", "content": "Le garage est ouvert"}'
 ```
@@ -226,7 +234,8 @@ dans le flux, avec `source` et `chars` dans le payload. La validation est **la m
 Webhook (module partagé `server/adapters/event_body.py`), seule la Source par défaut change.
 
 Sans Ticket, `POST /api/events` répond `401` JSON. Avec le cookie mais une `Origin` étrangère,
-il répond `403` : le contrôle CSRF compare l'origine à l'hôte servi.
+ou **sans** `Origin`, il répond `403` : le contrôle CSRF exige une origine strictement égale à
+l'hôte servi, et un navigateur en envoie toujours une.
 
 ```sh
 curl -i -b /tmp/athena-cookies.txt -X POST http://127.0.0.1:8767/api/events \
@@ -253,12 +262,16 @@ Exemple pour les trois cas vérifiables sur un serveur sain :
 
 ```sh
 curl -i -b /tmp/athena-cookies.txt -X POST http://127.0.0.1:8767/api/events \
+  -H 'Origin: http://127.0.0.1:8767' \
   -H 'Content-Type: text/plain' -d 'hello'
 curl -i -b /tmp/athena-cookies.txt -X POST http://127.0.0.1:8767/api/events \
+  -H 'Origin: http://127.0.0.1:8767' \
   -H 'Content-Type: application/json' -d '{not json'
 curl -i -b /tmp/athena-cookies.txt -X POST http://127.0.0.1:8767/api/events \
+  -H 'Origin: http://127.0.0.1:8767' \
   -H 'Content-Type: application/json' -d '{"content":"   "}'
 curl -i -b /tmp/athena-cookies.txt -X POST http://127.0.0.1:8767/api/events \
+  -H 'Origin: http://127.0.0.1:8767' \
   -H 'Content-Type: application/json' \
   -d "{\"content\": \"$(printf 'x%.0s' {1..4097})\"}"
 ```
@@ -289,6 +302,7 @@ async def main() -> None:
         login = await session.post(
             "http://127.0.0.1:8767/api/login",
             json={"username": "admin", "password": "un-mot-de-passe-de-12-caracteres"},
+            headers={"Origin": "http://127.0.0.1:8767"},
         )
         login.raise_for_status()
         ws = await session.ws_connect("http://127.0.0.1:8767/api/stream")

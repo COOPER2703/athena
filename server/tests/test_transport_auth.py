@@ -19,6 +19,7 @@ from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response
 
 from conftest import (
+    FakeClock,
     RecordingTraceSink,
     _url,
     console_session,
@@ -50,19 +51,6 @@ def _free_port() -> int:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
 
-
-
-class FakeClock:
-    """Horloge réglable : la dernière utilisation n'est écrite qu'une fois par minute."""
-
-    def __init__(self, now: float = 1_000_000.0) -> None:
-        self.value = now
-
-    def __call__(self) -> float:
-        return self.value
-
-    def advance(self, seconds: float) -> None:
-        self.value += seconds
 
 
 def _store(tmp_path: Path, clock: FakeClock | None = None) -> SqliteAuthStore:

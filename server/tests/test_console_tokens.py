@@ -11,88 +11,18 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from pathlib import Path
-from typing import Mapping
 
 import aiohttp
 
-from conftest import RecordingTraceSink
-from server.adapters.auth import SqliteAuthStore
-from server.adapters.console import ConsoleAdapter
+from conftest import (
+    Console,
+    FakeClock,
+    TEST_PASSWORD,
+)
 from server.adapters.console.contract import (
     LOGIN_PATH,
-    SETUP_PATH,
     TOKENS_PATH,
 )
-
-PASSWORD = "correct horse battery staple"
-
-
-class FakeClock:
-    def __init__(self, now: float = 1_000_000.0) -> None:
-        self.value = now
-
-    def __call__(self) -> float:
-        return self.value
-
-    def advance(self, seconds: float) -> None:
-        self.value += seconds
-
-
-def _snapshot() -> Mapping[str, object]:
-    return {
-        "session": {
-            "state": "SessionVisible",
-            "session_id": "sess-1",
-            "connection_id": "s1",
-            "active_client_id": "client-1",
-        },
-        "clients": [],
-        "plugins": [],
-        "config": {"version": "0.1.0"},
-    }
-
-
-class Console:
-    """Console démarrée avec une vraie base d'auth."""
-
-    def __init__(self, tmp_path: Path, *, clock: FakeClock | None = None) -> None:
-        self.tmp_path = tmp_path
-        self.clock = clock or FakeClock()
-        self.store = SqliteAuthStore(
-            db_path=str(tmp_path / "auth.db"),
-            trace_sink=RecordingTraceSink(),
-            now=self.clock,
-        )
-        self.adapter = ConsoleAdapter(
-            port=0,
-            auth=self.store,
-            static_dir=tmp_path / "missing-build",
-        )
-
-    @property
-    def url(self) -> str:
-        return f"http://127.0.0.1:{self.adapter.port}"
-
-    async def start(self) -> None:
-        await self.adapter.start(
-            _snapshot, lambda source, content: None
-        )
-
-    async def stop(self) -> None:
-        await self.adapter.stop()
-
-    def client(self) -> aiohttp.ClientSession:
-        jar = aiohttp.CookieJar(unsafe=True, treat_as_secure_origin=self.url)
-        return aiohttp.ClientSession(cookie_jar=jar)
-
-    async def install(self, http: aiohttp.ClientSession) -> None:
-        code = self.store.announce_installation_code()
-        assert code is not None
-        async with http.post(
-            f"{self.url}{SETUP_PATH}",
-            json={"code": code, "username": "admin", "password": PASSWORD},
-        ) as response:
-            assert response.status == 200
 
 
 async def _json(response: aiohttp.ClientResponse) -> dict[str, object]:
@@ -140,7 +70,7 @@ def test_every_token_route_requires_a_console_ticket(tmp_path: Path) -> None:
             async with console.client() as http:
                 async with http.post(
                     f"{console.url}{LOGIN_PATH}",
-                    json={"username": "admin", "password": PASSWORD},
+                    json={"username": "admin", "password": TEST_PASSWORD},
                 ) as response:
                     assert response.status == 200
                 async with http.get(f"{console.url}{TOKENS_PATH}") as response:
@@ -263,7 +193,6 @@ def test_revocation_is_immediate_and_visible_in_the_list(tmp_path: Path) -> None
                 )
                 kept = kept_body["token"]
                 doomed = doomed_body["token"]
-                doomed_secret = doomed_body["secret"]
 
                 console.clock.advance(30)
                 async with http.delete(
@@ -281,16 +210,12 @@ def test_revocation_is_immediate_and_visible_in_the_list(tmp_path: Path) -> None
                 assert by_id[doomed["id"]]["revoked_at"] == console.clock.value
                 assert by_id[kept["id"]]["revoked_at"] is None
 
-                # La validation refuse le Jeton révoqué dès à présent, et garde
-                # l'autre intact.
-                assert (
-                    await console.store.authenticate_token(doomed_secret, "source")
-                ) is None
-                assert (
-                    await console.store.authenticate_token(
-                        kept_body["secret"], "client"
-                    )
-                ) is not None
+                # La liste est la surface publique du cycle de vie : elle porte
+                # la révocation immédiate et laisse l'autre Jeton actif. La
+                # validation sur les surfaces machine est couverte par les
+                # coutures Transport (#79) et Webhook (#80).
+                assert by_id[doomed["id"]]["revoked_at"] is not None
+                assert by_id[kept["id"]]["revoked_at"] is None
 
                 # Révoquer à nouveau ne change pas la date.
                 console.clock.advance(30)
