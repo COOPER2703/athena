@@ -75,6 +75,16 @@ Les deux mécanismes de credential (ADR-0017) :
 - **Client desktop** : lit son Jeton dans `ATHENA_ACCESS_TOKEN` (variable de processus
   uniquement, pas de `.env` client) et refuse de démarrer s'il manque.
 
+### Créer un plugin
+
+Le skill `create-plugin` (`.agents/skills/create-plugin/SKILL.md`) conçoit un nouveau plugin
+serveur : il demande le nom et le but, délègue le grill à `grill-with-docs`, puis produit une
+spec et des tickets d'implémentation. Il n'écrit aucun code. Se lance avec `/create-plugin`.
+
+Le contrat public est `plugin_api` (jamais `server`) ; les décisions sont ADR-0014 et
+ADR-0018 ; les deux exemples sont `plugins/websearch` (HTTP) et `plugins/homeassistant` (MCP).
+Les skills tiers sont installés par `npx skills add` et épinglés dans `skills-lock.json`.
+
 ### Recherche web
 
 Le plugin `plugins/websearch/` (ADR-0018) expose à Gemini un seul Tool, `web_search`,
