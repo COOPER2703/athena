@@ -203,9 +203,9 @@ INFO [core] Activation {"connection_id": "s1", "context_chars": 0, "has_context"
 ```
 
 `Activation` donne seulement la **présence** et la **taille** de l'instruction de plugin
-(`has_plugin_instruction`, `plugin_instruction_chars`), jamais son texte. Le prompt système,
-l'instruction et le contexte mémoire sont figés à l'ouverture. Si le plugin ne fournit pas
-d'instruction, `has_plugin_instruction` vaut `false` et `plugin_instruction_chars` vaut `0`.
+(`has_plugin_instruction`, `plugin_instruction_chars`), jamais son texte. Le plugin fournit
+une instruction d'usage qui rappelle les six Tools, les confirmations et le sous-ensemble
+Markdown ; le prompt système, l'instruction et le contexte mémoire sont figés à l'ouverture.
 
 ## 3. Parcours vocal
 
@@ -524,6 +524,10 @@ requête (méthode, chemin, en-têtes, corps) et programme les réponses.
   sous-pages, refus sans écriture, `5xx` incertain, restauration et relecture.
 - `server/tests/test_plugins_notion_markdown.py` — tableaux GFM et balises de colonnes
   transmis tels quels, `v2` explicite, Markdown invalide en une phrase.
+- `server/tests/test_plugins_notion_transverse.py` — les six schémas et la ligne de Console,
+  l'instruction dans le prompt, l'Annonce avec instruction mais sans Tool, le jeton absent
+  alors que les Traces de Tool apparaissent, un `429` en une seule requête, un `503`/`504`
+  d'écriture incertain et tenté une seule fois.
 - `server/tests/test_plugins.py`, `server/tests/test_plugins_loader.py` et
   `server/tests/test_app_integration.py` — registre, états, retente, Tools déclarés à la
   Connexion Live suivante, instantané de la Console.
