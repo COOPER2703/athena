@@ -125,11 +125,9 @@ def test_trash_and_restore_declare_their_exact_schemas(tmp_path: Path) -> None:
                 async with live_session(transport, live):
                     tools = declared(live)
 
-                assert set(tools) == {
-                    "search_pages",
-                    "trash_page",
-                    "restore_page",
-                }
+                # Les tickets voisins déclarent leurs propres Tools : on
+                # vérifie ceux de ce ticket, sans figer la liste entière.
+                assert {"trash_page", "restore_page"} <= set(tools)
                 assert (
                     dict(tools["trash_page"].parameters_json_schema)
                     == TRASH_PARAMETERS
@@ -386,7 +384,7 @@ def test_a_5xx_on_the_trash_warns_the_change_may_have_been_recorded(
                     )
 
                 assert payload["status"] == "error"
-                assert "peut-être enregistré" in payload["message"]
+                assert "peut avoir été enregistré" in payload["message"]
                 assert "relis" in payload["message"]
                 # Un seul essai : l'écriture incertaine n'est jamais rejouée.
                 assert len(stub.requests_for("PATCH", _page_path())) == 1
@@ -507,7 +505,7 @@ def test_a_5xx_on_the_restore_is_flagged_as_uncertain(
                     )
 
                 assert payload["status"] == "error"
-                assert "peut-être enregistré" in payload["message"]
+                assert "peut avoir été enregistré" in payload["message"]
                 assert len(stub.requests_for("PATCH", _page_path())) == 1
                 trace = sink.of_kind("RestorePage")[-1].payload
                 assert trace["reason"] == f"HTTP {status}"

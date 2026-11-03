@@ -119,7 +119,7 @@ def test_refused_probe_degrades_the_start_then_repairs_itself(
 
                 # Les Tools arrivent à la Connexion Live suivante.
                 async with live_session(transport, live):
-                    assert "search_pages" in declared(live)
+                    assert {"search_pages", "update_page"} <= set(declared(live))
 
     asyncio.run(scenario())
 
@@ -171,10 +171,10 @@ def test_a_probe_5xx_is_traced_as_degraded_without_blocking_the_start(
                 [row] = app.snapshot()["plugins"]
                 assert row["name"] == "notion"
                 assert row["state"] == "activated"
-                assert "search_pages" in row["tools"]
+                assert {"search_pages", "update_page"} <= set(row["tools"])
 
                 async with live_session(transport, live):
-                    assert "search_pages" in declared(live)
+                    assert {"search_pages", "update_page"} <= set(declared(live))
 
     asyncio.run(scenario())
 
@@ -372,16 +372,17 @@ def test_search_pages_is_declared_and_returns_page_candidates(
                 _,
             ):
                 assert app.plugins.states["notion"] == "activated"
-                # Le Tool est visible dans l'instantané de la Console ; les
-                # tickets suivants ajoutent leurs Tools à cette même ligne.
+                # Le Tool est visible dans l'instantané de la Console.
+                # La Console montre le plugin activé ; les tickets suivants
+                # ajoutent leurs Tools à cette même ligne.
                 [row] = app.snapshot()["plugins"]
                 assert row["name"] == "notion"
                 assert row["state"] == "activated"
-                assert "search_pages" in row["tools"]
+                assert {"search_pages", "update_page"} <= set(row["tools"])
 
                 async with live_session(transport, live) as session:
                     tools = declared(live)
-                    assert "search_pages" in tools
+                    assert {"search_pages", "update_page"} <= set(tools)
                     assert dict(
                         tools["search_pages"].parameters_json_schema
                     ) == SEARCH_PARAMETERS
