@@ -126,13 +126,13 @@ def test_read_page_is_declared_with_its_pagination_bounds(
         async with NotionStub() as stub:
             program_probe(stub)
             async with _notion_session(tmp_path, stub) as (app, live, _, _, _):
-                assert app.snapshot()["plugins"] == [
-                    {
-                        "name": "notion",
-                        "state": "activated",
-                        "tools": ["read_page", "search_pages"],
-                    }
-                ]
+                [plugin] = app.snapshot()["plugins"]
+                assert plugin["name"] == "notion"
+                assert plugin["state"] == "activated"
+                # L'ensemble exact des six Tools est asserté par le test
+                # transverse du ticket #120 : ici, on tolère les Tools des
+                # tickets suivants.
+                assert {"read_page", "search_pages"} <= set(plugin["tools"])
                 tools = declared(live)
                 assert "read_page" in tools
                 assert (

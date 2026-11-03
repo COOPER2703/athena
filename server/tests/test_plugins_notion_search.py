@@ -118,8 +118,13 @@ def test_refused_probe_degrades_the_start_then_repairs_itself(
                 await wait_for_state(app, "notion", "activated")
 
                 # Les Tools arrivent à la Connexion Live suivante.
+                # L'ensemble exact des six Tools est asserté par le test
+                # transverse du ticket #120 : ici, on tolère les Tools des
+                # tickets suivants.
                 async with live_session(transport, live):
-                    assert set(declared(live)) == {"read_page", "search_pages"}
+                    assert {"search_pages", "update_page"} <= set(
+                        declared(live)
+                    )
 
     asyncio.run(scenario())
 
@@ -166,16 +171,22 @@ def test_a_probe_5xx_is_traced_as_degraded_without_blocking_the_start(
                 [degraded] = sink.of_kind("ProbeDegraded")
                 assert degraded.payload["status"] == 503
                 assert not sink.of_kind("ProbeFailed")
-                assert app.snapshot()["plugins"] == [
-                    {
-                        "name": "notion",
-                        "state": "activated",
-                        "tools": ["read_page", "search_pages"],
-                    }
-                ]
+                # L'ensemble exact des six Tools est asserté par le test
+                # transverse du ticket #120 : ici, on tolère les Tools des
+                # tickets suivants.
+                snapshot = app.snapshot()["plugins"]
+                assert len(snapshot) == 1
+                [notion] = snapshot
+                assert notion["name"] == "notion"
+                assert notion["state"] == "activated"
+                assert {"search_pages", "update_page"} <= set(
+                    notion["tools"]
+                )
 
                 async with live_session(transport, live):
-                    assert set(declared(live)) == {"read_page", "search_pages"}
+                    assert {"search_pages", "update_page"} <= set(
+                        declared(live)
+                    )
 
     asyncio.run(scenario())
 
@@ -374,17 +385,21 @@ def test_search_pages_is_declared_and_returns_page_candidates(
             ):
                 assert app.plugins.states["notion"] == "activated"
                 # Le Tool est visible dans l'instantané de la Console.
-                assert app.snapshot()["plugins"] == [
-                    {
-                        "name": "notion",
-                        "state": "activated",
-                        "tools": ["read_page", "search_pages"],
-                    }
-                ]
+                # L'ensemble exact des six Tools est asserté par le test
+                # transverse du ticket #120 : ici, on tolère les Tools des
+                # tickets suivants.
+                snapshot = app.snapshot()["plugins"]
+                assert len(snapshot) == 1
+                [notion] = snapshot
+                assert notion["name"] == "notion"
+                assert notion["state"] == "activated"
+                assert {"search_pages", "update_page"} <= set(
+                    notion["tools"]
+                )
 
                 async with live_session(transport, live) as session:
                     tools = declared(live)
-                    assert set(tools) == {"read_page", "search_pages"}
+                    assert {"search_pages", "update_page"} <= set(tools)
                     assert dict(
                         tools["search_pages"].parameters_json_schema
                     ) == SEARCH_PARAMETERS

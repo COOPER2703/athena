@@ -93,6 +93,39 @@ _READ_PARAMETERS: Mapping[str, object] = {
     "required": ["page"],
 }
 
+_UPDATE_DESCRIPTION = (
+    "ajoute du contenu à une page, remplace son corps sur confirmation, "
+    "ou la renomme."
+)
+
+_UPDATE_PARAMETERS: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "page": {
+            "type": "string",
+            "description": "Identifiant ou URL de la page.",
+        },
+        "title": {
+            "type": "string",
+            "description": "Nouveau titre. Optionnel.",
+        },
+        "content": {
+            "type": "string",
+            "description": "Markdown à ajouter ou à substituer. Optionnel.",
+        },
+        "mode": {
+            "type": "string",
+            "enum": ["append", "replace"],
+            "description": "Défaut : append.",
+        },
+        "confirm": {
+            "type": "boolean",
+            "description": "Obligatoire à true pour mode=replace.",
+        },
+    },
+    "required": ["page"],
+}
+
 _UNREACHABLE_MESSAGE = (
     "Notion est injoignable. Réessaie dans un instant."
 )
@@ -124,7 +157,7 @@ _TEMPORARY_MESSAGE = (
     "Notion est temporairement indisponible. Réessaie dans un instant."
 )
 _WRITE_UNCERTAIN_MESSAGE = (
-    "Notion a peut-être enregistré le changement ; "
+    "Le changement peut avoir été enregistré ; "
     "relis la page avant de réessayer."
 )
 _STATUS_MESSAGE = (
@@ -132,8 +165,16 @@ _STATUS_MESSAGE = (
     "Réessaie dans un instant."
 )
 _INVALID_PAGE_MESSAGE = (
-    "L'identifiant ou l'URL de la page est invalide. "
-    "Donne un identifiant Notion ou une URL de page."
+    "Identifiant de page invalide : indique un identifiant Notion ou l'URL "
+    "de la page."
+)
+_REPLACE_REFUSED_MESSAGE = (
+    "Le remplacement du contenu exige une confirmation explicite et n'est "
+    "pas effectué par cette version du plugin. Utilise le mode append pour "
+    "ajouter du contenu."
+)
+_NO_TITLE_PROPERTY_MESSAGE = (
+    "La page n'expose pas de propriété de titre : le renommage est impossible."
 )
 _TRUNCATED_AND_UNKNOWN_NOTE = (
     "Le contenu de la page est tronqué par Notion ; "
@@ -806,6 +847,7 @@ def _tool_bindings(
     return (
         _search_tool(settings, trace),
         _read_tool(settings, trace),
+        _update_tool(settings, trace),
     )
 
 
@@ -945,6 +987,367 @@ def _trace_search(
     if reason is not None:
         entry["reason"] = reason
     trace("Search", entry)
+
+
+# -- Tool ``update_page`` ------------------------------------------------------
+
+
+def _update_tool(settings: _Settings, trace: Trace) -> ToolBinding:
+    """Déclare ``update_page`` et son handler : un appel ne lève jamais."""
+
+    async def handle(
+        arguments: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        return await _update(settings, arguments, trace)
+
+    return ToolBinding(
+        spec=ToolSpec(
+            name="update_page",
+            description=_UPDATE_DESCRIPTION,
+            parameters=_UPDATE_PARAMETERS,
+        ),
+        handler=handle,
+    )
+
+
+def _update_mode(raw: object) -> str:
+    """Mode effectif : ``replace`` seulement sur demande explicite."""
+    if isinstance(raw, str) and raw.strip().lower() == "replace":
+        return "replace"
+    return "append"
+
+
+def _title_key(page: Mapping[str, Any]) -> str | None:
+    """Clé de la propriété dont ``type == "title"``, ou ``None``."""
+    properties = page.get("properties")
+    if isinstance(properties, dict):
+        for key, prop in properties.items():
+            if isinstance(prop, dict) and prop.get("type") == "title":
+                return key if isinstance(key, str) else None
+    return None
+
+
+def _page_brief(page: Mapping[str, Any]) -> dict[str, object]:
+    """La forme ``page`` rendue au modèle : identifiant, titre, URL."""
+    summary = _page_summary(page)
+    return {
+        "id": summary["id"],
+        "title": summary["title"],
+        "url": summary["url"],
+    }
+
+
+def _merge_page(
+    base: dict[str, object], page: object
+) -> dict[str, object]:
+    """Titre et URL rendus par un renommage, sans écraser par du vide."""
+    if not isinstance(page, dict):
+        return base
+    summary = dict(base)
+    if _text(page.get("id")):
+        summary["id"] = _text(page.get("id"))
+    if _title_key(page) is not None:
+        summary["title"] = _page_title(page)
+    if _text(page.get("url")):
+        summary["url"] = _text(page.get("url"))
+    return summary
+
+
+def _append_body(content: str) -> dict[str, object]:
+    """Corps exact de l'ajout : ``insert_content`` en fin de page."""
+    return {
+        "type": "insert_content",
+        "insert_content": {
+            "content": content,
+            "position": {"type": "end"},
+        },
+        "markdown_version": MARKDOWN_VERSION,
+    }
+
+
+def _rename_body(key: str, title: str) -> dict[str, object]:
+    """Corps exact du renommage, sur la propriété de titre découverte."""
+    return {
+        "properties": {
+            key: {
+                "title": [
+                    {"type": "text", "text": {"content": title}}
+                ]
+            }
+        }
+    }
+
+
+async def _patch(
+    settings: _Settings, path: str, body: Mapping[str, object]
+) -> tuple[int | None, object, str | None]:
+    """Un PATCH d'écriture, un seul essai : ``(statut, corps, raison)``.
+
+    Une panne de transport rend ``status=None`` et une raison ; un statut
+    d'erreur rend la raison ``HTTP n``. Le handler décide ensuite de la phrase.
+    """
+    try:
+        async with _client(settings, REQUEST_TIMEOUT) as client:
+            response = await client.patch(settings.base_url + path, json=body)
+    except asyncio.CancelledError:
+        raise
+    except httpx2.TimeoutException:
+        return None, None, "timeout"
+    except httpx2.RequestError as exc:
+        return None, None, type(exc).__name__
+    except Exception as exc:  # défense : le handler ne lève jamais
+        return None, None, type(exc).__name__
+
+    if response.status_code >= 400:
+        return response.status_code, None, f"HTTP {response.status_code}"
+    try:
+        parsed = response.json()
+    except (TypeError, ValueError):
+        return response.status_code, None, None
+    return response.status_code, parsed, None
+
+
+def _write_message(status: int | None, reason: str) -> str:
+    """Phrase française d'une écriture échouée, incertaine sur 503/504."""
+    if status is not None:
+        return _status_error(status, write=True)
+    if reason == "timeout":
+        return _TIMEOUT_MESSAGE
+    return _UNREACHABLE_MESSAGE
+
+
+def _partial_message(
+    title_failure: str | None, content_failure: str | None
+) -> str:
+    """Phrase d'un succès partiel : ce qui a réussi, ce qui a échoué."""
+    if title_failure and content_failure:
+        message = (
+            "Ni le titre ni le contenu n'ont pu être mis à jour. "
+            f"{title_failure} {content_failure}"
+        )
+    elif title_failure:
+        message = (
+            "Le contenu a été ajouté, mais le titre n'a pas pu être "
+            f"modifié. {title_failure}"
+        )
+    else:
+        message = (
+            "Le titre a été mis à jour, mais le contenu n'a pas pu être "
+            f"ajouté. {content_failure}"
+        )
+    if "relis" not in message.lower():
+        message += " Relis la page avant de réessayer."
+    return message
+
+
+async def _update(
+    settings: _Settings,
+    arguments: Mapping[str, object],
+    trace: Trace,
+) -> Mapping[str, object]:
+    """Ajoute du contenu, renomme, et dit clairement un succès partiel.
+
+    La page est lue d'abord pour découvrir la clé de sa propriété de titre et
+    rendre son identité. Le renommage et l'ajout sont deux écritures séparées,
+    tentées indépendamment ; aucune n'est rejouée. Le remplacement appartient
+    au ticket #117 : ``mode=replace`` est refusé sans aucune écriture.
+    """
+    started = asyncio.get_running_loop().time()
+    page_ref = _page_id(arguments.get("page"))
+    if page_ref is None:
+        _trace_update(trace, None, "append", started, reason="invalid page")
+        return _error(_INVALID_PAGE_MESSAGE)
+
+    mode = _update_mode(arguments.get("mode"))
+    if mode == "replace":
+        _trace_update(
+            trace, page_ref, mode, started, reason="replace refused"
+        )
+        return _error(_REPLACE_REFUSED_MESSAGE)
+
+    raw_title = arguments.get("title")
+    title = raw_title.strip() if isinstance(raw_title, str) else ""
+    raw_content = arguments.get("content")
+    content = (
+        raw_content
+        if isinstance(raw_content, str) and raw_content.strip()
+        else ""
+    )
+
+    try:
+        async with _client(settings, REQUEST_TIMEOUT) as client:
+            response = await client.get(
+                settings.base_url + f"/v1/pages/{page_ref}"
+            )
+    except asyncio.CancelledError:
+        raise
+    except httpx2.TimeoutException:
+        _trace_update(trace, page_ref, mode, started, reason="timeout")
+        return _error(_TIMEOUT_MESSAGE)
+    except httpx2.RequestError as exc:
+        _trace_update(
+            trace, page_ref, mode, started, reason=type(exc).__name__
+        )
+        return _error(_UNREACHABLE_MESSAGE)
+    except Exception as exc:  # défense : le handler ne lève jamais
+        _trace_update(
+            trace, page_ref, mode, started, reason=type(exc).__name__
+        )
+        return _error(_UNREACHABLE_MESSAGE)
+
+    if response.status_code >= 400:
+        _trace_update(
+            trace,
+            page_ref,
+            mode,
+            started,
+            reason=f"HTTP {response.status_code}",
+        )
+        return _error(_status_error(response.status_code))
+
+    try:
+        page = response.json()
+        if not isinstance(page, dict):
+            raise ValueError("unexpected page body")
+    except (TypeError, ValueError):
+        _trace_update(
+            trace, page_ref, mode, started, reason="unreadable body"
+        )
+        return _error(_UNREADABLE_MESSAGE)
+
+    summary = _page_brief(page)
+    key = _title_key(page)
+    title_updated = False
+    content_updated = False
+    title_failure: str | None = None
+    content_failure: str | None = None
+    title_reason: str | None = None
+    content_reason: str | None = None
+    warnings: list[object] = []
+
+    if title:
+        if key is None:
+            title_failure = _NO_TITLE_PROPERTY_MESSAGE
+            title_reason = "no title property"
+        else:
+            status, result, reason = await _patch(
+                settings,
+                f"/v1/pages/{page_ref}",
+                _rename_body(key, title),
+            )
+            if reason is None:
+                title_updated = True
+                summary = _merge_page(summary, result)
+            else:
+                title_failure = _write_message(status, reason)
+                title_reason = reason
+
+    if content:
+        status, result, reason = await _patch(
+            settings,
+            f"/v1/pages/{page_ref}/markdown",
+            _append_body(content),
+        )
+        if reason is None:
+            content_updated = True
+            if isinstance(result, dict) and isinstance(
+                result.get("warnings"), list
+            ):
+                warnings = result["warnings"]
+        else:
+            content_failure = _write_message(status, reason)
+            content_reason = reason
+
+    chars = (len(title) if title_updated else 0) + (
+        len(content) if content_updated else 0
+    )
+    flags: dict[str, object] = {
+        "page": summary,
+        "mode": mode,
+        "title_updated": title_updated,
+        "content_updated": content_updated,
+        "warnings": warnings,
+    }
+
+    if title and content and (title_failure or content_failure):
+        reason = ", ".join(
+            entry
+            for entry in (title_reason, content_reason)
+            if entry is not None
+        )
+        _trace_update(
+            trace,
+            page_ref,
+            mode,
+            started,
+            title_updated=title_updated,
+            content_updated=content_updated,
+            chars=chars,
+            warnings=len(warnings),
+            reason=reason or "partial",
+        )
+        return {
+            "status": "error",
+            "message": _partial_message(title_failure, content_failure),
+            **flags,
+        }
+
+    failure = title_failure or content_failure
+    if failure is not None:
+        _trace_update(
+            trace,
+            page_ref,
+            mode,
+            started,
+            title_updated=title_updated,
+            content_updated=content_updated,
+            chars=chars,
+            warnings=len(warnings),
+            reason=title_reason or content_reason,
+        )
+        return _error(failure)
+
+    _trace_update(
+        trace,
+        page_ref,
+        mode,
+        started,
+        title_updated=title_updated,
+        content_updated=content_updated,
+        chars=chars,
+        warnings=len(warnings),
+    )
+    return {"status": "ok", **flags}
+
+
+def _trace_update(
+    trace: Trace,
+    page: str | None,
+    mode: str,
+    started: float,
+    *,
+    title_updated: bool = False,
+    content_updated: bool = False,
+    chars: int = 0,
+    warnings: int = 0,
+    reason: str | None = None,
+) -> None:
+    """Trace un ``update_page`` : jamais le contenu, jamais le jeton."""
+    entry: dict[str, object] = {
+        "page": page,
+        "mode": mode,
+        "title_updated": title_updated,
+        "content_updated": content_updated,
+        "chars": chars,
+        "warnings": warnings,
+        "duration_ms": round(
+            (asyncio.get_running_loop().time() - started) * 1000, 1
+        ),
+        "status": "error" if reason is not None else "ok",
+    }
+    if reason is not None:
+        entry["reason"] = reason
+    trace("UpdatePage", entry)
 
 
 def _status_error(status: int, *, write: bool = False) -> str:
