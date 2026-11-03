@@ -344,6 +344,13 @@ Le fragment de page renvoyé pour un résultat, accompagné de son titre et de s
 distingue d'une page lue en entier : c'est une matière à synthèse, pas une source complète.
 _Avoid_: Snippet, résumé, contenu, page
 
+### Notion
+
+**Page Notion**:
+Une page du workspace Notion, seule unité que le plugin `notion` lit et modifie. Une base de
+données ou une data source n'est pas une Page.
+_Avoid_: Note, fiche, document, page web
+
 ### Développement assisté
 
 Athena relaie vocalement le travail qu'opencode mène sur un projet : elle présente les
