@@ -242,8 +242,8 @@ bornés à 50), et annonce qu'il reste du contenu si la page est longue. Trace :
 INFO [plugins] ReadPage {"blocks": 20, "chars": N, "duration_ms": N, "limit": 20, "offset": 0, "page": "…", "plugin": "notion", "status": "ok", "total_blocks": 37, "truncated": false, "unknown_block_ids": []}
 ```
 
-Dites ensuite : « **La suite** ». Le Tool reçoit l'`offset` rendu par l'appel précédent
-(`next_offset`) et poursuit :
+Dites ensuite : « **La suite** ». Le Tool reçoit `offset` = `next_offset` de l'appel
+précédent et poursuit :
 
 ```
 INFO [plugins] ReadPage {"blocks": 17, "chars": N, "duration_ms": N, "limit": 20, "offset": 20, "page": "…", "plugin": "notion", "status": "ok", "total_blocks": 37, "truncated": false, "unknown_block_ids": []}
@@ -434,6 +434,10 @@ Le résultat rend l'identifiant, le titre et l'URL de la page restaurée. Une pa
 - Les bases de données, data sources, vues, commentaires, déplacements, duplications et
   pièces jointes sont hors périmètre. Une page de base reste une page : on peut la lire et
   lire ses propriétés.
+- Le plugin ne pousse **aucun Événement** : c'est une intégration à la demande, pas un
+  Watcher ni une Source. Pendant une **Annonce proactive**, l'instruction peut être présente
+  mais **aucun Tool Notion n'est déclaré** : un contenu externe ne peut donc pas déclencher
+  une écriture.
 
 ## 5. Risques de plateforme
 
@@ -455,6 +459,12 @@ Le résultat rend l'identifiant, le titre et l'URL de la page restaurée. Une pa
   rejoué automatiquement.
 - **Pas de retry, pas de budget élastique** : 10 s par appel. Un `429`, un `529`, un `5xx`
   ou un délai deviennent une phrase ; c'est à vous de redemander.
+- **Markdown** : en écriture, le sous-ensemble garanti est titres 1 à 4, paragraphes,
+  listes à puces et numérotées, cases à cocher, citations, blocs de code avec un nom de
+  langage court, gras/italique/barré/code en ligne, liens, tableaux GFM (pipe tables) et
+  balises `<columns>` / `<column ratio="…">`. En lecture, tout ce que Notion rend en `v2`
+  est transmis tel quel. Limites assumées : 2 000 caractères par texte enrichi, 100 blocs
+  par ajout, 5 000 blocs à la création ; au-delà, Notion refuse plutôt que de couper.
 
 ## 6. Dépannage
 
