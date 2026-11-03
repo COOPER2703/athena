@@ -48,14 +48,16 @@ qu'avec `ATHENA_DEBUG_DECISIONS=1`.
    - **Lire le contenu** — lecture des pages, des blocs et des propriétés ;
    - **Mettre à jour le contenu** — ajout, remplacement, renommage, corbeille et
      restauration ;
-   - **Insérer le contenu** — création de pages et ajout de contenu.
+   - **Insérer le contenu** — création de pages.
 4. Enregistrez, puis copiez le **jeton d'intégration interne**. Il ne s'affiche qu'une fois :
    il devient `ATHENA_PLUGIN_NOTION_TOKEN` à l'étape 2. Ne le collez ni dans `plugins.json`,
    ni dans un ticket, ni dans un rapport.
 
-Une connexion sans ces trois capacités peut tout de même démarrer : la première action qui
-demande le droit manquant rend une phrase `403` (voir le dépannage). Le partage d'une page,
-lui, est indépendant des capacités : voir ci-dessous.
+Une connexion sans les droits d'**écriture** peut tout de même démarrer : la première action
+qui demande le droit manquant rend une phrase `403` (voir le dépannage). Sans **Lire le
+contenu**, en revanche, la sonde de la page racine échoue au démarrage et le serveur s'arrête
+en nommant `parent_page_id`. Le partage d'une page, lui, est indépendant des capacités : voir
+ci-dessous.
 
 ### 1.2 Créer la page racine et la partager
 
@@ -81,8 +83,8 @@ https://www.notion.so/Athena-bac-a-sable-0123456789abcdef0123456789abcdef
 
 L'identifiant est le **dernier segment de 32 caractères hexadécimaux** (ici
 `0123456789abcdef0123456789abcdef`). Le plugin accepte un identifiant seul (avec ou sans
-tirets) ou l'URL entière, mais `parent_page_id` attend cette valeur : copiez-la telle quelle
-dans l'étape 2.
+tirets) ou l'URL entière, et `parent_page_id` accepte l'un comme l'autre. Cet exemple copie
+l'identifiant, la forme la plus courte.
 
 ## 2. Activer le plugin dans Athena
 
@@ -479,7 +481,7 @@ Le résultat rend l'identifiant, le titre et l'URL de la page restaurée. Une pa
 | `503` / `504` sur une écriture | Écriture **incertaine** : elle peut avoir été enregistrée | **Relire la page** avant de réessayer ; ne pas rejouer à l'aveugle. |
 | Délai de 10 s ou réseau muet | Notion injoignable | La phrase invite à réessayer plus tard ; aucun retry automatique. |
 | Le serveur démarre sans les Tools Notion | Notion injoignable ou jeton refusé au démarrage | État `failed` dans la Console, retente toutes les 5 s ; rouvrir une Session quand l'état passe `activated`. |
-| Le serveur refuse de démarrer et nomme `parent_page_id` | Page parente introuvable ou non partagée : défaut de **configuration** | Partager la page avec la connexion, puis redémarrer. Ce n'est pas une panne réessayable (code de sortie 2). |
+| Le serveur refuse de démarrer et nomme `parent_page_id` | Page parente introuvable ou non partagée, ou capacité **Lire le contenu** absente : défaut de **configuration** | Partager la page avec la connexion et vérifier la capacité **Lire le contenu**, puis redémarrer. Ce n'est pas une panne réessayable (code de sortie 2). |
 | Le serveur refuse de démarrer et nomme `ATHENA_PLUGIN_NOTION_TOKEN` | Secret requis absent | Renseigner la variable (environnement ou `.env`), puis redémarrer (code de sortie 2). |
 | Les Tools n'apparaissent pas dans une Session déjà ouverte | Déclarations figées à l'ouverture | Ouvrir une **nouvelle** Session (Entrée). |
 | `search_pages` ne trouve pas une page | Recherche par titre seulement, ou page non partagée | Donner l'URL ou l'identifiant de la page ; vérifier le partage. |
