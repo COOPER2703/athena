@@ -18,7 +18,7 @@ import asyncio
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping, Protocol
 from urllib.parse import urlsplit
 
 import httpx2
@@ -39,18 +39,22 @@ DEFAULT_BASE_URL = "https://api.notion.com"
 NOTION_VERSION = "2026-03-11"
 # Version Markdown demandée explicitement sur les endpoints Markdown.
 MARKDOWN_VERSION = "v2"
-# Budget HTTP fixe : un seul essai, aucun retry automatique (spec #111).
+# Budget HTTP fixe : un seul essai, aucun retry automatique.
 REQUEST_TIMEOUT = 10.0
 
-# Taille de page de ``POST /v1/search`` (spec #111).
+# Taille de page de ``POST /v1/search``.
 SEARCH_PAGE_SIZE = 10
+
+# Sentinelle rendue quand Notion ne donne aucun titre à une page.
+UNTITLED_TITLE = "(sans titre)"
 
 _SEARCH_DESCRIPTION = (
     "Cherche des pages Notion par titre et rend les candidats avec leur URL."
 )
 
 _READ_DESCRIPTION = (
-    "Lit une page Notion en Markdown, par blocs, avec ses propriétés."
+    "Lit une page Notion en Markdown, par blocs, avec ses propriétés ; "
+    "filtre éventuellement les paragraphes contenant un mot."
 )
 
 # Blocs de premier niveau rendus par appel : défaut 20, bornes 1..50.
@@ -131,12 +135,12 @@ _UPDATE_PARAMETERS: Mapping[str, object] = {
     "required": ["page"],
 }
 
-# Instruction d'usage posée dans le prompt de toute Session (spec #111,
-# ticket #120) : quand appeler chaque Tool, ce qui exige confirmation, le
-# sous-ensemble Markdown garanti et les limites assumées.
+# Instruction d'usage posée dans le prompt de toute Session : quand appeler
+# chaque Tool, ce qui exige confirmation, le sous-ensemble Markdown garanti et
+# les limites assumées.
 INSTRUCTION = (
     "Les Tools Notion ne voient que les pages partagées avec la connexion, "
-    "et rien d'autre ; les bases de données et les sources de données sont "
+    "et rien d'autre ; les bases de données et les data sources sont "
     "hors périmètre, et seul le titre s'écrit parmi les propriétés. "
     "N'invente jamais un identifiant ni une URL de page : n'utilise que ceux "
     "rendus par `search_pages` ou donnés par l'utilisateur.\n"
@@ -186,9 +190,10 @@ _CAPABILITY_MESSAGE = (
 _NOT_FOUND_MESSAGE = (
     "Page introuvable ou non partagée avec la connexion Notion."
 )
+_RETRY_SIMPLER = "Réessaie avec un contenu plus simple."
 _VALIDATION_MESSAGE = (
     "Notion a refusé la demande (contenu invalide ou page trop volumineuse). "
-    "Réessaie avec un contenu plus simple."
+    + _RETRY_SIMPLER
 )
 _RATE_MESSAGE = (
     "Notion limite le débit des requêtes. Réessaie dans quelques instants."
@@ -236,7 +241,16 @@ _TRUNCATED_NOTE = (
 )
 _UNKNOWN_NOTE = "Certains blocs de la page n'ont pas pu être lus."
 
-Trace = Callable[..., None]
+class Trace(Protocol):
+    """Contrat de ``PluginContext.trace`` : genre, payload, niveau nommé."""
+
+    def __call__(
+        self,
+        kind: str,
+        payload: Mapping[str, object] | None = None,
+        *,
+        level: str = "info",
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,7 +412,15 @@ async def _probe(settings: _Settings, trace: Trace) -> None:
                 "introuvable ou n'est pas partagé avec la connexion Notion ; "
                 "partage la page avec la connexion, puis redémarre"
             )
-        if page.status_code >= 400:
+        if page.status_code >= 500:
+            # La page parente répond mal, mais le plugin reste utilisable :
+            # chaque Tool dira la vérité au moment de l'appel.
+            trace(
+                "ProbeDegraded",
+                {"status": page.status_code},
+                level="warning",
+            )
+        elif page.status_code >= 400:
             _trace_probe_failed(trace, status=page.status_code)
             raise PluginUnavailable(
                 f"notion probe failed: the parent page returned "
@@ -438,7 +460,7 @@ def _text(value: object) -> str:
 
 
 def _page_title(page: Mapping[str, Any]) -> str:
-    """Titre de la propriété ``type == "title"``, ou ``(sans titre)``."""
+    """Titre de la propriété ``type == "title"``, ou ``UNTITLED_TITLE``."""
     properties = page.get("properties")
     if isinstance(properties, dict):
         for prop in properties.values():
@@ -454,16 +476,40 @@ def _page_title(page: Mapping[str, Any]) -> str:
             ).strip()
             if text:
                 return text
-    return "(sans titre)"
+    return UNTITLED_TITLE
 
 
 def _page_summary(page: Mapping[str, Any]) -> dict[str, object]:
-    """Projette un objet page sur la forme rendue au modèle."""
+    """Projette un objet page sur la forme complète rendue au modèle."""
     return {
         "id": _text(page.get("id")),
         "title": _page_title(page),
         "url": _text(page.get("url")),
         "last_edited_time": _text(page.get("last_edited_time")),
+    }
+
+
+def _page_brief(
+    page: Mapping[str, Any],
+    *,
+    fallback_id: str = "",
+    fallback_title: str = "",
+    fallback_url: str = "",
+) -> dict[str, object]:
+    """Forme ``page`` réduite à l'identité, avec replis explicites.
+
+    Un corps partiel (création sans propriété, renommage sans URL) ne doit pas
+    effacer ce que l'appelant savait déjà : chaque champ absent retombe sur son
+    repli.
+    """
+    summary = _page_summary(page)
+    title = str(summary["title"])
+    if title == UNTITLED_TITLE and fallback_title:
+        title = fallback_title
+    return {
+        "id": str(summary["id"]) or fallback_id,
+        "title": title,
+        "url": str(summary["url"]) or fallback_url,
     }
 
 
@@ -476,6 +522,12 @@ _FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
 _LIST_LINE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
 # Titre Markdown : un à six dièses en début de ligne.
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s")
+# Citation : jamais un paragraphe pour le filtre par mot.
+_BLOCKQUOTE = re.compile(r"^\s*>")
+# Séparateur horizontal (``---``, ``***``, ``___``), jamais un paragraphe.
+_THEMATIC_BREAK = re.compile(
+    r"^\s{0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$"
+)
 # Balise Notion ouvrant une région à garder entière (colonnes, tableau, etc.).
 _CONTAINER_TAG = re.compile(r"^\s*<([a-z][a-z-]*)", re.IGNORECASE)
 _CONTAINER_TAGS = frozenset(
@@ -493,12 +545,56 @@ _CONTAINER_TAGS = frozenset(
 
 def _starts_block(line: str) -> bool:
     """Vrai si la ligne ouvre un bloc de premier niveau."""
-    if _FENCE.match(line) or _HEADING.match(line):
+    if (
+        _FENCE.match(line)
+        or _HEADING.match(line)
+        or _BLOCKQUOTE.match(line)
+        or _THEMATIC_BREAK.match(line)
+    ):
         return True
     if _LIST_LINE.match(line) or line.lstrip().startswith("|"):
         return True
     match = _CONTAINER_TAG.match(line)
     return bool(match and match.group(1).lower() in _CONTAINER_TAGS)
+
+
+def _indent(line: str) -> int:
+    """Largeur de l'indentation de tête, en caractères."""
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def _list_run_end(lines: list[str], start: int) -> int:
+    """Fin d'une suite de listes : une ligne non indentée la termine.
+
+    Les continuations et les listes imbriquées, plus indentées que le premier
+    item, restent dans la suite et seront rattachées à leur item.
+    """
+    base = _indent(lines[start])
+    index = start + 1
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            break
+        if _LIST_LINE.match(line) or _indent(line) > base:
+            index += 1
+            continue
+        break
+    return index
+
+
+def _list_item_ranges(
+    lines: list[str], start: int, end: int
+) -> list[tuple[int, int]]:
+    """Bornes d'une suite de listes, un bloc par item de premier niveau."""
+    base = _indent(lines[start])
+    bounds: list[tuple[int, int]] = []
+    item_start = start
+    for index in range(start + 1, end):
+        if _LIST_LINE.match(lines[index]) and _indent(lines[index]) <= base:
+            bounds.append((item_start, index))
+            item_start = index
+    bounds.append((item_start, end))
+    return bounds
 
 
 def _fence_block(lines: list[str], start: int) -> int:
@@ -549,10 +645,11 @@ def _container_block(lines: list[str], start: int, tag: str) -> int:
 def _markdown_ranges(markdown: str) -> list[tuple[int, int]]:
     """Bornes des blocs de premier niveau dans le texte Markdown d'origine.
 
-    Un bloc de code, un tableau GFM, une région de balises Notion et une suite
-    de lignes de liste restent entiers ; un titre ou un paragraphe est un bloc.
-    Les bornes servent à rendre la tranche d'origine, donc les séparateurs de
-    Notion (un seul saut de ligne entre deux blocs en ``v2``) sont préservés.
+    Un bloc de code, un tableau GFM et une région de balises Notion restent
+    entiers ; chaque item de liste de premier niveau est un bloc, avec ses
+    continuations indentées ; un titre ou un paragraphe est un bloc. Les bornes
+    servent à rendre la tranche d'origine, donc les séparateurs de Notion (un
+    seul saut de ligne entre deux blocs en ``v2``) sont préservés.
     """
     lines = markdown.splitlines()
     offsets: list[int] = []
@@ -581,10 +678,19 @@ def _markdown_ranges(markdown: str) -> list[tuple[int, int]]:
         ):
             end = _container_block(lines, index, match.group(1))
         elif _LIST_LINE.match(line):
+            end = _list_run_end(lines, index)
+            for item_start, item_end in _list_item_ranges(
+                lines, index, end
+            ):
+                stop = offsets[item_end - 1] + len(lines[item_end - 1])
+                ranges.append((offsets[item_start], stop))
+            index = end
+            continue
+        elif _BLOCKQUOTE.match(line):
             end = index + 1
-            while end < len(lines) and _LIST_LINE.match(lines[end]):
+            while end < len(lines) and _BLOCKQUOTE.match(lines[end]):
                 end += 1
-        elif _HEADING.match(line):
+        elif _THEMATIC_BREAK.match(line) or _HEADING.match(line):
             end = index + 1
         else:
             end = index + 1
@@ -624,11 +730,18 @@ def _is_heading(block: str) -> bool:
 def _is_paragraph(block: str) -> bool:
     """Vrai pour un paragraphe de premier niveau seulement.
 
-    Un titre, une liste, un tableau, un bloc de code et une région de balises
-    Notion ne sont jamais des paragraphes : le filtre par mot les ignore.
+    Un titre, une liste, une citation, un séparateur horizontal, un tableau, un
+    bloc de code et une région de balises Notion ne sont jamais des
+    paragraphes : le filtre par mot les ignore.
     """
     first = block.split("\n", 1)[0]
-    if _FENCE.match(first) or _HEADING.match(first) or _LIST_LINE.match(first):
+    if (
+        _FENCE.match(first)
+        or _HEADING.match(first)
+        or _LIST_LINE.match(first)
+        or _BLOCKQUOTE.match(first)
+        or _THEMATIC_BREAK.match(first)
+    ):
         return False
     if first.lstrip().startswith("|"):
         return False
@@ -686,6 +799,18 @@ def _property_text(prop: Mapping[str, Any]) -> str:
         if not isinstance(option, dict):
             return ""
         return _text(option.get("name")).strip()
+    if kind == "multi_select":
+        return _multi_select_text(prop.get("multi_select"))
+    if kind == "relation":
+        return _relation_text(prop.get("relation"))
+    if kind == "rollup":
+        rollup = prop.get("rollup")
+        return _rollup_text(rollup) if isinstance(rollup, dict) else ""
+    if kind == "files":
+        return _files_text(prop.get("files"))
+    if kind == "unique_id":
+        unique = prop.get("unique_id")
+        return _unique_id_text(unique) if isinstance(unique, dict) else ""
     if kind == "date":
         date = prop.get("date")
         if not isinstance(date, dict):
@@ -736,6 +861,75 @@ def _people_text(people: object) -> str:
         if isinstance(person, dict)
     ]
     return ", ".join(name for name in names if name)
+
+
+def _multi_select_text(options: object) -> str:
+    """Noms des options choisies, séparés par une virgule."""
+    if not isinstance(options, list):
+        return ""
+    names = [
+        _text(option.get("name")).strip()
+        for option in options
+        if isinstance(option, dict)
+    ]
+    return ", ".join(name for name in names if name)
+
+
+def _relation_text(relations: object) -> str:
+    """Nom de la page liée quand Notion le donne, sinon son identifiant."""
+    if not isinstance(relations, list):
+        return ""
+    labels: list[str] = []
+    for relation in relations:
+        if not isinstance(relation, dict):
+            continue
+        label = _text(relation.get("name")).strip() or _text(
+            relation.get("id")
+        ).strip()
+        if label:
+            labels.append(label)
+    return ", ".join(labels)
+
+
+def _rollup_text(rollup: Mapping[str, Any]) -> str:
+    """Valeur calculée d'un rollup, selon le type que Notion rend."""
+    kind = rollup.get("type")
+    if kind == "number":
+        return _number_text(rollup.get("number"))
+    if kind == "date":
+        date = rollup.get("date")
+        return _text(date.get("start")).strip() if isinstance(date, dict) else ""
+    if kind == "array":
+        items = rollup.get("array")
+        if not isinstance(items, list):
+            return ""
+        values = [
+            _property_text(item) if isinstance(item, dict) else ""
+            for item in items
+        ]
+        return ", ".join(value for value in values if value)
+    return _number_text(rollup.get("number"))
+
+
+def _files_text(files: object) -> str:
+    """Noms des fichiers joints, séparés par une virgule."""
+    if not isinstance(files, list):
+        return ""
+    names = [
+        _text(file.get("name")).strip()
+        for file in files
+        if isinstance(file, dict)
+    ]
+    return ", ".join(name for name in names if name)
+
+
+def _unique_id_text(unique: Mapping[str, Any]) -> str:
+    """Identifiant unique Notion : préfixe et numéro, ou le numéro seul."""
+    number = unique.get("number")
+    if isinstance(number, bool) or not isinstance(number, int):
+        return ""
+    prefix = _text(unique.get("prefix")).strip()
+    return f"{prefix}-{number}" if prefix else str(number)
 
 
 def _rich_text(items: object) -> str:
@@ -830,32 +1024,16 @@ async def _read(
 
     try:
         async with _client(settings, REQUEST_TIMEOUT) as client:
-            page_response = await client.get(
-                settings.base_url + f"/v1/pages/{page}"
+            page_object = await _call(
+                client, "GET", settings.base_url + f"/v1/pages/{page}"
             )
-            if page_response.status_code >= 400:
-                _trace_read(
-                    trace,
-                    page,
-                    offset,
-                    limit,
-                    started,
-                    query=query,
-                    reason=f"HTTP {page_response.status_code}",
-                )
-                return _error(_status_error(page_response.status_code))
-            markdown_response = await client.get(
+            markdown_object = await _call(
+                client,
+                "GET",
                 settings.base_url + f"/v1/pages/{page}/markdown",
                 params={"markdown_version": MARKDOWN_VERSION},
             )
-    except asyncio.CancelledError:
-        raise
-    except httpx2.TimeoutException:
-        _trace_read(
-            trace, page, offset, limit, started, query=query, reason="timeout"
-        )
-        return _error(_TIMEOUT_MESSAGE)
-    except httpx2.RequestError as exc:
+    except _ActionFailed as failure:
         _trace_read(
             trace,
             page,
@@ -863,43 +1041,11 @@ async def _read(
             limit,
             started,
             query=query,
-            reason=type(exc).__name__,
+            reason=failure.reason,
         )
-        return _error(_UNREACHABLE_MESSAGE)
-    except Exception as exc:  # défense : le handler ne lève jamais
-        _trace_read(
-            trace,
-            page,
-            offset,
-            limit,
-            started,
-            query=query,
-            reason=type(exc).__name__,
-        )
-        return _error(_UNREACHABLE_MESSAGE)
+        return _error(failure.message)
 
-    if markdown_response.status_code >= 400:
-        _trace_read(
-            trace,
-            page,
-            offset,
-            limit,
-            started,
-            query=query,
-            reason=f"HTTP {markdown_response.status_code}",
-        )
-        return _error(_status_error(markdown_response.status_code))
-
-    try:
-        page_object = page_response.json()
-        markdown_object = markdown_response.json()
-        if (
-            not isinstance(page_object, dict)
-            or not isinstance(markdown_object, dict)
-            or not isinstance(markdown_object.get("markdown"), str)
-        ):
-            raise ValueError("unexpected read body")
-    except (TypeError, ValueError):
+    if not isinstance(markdown_object.get("markdown"), str):
         _trace_read(
             trace,
             page,
@@ -1019,7 +1165,7 @@ def _trace_read(
 def _tool_bindings(
     settings: _Settings, trace: Trace
 ) -> tuple[ToolBinding, ...]:
-    """Les Tools du plugin ; les tickets suivants ajoutent une ligne ici."""
+    """Les six Tools de page du plugin, déclarés à chaque Connexion Live."""
     return (
         _search_tool(settings, trace),
         _create_tool(settings, trace),
@@ -1049,7 +1195,7 @@ def _search_tool(settings: _Settings, trace: Trace) -> ToolBinding:
 
 
 def _search_body(query: str, cursor: object) -> dict[str, object]:
-    """Corps exact de ``POST /v1/search`` (spec #111)."""
+    """Corps exact de ``POST /v1/search`` : filtre page, tri, curseur."""
     body: dict[str, object] = {
         "query": query,
         "filter": {"property": "object", "value": "page"},
@@ -1097,32 +1243,13 @@ async def _search(
     started = asyncio.get_running_loop().time()
     try:
         async with _client(settings, REQUEST_TIMEOUT) as client:
-            response = await client.post(
-                settings.base_url + "/v1/search", json=body
+            response = await _call(
+                client, "POST", settings.base_url + "/v1/search", body=body
             )
-    except asyncio.CancelledError:
-        raise
-    except httpx2.TimeoutException:
-        _trace_search(trace, query, started, reason="timeout")
-        return _error(_TIMEOUT_MESSAGE)
-    except httpx2.RequestError as exc:
-        _trace_search(trace, query, started, reason=type(exc).__name__)
-        return _error(_UNREACHABLE_MESSAGE)
-    except Exception as exc:  # défense : le handler ne lève jamais
-        _trace_search(trace, query, started, reason=type(exc).__name__)
-        return _error(_UNREACHABLE_MESSAGE)
-
-    if response.status_code >= 400:
-        _trace_search(
-            trace,
-            query,
-            started,
-            reason=f"HTTP {response.status_code}",
-        )
-        return _error(_status_error(response.status_code))
-
-    try:
-        results, has_more, next_cursor = _search_page(response.json())
+        results, has_more, next_cursor = _search_page(response)
+    except _ActionFailed as failure:
+        _trace_search(trace, query, started, reason=failure.reason)
+        return _error(failure.message)
     except (TypeError, ValueError):
         _trace_search(trace, query, started, reason="unreadable body")
         return _error(_UNREADABLE_MESSAGE)
@@ -1206,30 +1333,18 @@ def _title_key(page: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _page_brief(page: Mapping[str, Any]) -> dict[str, object]:
-    """La forme ``page`` rendue au modèle : identifiant, titre, URL."""
-    summary = _page_summary(page)
-    return {
-        "id": summary["id"],
-        "title": summary["title"],
-        "url": summary["url"],
-    }
-
-
 def _merge_page(
     base: dict[str, object], page: object
 ) -> dict[str, object]:
     """Titre et URL rendus par un renommage, sans écraser par du vide."""
     if not isinstance(page, dict):
         return base
-    summary = dict(base)
-    if _text(page.get("id")):
-        summary["id"] = _text(page.get("id"))
-    if _title_key(page) is not None:
-        summary["title"] = _page_title(page)
-    if _text(page.get("url")):
-        summary["url"] = _text(page.get("url"))
-    return summary
+    return _page_brief(
+        page,
+        fallback_id=str(base.get("id", "")),
+        fallback_title=str(base.get("title", "")),
+        fallback_url=str(base.get("url", "")),
+    )
 
 
 def _append_body(content: str) -> dict[str, object]:
@@ -1269,63 +1384,18 @@ def _rename_body(key: str, title: str) -> dict[str, object]:
     }
 
 
-async def _patch(
-    settings: _Settings, path: str, body: Mapping[str, object]
-) -> tuple[int | None, object, str | None]:
-    """Un PATCH d'écriture, un seul essai : ``(statut, corps, raison)``.
-
-    Une panne de transport rend ``status=None`` et une raison ; un statut
-    d'erreur rend la raison ``HTTP n``. Le handler décide ensuite de la phrase.
-    """
-    try:
-        async with _client(settings, REQUEST_TIMEOUT) as client:
-            response = await client.patch(settings.base_url + path, json=body)
-    except asyncio.CancelledError:
-        raise
-    except httpx2.TimeoutException:
-        return None, None, "timeout"
-    except httpx2.RequestError as exc:
-        return None, None, type(exc).__name__
-    except Exception as exc:  # défense : le handler ne lève jamais
-        return None, None, type(exc).__name__
-
-    if response.status_code >= 400:
-        return response.status_code, None, f"HTTP {response.status_code}"
-    try:
-        parsed = response.json()
-    except (TypeError, ValueError):
-        return response.status_code, None, None
-    return response.status_code, parsed, None
-
-
-def _write_message(status: int | None, reason: str) -> str:
-    """Phrase française d'une écriture échouée, incertaine sur 503/504."""
-    if status is not None:
-        return _status_error(status, write=True)
-    if reason == "timeout":
-        return _TIMEOUT_MESSAGE
-    return _UNREACHABLE_MESSAGE
-
-
-def _replace_message(status: int | None, reason: str) -> str:
-    """Phrase d'un remplacement échoué : un 400 est le refus de Notion.
-
-    Un 400 couvre la protection d'une sous-page ou d'une base enfant, mais
-    aussi un Markdown invalide ou une page trop volumineuse : la phrase nomme
-    les trois sans affirmer lequel s'applique.
-    """
-    if status == 400:
-        return _REPLACE_REFUSED_BY_NOTION_MESSAGE
-    return _write_message(status, reason)
-
-
 def _partial_message(
     title_failure: str | None,
     content_failure: str | None,
     *,
     mode: str = "append",
+    uncertain: bool = False,
 ) -> str:
-    """Phrase d'un succès partiel : ce qui a réussi, ce qui a échoué."""
+    """Phrase d'un succès partiel : ce qui a réussi, ce qui a échoué.
+
+    ``uncertain`` vient de l'appelant, jamais d'une inspection de la phrase :
+    une écriture 503/504 porte déjà l'invitation à relire.
+    """
     verb = "remplacé" if mode == "replace" else "ajouté"
     if title_failure and content_failure:
         message = (
@@ -1342,7 +1412,7 @@ def _partial_message(
             "Le titre a été mis à jour, mais le contenu n'a pas pu être "
             f"{verb}. {content_failure}"
         )
-    if "relis" not in message.lower():
+    if not uncertain:
         message += " Relis la page avant de réessayer."
     return message
 
@@ -1392,44 +1462,14 @@ async def _update(
 
     try:
         async with _client(settings, REQUEST_TIMEOUT) as client:
-            response = await client.get(
-                settings.base_url + f"/v1/pages/{page_ref}"
+            page = await _call(
+                client, "GET", settings.base_url + f"/v1/pages/{page_ref}"
             )
-    except asyncio.CancelledError:
-        raise
-    except httpx2.TimeoutException:
-        _trace_update(trace, page_ref, mode, started, reason="timeout")
-        return _error(_TIMEOUT_MESSAGE)
-    except httpx2.RequestError as exc:
+    except _ActionFailed as failure:
         _trace_update(
-            trace, page_ref, mode, started, reason=type(exc).__name__
+            trace, page_ref, mode, started, reason=failure.reason
         )
-        return _error(_UNREACHABLE_MESSAGE)
-    except Exception as exc:  # défense : le handler ne lève jamais
-        _trace_update(
-            trace, page_ref, mode, started, reason=type(exc).__name__
-        )
-        return _error(_UNREACHABLE_MESSAGE)
-
-    if response.status_code >= 400:
-        _trace_update(
-            trace,
-            page_ref,
-            mode,
-            started,
-            reason=f"HTTP {response.status_code}",
-        )
-        return _error(_status_error(response.status_code))
-
-    try:
-        page = response.json()
-        if not isinstance(page, dict):
-            raise ValueError("unexpected page body")
-    except (TypeError, ValueError):
-        _trace_update(
-            trace, page_ref, mode, started, reason="unreadable body"
-        )
-        return _error(_UNREADABLE_MESSAGE)
+        return _error(failure.message)
 
     summary = _page_brief(page)
     key = _title_key(page)
@@ -1439,6 +1479,8 @@ async def _update(
     content_failure: str | None = None
     title_reason: str | None = None
     content_reason: str | None = None
+    title_uncertain = False
+    content_uncertain = False
     warnings: list[object] = []
 
     if title:
@@ -1446,17 +1488,21 @@ async def _update(
             title_failure = _NO_TITLE_PROPERTY_MESSAGE
             title_reason = "no title property"
         else:
-            status, result, reason = await _patch(
-                settings,
-                f"/v1/pages/{page_ref}",
-                _rename_body(key, title),
-            )
-            if reason is None:
+            try:
+                async with _client(settings, REQUEST_TIMEOUT) as client:
+                    result = await _call(
+                        client,
+                        "PATCH",
+                        settings.base_url + f"/v1/pages/{page_ref}",
+                        body=_rename_body(key, title),
+                        write=True,
+                    )
                 title_updated = True
                 summary = _merge_page(summary, result)
-            else:
-                title_failure = _write_message(status, reason)
-                title_reason = reason
+            except _ActionFailed as failure:
+                title_failure = failure.message
+                title_reason = failure.reason
+                title_uncertain = failure.status in (503, 504)
 
     if content:
         body = (
@@ -1464,24 +1510,25 @@ async def _update(
             if mode == "replace"
             else _append_body(content)
         )
-        status, result, reason = await _patch(
-            settings,
-            f"/v1/pages/{page_ref}/markdown",
-            body,
-        )
-        if reason is None:
+        try:
+            async with _client(settings, REQUEST_TIMEOUT) as client:
+                result = await _call(
+                    client,
+                    "PATCH",
+                    settings.base_url + f"/v1/pages/{page_ref}/markdown",
+                    body=body,
+                    write=True,
+                )
             content_updated = True
-            if isinstance(result, dict) and isinstance(
-                result.get("warnings"), list
-            ):
+            if isinstance(result.get("warnings"), list):
                 warnings = result["warnings"]
-        else:
-            content_failure = (
-                _replace_message(status, reason)
-                if mode == "replace"
-                else _write_message(status, reason)
-            )
-            content_reason = reason
+        except _ActionFailed as failure:
+            if mode == "replace" and failure.status == 400:
+                content_failure = _REPLACE_REFUSED_BY_NOTION_MESSAGE
+            else:
+                content_failure = failure.message
+            content_reason = failure.reason
+            content_uncertain = failure.status in (503, 504)
 
     chars = (len(title) if title_updated else 0) + (
         len(content) if content_updated else 0
@@ -1508,13 +1555,16 @@ async def _update(
             title_updated=title_updated,
             content_updated=content_updated,
             chars=chars,
-            warnings=len(warnings),
+            warnings=_warning_codes(warnings),
             reason=reason or "partial",
         )
         return {
             "status": "error",
             "message": _partial_message(
-                title_failure, content_failure, mode=mode
+                title_failure,
+                content_failure,
+                mode=mode,
+                uncertain=title_uncertain or content_uncertain,
             ),
             **flags,
         }
@@ -1529,7 +1579,7 @@ async def _update(
             title_updated=title_updated,
             content_updated=content_updated,
             chars=chars,
-            warnings=len(warnings),
+            warnings=_warning_codes(warnings),
             reason=title_reason or content_reason,
         )
         return _error(failure)
@@ -1542,9 +1592,21 @@ async def _update(
         title_updated=title_updated,
         content_updated=content_updated,
         chars=chars,
-        warnings=len(warnings),
+        warnings=_warning_codes(warnings),
     )
     return {"status": "ok", **flags}
+
+
+def _warning_codes(warnings: list[object]) -> list[str]:
+    """Codes Notion seuls : un ``message`` peut citer le contenu de la page."""
+    codes: list[str] = []
+    for warning in warnings:
+        if not isinstance(warning, dict):
+            continue
+        code = _text(warning.get("code")).strip()
+        if code:
+            codes.append(code)
+    return codes
 
 
 def _trace_update(
@@ -1556,17 +1618,19 @@ def _trace_update(
     title_updated: bool = False,
     content_updated: bool = False,
     chars: int = 0,
-    warnings: int = 0,
+    warnings: list[str] | None = None,
     reason: str | None = None,
 ) -> None:
     """Trace un ``update_page`` : jamais le contenu, jamais le jeton."""
+    codes = list(warnings or ())
     entry: dict[str, object] = {
         "page": page,
         "mode": mode,
         "title_updated": title_updated,
         "content_updated": content_updated,
         "chars": chars,
-        "warnings": warnings,
+        "warnings": codes,
+        "warnings_count": len(codes),
         "duration_ms": round(
             (asyncio.get_running_loop().time() - started) * 1000, 1
         ),
@@ -1614,12 +1678,15 @@ BLOCKS_PAGE_SIZE = 100
 
 
 class _ActionFailed(Exception):
-    """Échec d'un appel : porte la phrase française et le motif de la Trace."""
+    """Échec d'un appel : phrase française, motif de Trace et statut éventuel."""
 
-    def __init__(self, message: str, reason: str) -> None:
+    def __init__(
+        self, message: str, reason: str, status: int | None = None
+    ) -> None:
         super().__init__(reason)
         self.message = message
         self.reason = reason
+        self.status = status
 
 
 def _trash_tool(settings: _Settings, trace: Trace) -> ToolBinding:
@@ -1672,17 +1739,7 @@ def _trash_confirmation_message(title: str, child_pages: int) -> str:
     )
 
 
-def _page_reference(
-    page_body: Mapping[str, Any], page: str
-) -> dict[str, object]:
-    """La forme ``page`` rendue au modèle, l'identifiant résolu en secours."""
-    reference = _page_brief(page_body)
-    if not reference["id"]:
-        reference["id"] = page
-    return reference
-
-
-async def _notion_call(
+async def _call(
     client: httpx2.AsyncClient,
     method: str,
     url: str,
@@ -1694,7 +1751,8 @@ async def _notion_call(
     """Un appel REST Notion, ou une ``_ActionFailed`` portant la phrase.
 
     Un délai, un transport muet, un corps illisible et un statut d'erreur
-    deviennent tous une phrase française ; aucun essai n'est rejoué.
+    deviennent tous une phrase française ; aucun essai n'est rejoué. ``write``
+    ne change qu'une chose : un 503/504 y est une écriture incertaine.
     """
     try:
         response = await client.request(method, url, params=params, json=body)
@@ -1704,11 +1762,14 @@ async def _notion_call(
         raise _ActionFailed(_TIMEOUT_MESSAGE, "timeout") from exc
     except httpx2.RequestError as exc:
         raise _ActionFailed(_UNREACHABLE_MESSAGE, type(exc).__name__) from exc
+    except Exception as exc:  # défense : le handler ne lève jamais
+        raise _ActionFailed(_UNREACHABLE_MESSAGE, type(exc).__name__) from exc
 
     if response.status_code >= 400:
         raise _ActionFailed(
             _status_error(response.status_code, write=write),
             f"HTTP {response.status_code}",
+            response.status_code,
         )
     try:
         payload = response.json()
@@ -1723,9 +1784,7 @@ async def _page_object(
     client: httpx2.AsyncClient, settings: _Settings, page: str
 ) -> dict[str, object]:
     """``GET /v1/pages/{id}`` : titre, URL et propriétés de la page."""
-    return await _notion_call(
-        client, "GET", settings.base_url + f"/v1/pages/{page}"
-    )
+    return await _call(client, "GET", settings.base_url + f"/v1/pages/{page}")
 
 
 async def _child_page_count(
@@ -1739,7 +1798,7 @@ async def _child_page_count(
         params = {"page_size": str(BLOCKS_PAGE_SIZE)}
         if cursor is not None:
             params["start_cursor"] = cursor
-        body = await _notion_call(client, "GET", url, params=params)
+        body = await _call(client, "GET", url, params=params)
         results = body.get("results")
         if not isinstance(results, list):
             raise _ActionFailed(_UNREADABLE_MESSAGE, "unreadable body")
@@ -1779,7 +1838,7 @@ async def _trash(
     try:
         async with _client(settings, REQUEST_TIMEOUT) as client:
             page_body = await _page_object(client, settings, page)
-            reference = _page_reference(page_body, page)
+            reference = _page_brief(page_body, fallback_id=page)
             child_pages = await _child_page_count(client, settings, page)
             if not confirmed:
                 _trace_trash(
@@ -1797,6 +1856,13 @@ async def _trash(
                     "page": reference,
                     "child_pages": child_pages,
                 }
+            await _call(
+                client,
+                "PATCH",
+                settings.base_url + f"/v1/pages/{page}",
+                body={"in_trash": True},
+                write=True,
+            )
     except _ActionFailed as failure:
         _trace_trash(
             trace,
@@ -1806,19 +1872,6 @@ async def _trash(
             reason=failure.reason,
         )
         return _error(failure.message)
-
-    status, _, reason = await _patch(
-        settings, f"/v1/pages/{page}", {"in_trash": True}
-    )
-    if reason is not None:
-        _trace_trash(
-            trace,
-            page=page,
-            started=started,
-            child_pages=child_pages,
-            reason=reason,
-        )
-        return _error(_write_message(status, reason))
 
     _trace_trash(trace, page=page, started=started, child_pages=child_pages)
     return {
@@ -1843,32 +1896,29 @@ async def _restore(
         )
         return _error(_INVALID_PAGE_MESSAGE)
 
-    status, body, reason = await _patch(
-        settings, f"/v1/pages/{page}", {"in_trash": False}
-    )
-    if reason is not None:
-        _trace_restore(
-            trace, page=page, started=started, reason=reason
-        )
-        return _error(_write_message(status, reason))
-
-    if (
-        isinstance(body, dict)
-        and _text(body.get("url"))
-        and isinstance(body.get("properties"), dict)
-    ):
-        reference = _page_reference(body, page)
-    else:
-        # Le corps de l'écriture ne portait pas la page : on la relit.
-        try:
-            async with _client(settings, REQUEST_TIMEOUT) as client:
-                page_body = await _page_object(client, settings, page)
-        except _ActionFailed as failure:
-            _trace_restore(
-                trace, page=page, started=started, reason=failure.reason
+    try:
+        async with _client(settings, REQUEST_TIMEOUT) as client:
+            body = await _call(
+                client,
+                "PATCH",
+                settings.base_url + f"/v1/pages/{page}",
+                body={"in_trash": False},
+                write=True,
             )
-            return _error(failure.message)
-        reference = _page_reference(page_body, page)
+            if (
+                _text(body.get("url"))
+                and isinstance(body.get("properties"), dict)
+            ):
+                reference = _page_brief(body, fallback_id=page)
+            else:
+                # Le corps de l'écriture ne portait pas la page : on la relit.
+                page_body = await _page_object(client, settings, page)
+                reference = _page_brief(page_body, fallback_id=page)
+    except _ActionFailed as failure:
+        _trace_restore(
+            trace, page=page, started=started, reason=failure.reason
+        )
+        return _error(failure.message)
 
     _trace_restore(trace, page=page, started=started)
     return {"status": "ok", "page": reference}
@@ -1966,8 +2016,7 @@ _CREATE_PARAMETERS: Mapping[str, object] = {
 
 _CREATE_VALIDATION_MESSAGE = (
     "Notion a refusé le Markdown de la page (Markdown invalide, plus de "
-    "5 000 blocs ou limite de taille atteinte). Réessaie avec un contenu "
-    "plus court ou plus simple."
+    "5 000 blocs ou limite de taille atteinte). " + _RETRY_SIMPLER
 )
 
 
@@ -2000,7 +2049,7 @@ def _create_parent(settings: _Settings, raw: object) -> str | None:
 
 
 def _create_body(parent: str, title: str, content: str) -> dict[str, object]:
-    """Corps exact de ``POST /v1/pages`` (spec #111).
+    """Corps exact de ``POST /v1/pages``.
 
     La propriété de titre est envoyée explicitement. Le Markdown et sa version
     n'apparaissent que s'il y a un corps : la version seule est un 400.
@@ -2023,16 +2072,6 @@ def _create_body(parent: str, title: str, content: str) -> dict[str, object]:
         body["markdown"] = content
         body["markdown_version"] = MARKDOWN_VERSION
     return body
-
-
-def _created_summary(
-    page: Mapping[str, Any], fallback_title: str
-) -> dict[str, object]:
-    """Projette la page créée ; le titre demandé sert de repli."""
-    summary = _page_brief(page)
-    if summary["title"] == "(sans titre)":
-        summary["title"] = fallback_title
-    return summary
 
 
 async def _create(
@@ -2063,83 +2102,36 @@ async def _create(
     body = _create_body(parent, title, content)
     try:
         async with _client(settings, REQUEST_TIMEOUT) as client:
-            response = await client.post(
-                settings.base_url + "/v1/pages", json=body
+            page = await _call(
+                client,
+                "POST",
+                settings.base_url + "/v1/pages",
+                body=body,
+                write=True,
             )
-    except asyncio.CancelledError:
-        raise
-    except httpx2.TimeoutException:
+    except _ActionFailed as failure:
         _trace_create(
             trace,
             parent=parent,
             title=title,
             content=content,
             started=started,
-            reason="timeout",
+            reason=failure.reason,
         )
-        return _error(_TIMEOUT_MESSAGE)
-    except httpx2.RequestError as exc:
-        _trace_create(
-            trace,
-            parent=parent,
-            title=title,
-            content=content,
-            started=started,
-            reason=type(exc).__name__,
-        )
-        return _error(_UNREACHABLE_MESSAGE)
-    except Exception as exc:  # défense : le handler ne lève jamais
-        _trace_create(
-            trace,
-            parent=parent,
-            title=title,
-            content=content,
-            started=started,
-            reason=type(exc).__name__,
-        )
-        return _error(_UNREACHABLE_MESSAGE)
-
-    if response.status_code >= 400:
-        status = response.status_code
-        _trace_create(
-            trace,
-            parent=parent,
-            title=title,
-            content=content,
-            started=started,
-            reason=f"HTTP {status}",
-        )
-        if status == 400:
+        if failure.status == 400:
             return _error(_CREATE_VALIDATION_MESSAGE)
-        return _error(_status_error(status, write=True))
+        return _error(failure.message)
 
-    try:
-        page = response.json()
-    except (TypeError, ValueError):
-        page = None
-    if not isinstance(page, dict):
-        _trace_create(
-            trace,
-            parent=parent,
-            title=title,
-            content=content,
-            started=started,
-            reason="unreadable body",
-        )
-        return _error(_UNREADABLE_MESSAGE)
-
-    payload = {
-        "status": "ok",
-        "page": _created_summary(page, title),
-    }
+    summary = _page_brief(page, fallback_title=title)
     _trace_create(
         trace,
         parent=parent,
         title=title,
         content=content,
         started=started,
+        page_id=str(summary["id"]) or None,
     )
-    return payload
+    return {"status": "ok", "page": summary}
 
 
 def _trace_create(
@@ -2149,6 +2141,7 @@ def _trace_create(
     title: str,
     content: str,
     started: float,
+    page_id: str | None = None,
     reason: str | None = None,
 ) -> None:
     """Trace une création sans jamais y placer le texte de la page."""
@@ -2161,6 +2154,8 @@ def _trace_create(
         ),
         "status": "error" if reason is not None else "ok",
     }
+    if page_id is not None:
+        entry["page"] = page_id
     if reason is not None:
         entry["reason"] = reason
     trace("CreatePage", entry)
