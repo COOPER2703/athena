@@ -169,9 +169,18 @@ _INVALID_PAGE_MESSAGE = (
     "de la page."
 )
 _REPLACE_REFUSED_MESSAGE = (
-    "Le remplacement du contenu exige une confirmation explicite et n'est "
-    "pas effectué par cette version du plugin. Utilise le mode append pour "
+    "Le remplacement du contenu exige une confirmation explicite. "
+    "Relance l'appel avec confirm=true, ou utilise le mode append pour "
     "ajouter du contenu."
+)
+_REPLACE_EMPTY_MESSAGE = (
+    "Le remplacement du contenu exige un contenu non vide. Indique le "
+    "Markdown qui doit remplacer le corps de la page."
+)
+_REPLACE_CHILD_MESSAGE = (
+    "Notion a refusé de remplacer le contenu : le remplacement aurait "
+    "supprimé une sous-page ou une base enfant. Rien n'a été perdu et le "
+    "corps d'origine est intact."
 )
 _NO_TITLE_PROPERTY_MESSAGE = (
     "La page n'expose pas de propriété de titre : le renommage est impossible."
@@ -1068,6 +1077,18 @@ def _append_body(content: str) -> dict[str, object]:
     }
 
 
+def _replace_body(content: str) -> dict[str, object]:
+    """Corps exact du remplacement : suppression de contenu toujours refusée."""
+    return {
+        "type": "replace_content",
+        "replace_content": {
+            "new_str": content,
+            "allow_deleting_content": False,
+        },
+        "markdown_version": MARKDOWN_VERSION,
+    }
+
+
 def _rename_body(key: str, title: str) -> dict[str, object]:
     """Corps exact du renommage, sur la propriété de titre découverte."""
     return {
@@ -1119,10 +1140,21 @@ def _write_message(status: int | None, reason: str) -> str:
     return _UNREACHABLE_MESSAGE
 
 
+def _replace_message(status: int | None, reason: str) -> str:
+    """Phrase d'un remplacement échoué : le 400 est la protection des enfants."""
+    if status == 400:
+        return _REPLACE_CHILD_MESSAGE
+    return _write_message(status, reason)
+
+
 def _partial_message(
-    title_failure: str | None, content_failure: str | None
+    title_failure: str | None,
+    content_failure: str | None,
+    *,
+    mode: str = "append",
 ) -> str:
     """Phrase d'un succès partiel : ce qui a réussi, ce qui a échoué."""
+    verb = "remplacé" if mode == "replace" else "ajouté"
     if title_failure and content_failure:
         message = (
             "Ni le titre ni le contenu n'ont pu être mis à jour. "
@@ -1130,13 +1162,13 @@ def _partial_message(
         )
     elif title_failure:
         message = (
-            "Le contenu a été ajouté, mais le titre n'a pas pu être "
+            f"Le contenu a été {verb}, mais le titre n'a pas pu être "
             f"modifié. {title_failure}"
         )
     else:
         message = (
             "Le titre a été mis à jour, mais le contenu n'a pas pu être "
-            f"ajouté. {content_failure}"
+            f"{verb}. {content_failure}"
         )
     if "relis" not in message.lower():
         message += " Relis la page avant de réessayer."
@@ -1151,9 +1183,12 @@ async def _update(
     """Ajoute du contenu, renomme, et dit clairement un succès partiel.
 
     La page est lue d'abord pour découvrir la clé de sa propriété de titre et
-    rendre son identité. Le renommage et l'ajout sont deux écritures séparées,
-    tentées indépendamment ; aucune n'est rejouée. Le remplacement appartient
-    au ticket #117 : ``mode=replace`` est refusé sans aucune écriture.
+    rendre son identité. Le renommage et l'écriture du corps sont deux
+    opérations séparées, tentées indépendamment ; aucune n'est rejouée.
+
+    Le remplacement est refusé sans ``confirm: true`` et sans contenu, avant
+    tout appel HTTP. Avec confirmation, il envoie ``replace_content`` avec
+    ``allow_deleting_content: false`` : une sous-page n'est jamais détachée.
     """
     started = asyncio.get_running_loop().time()
     page_ref = _page_id(arguments.get("page"))
@@ -1162,7 +1197,7 @@ async def _update(
         return _error(_INVALID_PAGE_MESSAGE)
 
     mode = _update_mode(arguments.get("mode"))
-    if mode == "replace":
+    if mode == "replace" and arguments.get("confirm") is not True:
         _trace_update(
             trace, page_ref, mode, started, reason="replace refused"
         )
@@ -1176,6 +1211,12 @@ async def _update(
         if isinstance(raw_content, str) and raw_content.strip()
         else ""
     )
+
+    if mode == "replace" and not content:
+        _trace_update(
+            trace, page_ref, mode, started, reason="empty content"
+        )
+        return _error(_REPLACE_EMPTY_MESSAGE)
 
     try:
         async with _client(settings, REQUEST_TIMEOUT) as client:
@@ -1246,10 +1287,15 @@ async def _update(
                 title_reason = reason
 
     if content:
+        body = (
+            _replace_body(content)
+            if mode == "replace"
+            else _append_body(content)
+        )
         status, result, reason = await _patch(
             settings,
             f"/v1/pages/{page_ref}/markdown",
-            _append_body(content),
+            body,
         )
         if reason is None:
             content_updated = True
@@ -1258,7 +1304,11 @@ async def _update(
             ):
                 warnings = result["warnings"]
         else:
-            content_failure = _write_message(status, reason)
+            content_failure = (
+                _replace_message(status, reason)
+                if mode == "replace"
+                else _write_message(status, reason)
+            )
             content_reason = reason
 
     chars = (len(title) if title_updated else 0) + (
@@ -1291,7 +1341,9 @@ async def _update(
         )
         return {
             "status": "error",
-            "message": _partial_message(title_failure, content_failure),
+            "message": _partial_message(
+                title_failure, content_failure, mode=mode
+            ),
             **flags,
         }
 
