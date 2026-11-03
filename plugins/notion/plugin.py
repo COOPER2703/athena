@@ -177,9 +177,11 @@ _REPLACE_EMPTY_MESSAGE = (
     "Le remplacement du contenu exige un contenu non vide. Indique le "
     "Markdown qui doit remplacer le corps de la page."
 )
-_REPLACE_CHILD_MESSAGE = (
-    "Notion a refusé de remplacer le contenu : le remplacement aurait "
-    "supprimé une sous-page ou une base enfant. Rien n'a été perdu et le "
+_REPLACE_REFUSED_BY_NOTION_MESSAGE = (
+    "Notion a refusé le remplacement du contenu. Le plus souvent, ce refus "
+    "protège une sous-page ou une base enfant que le remplacement aurait "
+    "supprimée : elle n'a pas été touchée. Un Markdown invalide ou une page "
+    "trop volumineuse provoquent le même refus. Rien n'a été perdu et le "
     "corps d'origine est intact."
 )
 _NO_TITLE_PROPERTY_MESSAGE = (
@@ -1141,9 +1143,14 @@ def _write_message(status: int | None, reason: str) -> str:
 
 
 def _replace_message(status: int | None, reason: str) -> str:
-    """Phrase d'un remplacement échoué : le 400 est la protection des enfants."""
+    """Phrase d'un remplacement échoué : un 400 est le refus de Notion.
+
+    Un 400 couvre la protection d'une sous-page ou d'une base enfant, mais
+    aussi un Markdown invalide ou une page trop volumineuse : la phrase nomme
+    les trois sans affirmer lequel s'applique.
+    """
     if status == 400:
-        return _REPLACE_CHILD_MESSAGE
+        return _REPLACE_REFUSED_BY_NOTION_MESSAGE
     return _write_message(status, reason)
 
 

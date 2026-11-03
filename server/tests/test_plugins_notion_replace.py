@@ -30,9 +30,11 @@ REFUSED = (
     "Relance l'appel avec confirm=true, ou utilise le mode append pour "
     "ajouter du contenu."
 )
-CHILD_REFUSED = (
-    "Notion a refusé de remplacer le contenu : le remplacement aurait "
-    "supprimé une sous-page ou une base enfant. Rien n'a été perdu et le "
+NOTION_REFUSED = (
+    "Notion a refusé le remplacement du contenu. Le plus souvent, ce refus "
+    "protège une sous-page ou une base enfant que le remplacement aurait "
+    "supprimée : elle n'a pas été touchée. Un Markdown invalide ou une page "
+    "trop volumineuse provoquent le même refus. Rien n'a été perdu et le "
     "corps d'origine est intact."
 )
 
@@ -292,8 +294,13 @@ def test_replace_that_would_delete_a_child_page_is_refused_and_nothing_lost(
                     )
 
                 assert payload["status"] == "error"
-                assert payload["message"] == CHILD_REFUSED
+                assert payload["message"] == NOTION_REFUSED
+                # La protection des enfants reste le cas de sécurité nommé,
+                # sans exclure les autres causes d'un 400.
                 assert "sous-page" in payload["message"]
+                assert "base enfant" in payload["message"]
+                assert "Markdown invalide" in payload["message"]
+                assert "trop volumineuse" in payload["message"]
                 assert "Rien n'a été perdu" in payload["message"]
                 # Une seule tentative de remplacement, aucun second écrit.
                 assert len(
