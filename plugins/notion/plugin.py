@@ -494,14 +494,22 @@ def _container_block(lines: list[str], start: int, tag: str) -> int:
     return index
 
 
-def _markdown_blocks(markdown: str) -> list[str]:
-    """Découpe un Markdown en blocs de premier niveau sans en couper un seul.
+def _markdown_ranges(markdown: str) -> list[tuple[int, int]]:
+    """Bornes des blocs de premier niveau dans le texte Markdown d'origine.
 
     Un bloc de code, un tableau GFM, une région de balises Notion et une suite
     de lignes de liste restent entiers ; un titre ou un paragraphe est un bloc.
+    Les bornes servent à rendre la tranche d'origine, donc les séparateurs de
+    Notion (un seul saut de ligne entre deux blocs en ``v2``) sont préservés.
     """
     lines = markdown.splitlines()
-    blocks: list[str] = []
+    offsets: list[int] = []
+    cursor = 0
+    for raw in markdown.splitlines(keepends=True):
+        offsets.append(cursor)
+        cursor += len(raw)
+
+    ranges: list[tuple[int, int]] = []
     index = 0
     while index < len(lines):
         line = lines[index]
@@ -535,9 +543,15 @@ def _markdown_blocks(markdown: str) -> list[str]:
             ):
                 end += 1
 
-        blocks.append("\n".join(lines[index:end]))
+        stop = offsets[end - 1] + len(lines[end - 1])
+        ranges.append((offsets[index], stop))
         index = end
-    return blocks
+    return ranges
+
+
+def _markdown_blocks(markdown: str) -> list[str]:
+    """Découpe un Markdown en blocs de premier niveau sans en couper un seul."""
+    return [markdown[start:stop] for start, stop in _markdown_ranges(markdown)]
 
 
 def _properties(page: Mapping[str, Any]) -> dict[str, str]:
@@ -760,11 +774,14 @@ async def _read(
         )
         return _error(_UNREADABLE_MESSAGE)
 
-    blocks = _markdown_blocks(markdown_object["markdown"])
-    selected = blocks[offset : offset + limit]
-    content = "\n\n".join(selected)
+    ranges = _markdown_ranges(markdown_object["markdown"])
+    selected = ranges[offset : offset + limit]
+    markdown = markdown_object["markdown"]
+    content = (
+        markdown[selected[0][0] : selected[-1][1]] if selected else ""
+    )
     next_offset = offset + len(selected)
-    has_more = next_offset < len(blocks)
+    has_more = next_offset < len(ranges)
     truncated = markdown_object.get("truncated") is True
     unknown = markdown_object.get("unknown_block_ids")
     unknown_ids = list(unknown) if isinstance(unknown, list) else []
@@ -779,7 +796,7 @@ async def _read(
         "offset": offset,
         "next_offset": next_offset,
         "has_more": has_more,
-        "total_blocks": len(blocks),
+        "total_blocks": len(ranges),
         "truncated": truncated,
         "unknown_block_ids": unknown_ids,
         "query": None,
@@ -796,7 +813,7 @@ async def _read(
         started,
         blocks=len(selected),
         chars=len(content),
-        total_blocks=len(blocks),
+        total_blocks=len(ranges),
         truncated=truncated,
         unknown_ids=unknown_ids,
     )
