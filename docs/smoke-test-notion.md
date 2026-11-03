@@ -273,8 +273,9 @@ INFO [plugins] ReadPage {"blocks": 2, "chars": N, "duration_ms": N, "limit": 20,
 ```
 
 - La comparaison ignore la casse et les accents, mais exige un **mot entier**.
-- Seuls les **paragraphes** sont fouillés : un titre, une liste, un tableau, un bloc de code
-  ou une balise Notion n'est jamais une correspondance.
+- Seuls les **paragraphes** sont fouillés : un titre, une liste, une citation, un séparateur
+  horizontal, un tableau, un bloc de code ou une balise Notion n'est jamais une
+  correspondance.
 - Avec `query`, `offset` et `next_offset` comptent les **correspondances** ; `match_count`
   donne le total. Une page sans correspondance est un **succès vide** (`match_count: 0`),
   jamais une erreur.
