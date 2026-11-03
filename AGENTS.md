@@ -129,6 +129,29 @@ d'orchestration. Le contrat avec l'orchestrateur (variables à fournir, UID `100
 Traefik, pièges de routage) est `docs/deploiement.md` — à lire avant de toucher au
 `Dockerfile` ou à la configuration de déploiement.
 
+### Pages Notion
+
+Le plugin `plugins/notion/` (ADR-0019) expose six Tools de page adossés à la REST Notion :
+`search_pages`, `read_page`, `create_page`, `update_page`, `trash_page`, `restore_page`. Il
+épingle `Notion-Version: 2026-03-11` et demande `markdown_version: "v2"` explicitement. Il ne
+voit que ce qui est partagé avec la connexion : aucune configuration n'élargit ce périmètre,
+et la recherche de contenu se limite à une page à la fois.
+
+Pour l'activer, ajoutez `notion` à la liste `enabled` de `plugins.json` avec
+`parent_page_id` sous `config.notion`, et fournissez le secret requis
+`ATHENA_PLUGIN_NOTION_TOKEN` (environnement ou `.env`) :
+
+```json
+{
+  "enabled": ["notion"],
+  "config": { "notion": { "parent_page_id": "…" } }
+}
+```
+
+La page parente doit être partagée avec la connexion, sinon le démarrage échoue en nommant
+`parent_page_id`. La recette complète (partage, capacités, parcours vocal, dépannage) est
+`docs/smoke-test-notion.md`.
+
 ### Front (`web/`)
 
 Le front est une SPA Vite + React + TypeScript strict, servie en statique par la Console.
