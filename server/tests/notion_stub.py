@@ -1,0 +1,212 @@
+"""Faux serveur Notion en processus, pour les tests du plugin ``notion``.
+
+Le serveur imite les routes REST que le plugin utilise, tourne sous uvicorn sur
+une socket éphémère de la même boucle que le test, enregistre chaque requête
+(méthode, chemin, requête, en-têtes Notion, corps JSON) et laisse le test
+programmer les réponses, y compris une erreur, un corps brut ou un retard.
+
+Une route non programmée répond ``404`` avec l'erreur JSON de Notion : le test
+n'a donc pas à programmer les routes qu'il veut voir échouer, et une requête
+inattendue se voit dans ``requests``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import socket
+from dataclasses import dataclass, field
+from typing import Any
+from urllib.parse import parse_qs
+
+import uvicorn
+
+# Erreur JSON telle que la REST Notion la rend sur un objet inconnu.
+NOT_FOUND_BODY: dict[str, Any] = {
+    "object": "error",
+    "status": 404,
+    "code": "object_not_found",
+    "message": "Could not find the requested object.",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _Route:
+    """Réponse programmée pour un couple méthode + chemin exacts."""
+
+    status: int = 200
+    body: Any = None
+    raw_body: bytes | None = None
+    delay: float = 0.0
+
+
+@dataclass
+class NotionStub:
+    """Serveur Notion de test et ce que le test veut observer."""
+
+    host: str = "127.0.0.1"
+    port: int = 0
+    requests: list[dict[str, Any]] = field(default_factory=list)
+    _routes: dict[tuple[str, str], _Route] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _server: uvicorn.Server | None = field(default=None, init=False, repr=False)
+    _task: asyncio.Task | None = field(default=None, init=False, repr=False)
+    _socket: socket.socket | None = field(default=None, init=False, repr=False)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+    def route(
+        self,
+        method: str,
+        path: str,
+        *,
+        status: int = 200,
+        body: Any = None,
+        raw_body: bytes | None = None,
+        delay: float = 0.0,
+    ) -> None:
+        """Programme la réponse d'une route ; un second appel la remplace."""
+        self._routes[(method.upper(), path)] = _Route(
+            status=status, body=body, raw_body=raw_body, delay=delay
+        )
+
+    def requests_for(self, method: str, path: str) -> list[dict[str, Any]]:
+        """Les requêtes reçues pour un couple méthode + chemin exacts."""
+        method = method.upper()
+        return [
+            request
+            for request in self.requests
+            if request["method"] == method and request["path"] == path
+        ]
+
+    async def start(self) -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((self.host, self.port))
+        self.port = sock.getsockname()[1]
+
+        config = uvicorn.Config(
+            self,
+            log_level="error",
+            access_log=False,
+            lifespan="on",
+            timeout_graceful_shutdown=0.5,
+        )
+        self._server = uvicorn.Server(config)
+        self._socket = sock
+        self._task = asyncio.create_task(self._server.serve(sockets=[sock]))
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 5.0
+        while not self._server.started:
+            if self._server.should_exit or loop.time() > deadline:
+                raise RuntimeError("the Notion stub did not start")
+            await asyncio.sleep(0.01)
+
+    async def stop(self) -> None:
+        server, task, sock = self._server, self._task, self._socket
+        self._server = self._task = self._socket = None
+        if server is None or task is None or sock is None:
+            return
+        server.should_exit = True
+        try:
+            await asyncio.wait_for(task, 5.0)
+        except TimeoutError:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        finally:
+            sock.close()
+
+    async def __aenter__(self) -> NotionStub:
+        await self.start()
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        await self.stop()
+        return False
+
+    # -- Application ASGI ----------------------------------------------------
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "lifespan":
+            await self._lifespan(receive, send)
+            return
+        if scope["type"] != "http":
+            return
+
+        headers = {
+            key.decode().lower(): value.decode() for key, value in scope["headers"]
+        }
+        body = await _read_body(receive)
+        self.requests.append(
+            {
+                "method": scope["method"],
+                "path": scope["path"],
+                "query": parse_qs(
+                    scope.get("query_string", b"").decode("utf-8"),
+                    keep_blank_values=True,
+                ),
+                "authorization": headers.get("authorization"),
+                "notion_version": headers.get("notion-version"),
+                "body": body,
+            }
+        )
+
+        route = self._routes.get((scope["method"], scope["path"]))
+        if route is None:
+            await _respond(send, 404, NOT_FOUND_BODY)
+            return
+        if route.delay:
+            await asyncio.sleep(route.delay)
+        if route.raw_body is not None:
+            await _respond_raw(send, route.status, route.raw_body)
+            return
+        await _respond(send, route.status, {} if route.body is None else route.body)
+
+    async def _lifespan(self, receive: Any, send: Any) -> None:
+        while True:
+            message = await receive()
+            if message["type"] == "lifespan.startup":
+                await send({"type": "lifespan.startup.complete"})
+            elif message["type"] == "lifespan.shutdown":
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+
+
+async def _read_body(receive: Any) -> dict[str, Any]:
+    """Corps JSON décodé ; un corps non JSON retombe sur son texte brut."""
+    chunks: list[bytes] = []
+    while True:
+        message = await receive()
+        if message["type"] == "http.request":
+            chunks.append(message.get("body", b""))
+            if not message.get("more_body", False):
+                break
+    raw = b"".join(chunks)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"_raw": raw.decode("utf-8", "replace")}
+    return parsed if isinstance(parsed, dict) else {"_value": parsed}
+
+
+async def _respond(send: Any, status: int, payload: Any) -> None:
+    await _respond_raw(send, status, json.dumps(payload).encode("utf-8"))
+
+
+async def _respond_raw(send: Any, status: int, body: bytes) -> None:
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
