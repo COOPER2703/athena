@@ -16,7 +16,7 @@ import asyncio
 import json
 import socket
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs
 
 import uvicorn
@@ -40,6 +40,20 @@ class _Route:
     delay: float = 0.0
 
 
+@dataclass(slots=True)
+class _Sequence:
+    """Suite de réponses : la suivante à chaque appel, la dernière ensuite."""
+
+    responses: tuple[_Route, ...]
+    calls: int = 0
+
+    def next(self) -> _Route:
+        """La réponse due à cet appel, la dernière restant stable."""
+        route = self.responses[min(self.calls, len(self.responses) - 1)]
+        self.calls += 1
+        return route
+
+
 @dataclass
 class NotionStub:
     """Serveur Notion de test et ce que le test veut observer."""
@@ -47,7 +61,7 @@ class NotionStub:
     host: str = "127.0.0.1"
     port: int = 0
     requests: list[dict[str, Any]] = field(default_factory=list)
-    _routes: dict[tuple[str, str], _Route] = field(
+    _routes: dict[tuple[str, str], _Route | _Sequence] = field(
         default_factory=dict, init=False, repr=False
     )
     _server: uvicorn.Server | None = field(default=None, init=False, repr=False)
@@ -71,6 +85,29 @@ class NotionStub:
         """Programme la réponse d'une route ; un second appel la remplace."""
         self._routes[(method.upper(), path)] = _Route(
             status=status, body=body, raw_body=raw_body, delay=delay
+        )
+
+    def route_sequence(
+        self, method: str, path: str, responses: Sequence[Mapping[str, Any]]
+    ) -> None:
+        """Programme une suite de réponses pour une route.
+
+        Chaque appel consomme la réponse suivante ; la dernière se répète
+        ensuite. Chaque item accepte ``status``, ``body``, ``raw_body`` et
+        ``delay``, comme ``route``.
+        """
+        if not responses:
+            raise ValueError("route_sequence demande au moins une réponse")
+        self._routes[(method.upper(), path)] = _Sequence(
+            responses=tuple(
+                _Route(
+                    status=int(item.get("status", 200)),
+                    body=item.get("body"),
+                    raw_body=item.get("raw_body"),
+                    delay=float(item.get("delay", 0.0)),
+                )
+                for item in responses
+            )
         )
 
     def requests_for(self, method: str, path: str) -> list[dict[str, Any]]:
@@ -158,6 +195,8 @@ class NotionStub:
         if route is None:
             await _respond(send, 404, NOT_FOUND_BODY)
             return
+        if isinstance(route, _Sequence):
+            route = route.next()
         if route.delay:
             await asyncio.sleep(route.delay)
         if route.raw_body is not None:
