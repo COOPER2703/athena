@@ -306,7 +306,7 @@ Attendu : la page naît sous la racine `parent_page_id`, avec un titre et un cor
 Trace :
 
 ```
-INFO [plugins] CreatePage {"content_chars": N, "duration_ms": N, "parent": "…", "plugin": "notion", "status": "ok", "title_chars": N}
+INFO [plugins] CreatePage {"content_chars": N, "duration_ms": N, "page": "…", "parent": "…", "plugin": "notion", "status": "ok", "title_chars": N}
 ```
 
 Puis, sous un parent nommé : « **Crée une page Idées sous la page Projets** ». Le modèle
@@ -317,8 +317,8 @@ racine configurée.
 - Le titre est requis ; le corps est optionnel. Un Markdown refusé, ou plus de 5 000 blocs,
   devient une phrase française et **ne crée rien**.
 - Le parent nommé doit être partagé avec la connexion ; sinon, phrase `404` standard.
-- La Trace ne contient ni le titre ni le corps, seulement `title_chars` et
-  `content_chars`.
+- La Trace ne contient ni le titre ni le corps, seulement l'identifiant de la page
+  créée (`page`), `title_chars` et `content_chars`.
 
 ### 3.6 Ajouter du contenu sans écraser
 
@@ -329,14 +329,14 @@ Attendu : le contenu existant est conservé et le nouveau Markdown est ajouté *
 page**. Trace :
 
 ```
-INFO [plugins] UpdatePage {"chars": N, "content_updated": true, "duration_ms": N, "mode": "append", "page": "…", "plugin": "notion", "status": "ok", "title_updated": false, "warnings": 0}
+INFO [plugins] UpdatePage {"chars": N, "content_updated": true, "duration_ms": N, "mode": "append", "page": "…", "plugin": "notion", "status": "ok", "title_updated": false, "warnings": [], "warnings_count": 0}
 ```
 
 - Le mode par défaut est `append` ; l'ajout utilise `insert_content` avec
   `position: { "type": "end" }`.
 - Rouvrez la page dans Notion (ou relisez-la) : l'ancien texte est toujours là.
-- Les avertissements éventuels de Notion sont transmis dans `warnings` et comptés dans la
-  Trace.
+- Les avertissements éventuels de Notion sont transmis dans `warnings` (codes seuls,
+  jamais leur message) et comptés dans `warnings_count`.
 
 ### 3.7 Remplacer le corps après confirmation explicite
 
@@ -346,14 +346,14 @@ Attendu : Athena **demande une confirmation explicite** avant d'écrire. Tant qu
 confirmez pas, le Tool refuse et **aucun appel HTTP d'écriture** n'est émis :
 
 ```
-INFO [plugins] UpdatePage {"chars": 0, "content_updated": false, "duration_ms": N, "mode": "replace", "page": "…", "plugin": "notion", "reason": "replace refused", "status": "error", "title_updated": false, "warnings": 0}
+INFO [plugins] UpdatePage {"chars": 0, "content_updated": false, "duration_ms": N, "mode": "replace", "page": "…", "plugin": "notion", "reason": "replace refused", "status": "error", "title_updated": false, "warnings": [], "warnings_count": 0}
 ```
 
 Après votre « **oui, remplace** », le modèle rappelle `update_page` avec `mode: "replace"` et
 `confirm: true` :
 
 ```
-INFO [plugins] UpdatePage {"chars": N, "content_updated": true, "duration_ms": N, "mode": "replace", "page": "…", "plugin": "notion", "status": "ok", "title_updated": false, "warnings": 0}
+INFO [plugins] UpdatePage {"chars": N, "content_updated": true, "duration_ms": N, "mode": "replace", "page": "…", "plugin": "notion", "status": "ok", "title_updated": false, "warnings": [], "warnings_count": 0}
 ```
 
 - Le remplacement envoie `replace_content` avec `allow_deleting_content: false`. Un contenu
@@ -374,7 +374,7 @@ Attendu : `update_page` patche la propriété de titre dans un appel séparé de
 corps. Trace :
 
 ```
-INFO [plugins] UpdatePage {"chars": N, "content_updated": false, "duration_ms": N, "mode": "append", "page": "…", "plugin": "notion", "status": "ok", "title_updated": true, "warnings": 0}
+INFO [plugins] UpdatePage {"chars": N, "content_updated": false, "duration_ms": N, "mode": "append", "page": "…", "plugin": "notion", "status": "ok", "title_updated": true, "warnings": [], "warnings_count": 0}
 ```
 
 - Le renommage est une opération à part : un succès partiel (titre réussi, corps échoué, ou
