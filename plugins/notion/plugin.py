@@ -1556,6 +1556,7 @@ async def _update(
             content_updated=content_updated,
             chars=chars,
             warnings=_warning_codes(warnings),
+            warnings_count=len(warnings),
             reason=reason or "partial",
         )
         return {
@@ -1580,6 +1581,7 @@ async def _update(
             content_updated=content_updated,
             chars=chars,
             warnings=_warning_codes(warnings),
+            warnings_count=len(warnings),
             reason=title_reason or content_reason,
         )
         return _error(failure)
@@ -1593,6 +1595,7 @@ async def _update(
         content_updated=content_updated,
         chars=chars,
         warnings=_warning_codes(warnings),
+        warnings_count=len(warnings),
     )
     return {"status": "ok", **flags}
 
@@ -1619,10 +1622,12 @@ def _trace_update(
     content_updated: bool = False,
     chars: int = 0,
     warnings: list[str] | None = None,
+    warnings_count: int | None = None,
     reason: str | None = None,
 ) -> None:
     """Trace un ``update_page`` : jamais le contenu, jamais le jeton."""
     codes = list(warnings or ())
+    count = len(codes) if warnings_count is None else warnings_count
     entry: dict[str, object] = {
         "page": page,
         "mode": mode,
@@ -1630,7 +1635,7 @@ def _trace_update(
         "content_updated": content_updated,
         "chars": chars,
         "warnings": codes,
-        "warnings_count": len(codes),
+        "warnings_count": count,
         "duration_ms": round(
             (asyncio.get_running_loop().time() - started) * 1000, 1
         ),
