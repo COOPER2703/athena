@@ -36,3 +36,73 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  # L'Image est un livrable : une image qui ne démarre pas ne doit pas être
+  # taguée. Ce job tourne sur le runner attaché à l'hôte de déploiement, donc
+  # le `docker build` écrit dans le démon de l'hôte et Ansible n'a plus qu'à
+  # recréer le conteneur depuis `athena:<sha>` (docs/deploiement.md).
+  #
+  # Le label du runner est à ajuster sur l'inventaire (`self-hosted` seul est
+  # un point de départ) ; il doit désigner la machine qui héberge le démon.
+  image:
+    needs: [test, web]
+    runs-on: self-hosted
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Construire l'Image
+        id: build
+        run: |
+          sha="${GITHUB_SHA::7}"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          docker build -t "athena:${sha}" .
+
+      # Démarrage réel, en lecture seule : valide d'un coup le WORKDIR, les
+      # chemins d'état, le bind des Surfaces sur 0.0.0.0, la présence du build
+      # de la SPA et l'absence d'écriture hors de /data et /logs.
+      - name: Démarrer et attendre /healthz
+        env:
+          TAG: ${{ steps.build.outputs.sha }}
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          name="athena-ci-${TAG}"
+          mkdir -p "$work/data" "$work/logs"
+          # L'Image tourne en UID 1000 ; le runner n'est pas forcément root.
+          chmod 777 "$work/data" "$work/logs"
+          cleanup() {
+            docker rm -f "$name" >/dev/null 2>&1 || true
+            rm -rf "$work"
+          }
+          trap cleanup EXIT
+
+          docker run -d --name "$name" \
+            --read-only --tmpfs /tmp \
+            -p 127.0.0.1:18767:8767 \
+            -e GEMINI_API_KEY=ci-placeholder \
+            -v "$work/data:/data" \
+            -v "$work/logs:/logs" \
+            "athena:${TAG}"
+
+          for _ in $(seq 1 60); do
+            status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$name" 2>/dev/null || echo missing)"
+            case "$status" in
+              healthy) echo "Image saine (${TAG})."; exit 0 ;;
+              missing|exited) break ;;
+            esac
+            sleep 3
+          done
+
+          echo "::error::L'Image n'a pas atteint l'état healthy."
+          docker inspect -f '{{.State.Status}}' "$name" || true
+          docker logs "$name" || true
+          exit 1
+
+      # `latest` est un confort de dépannage, jamais la référence de production :
+      # Ansible épingle le SHA. On ne le déplace que depuis la branche par défaut.
+      - name: Retaguer latest
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        env:
+          TAG: ${{ steps.build.outputs.sha }}
+        run: docker tag "athena:${TAG}" athena:latest

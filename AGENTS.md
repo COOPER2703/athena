@@ -119,6 +119,16 @@ il s'active seul quand le moteur revient. Une panne en cours de Session reste un
 rendue au modèle, jamais un arrêt. La clé n'apparaît ni dans une Trace, ni dans le journal,
 ni dans l'instantané de la Console.
 
+### Image et déploiement
+
+L'Image Docker est le seul artefact déployable : **un** process qui porte les trois Surfaces,
+l'état vivant hors de l'image. Le `Dockerfile` multi-stage construit le build de la SPA, le
+code protobuf généré, et fige le modèle d'embedding ; les chemins d'état (`/data`, `/logs`)
+et le bind `0.0.0.0` des Surfaces sont des `ENV` de l'image, pas des variables
+d'orchestration. Le contrat avec l'orchestrateur (variables à fournir, UID `1000`, labels
+Traefik, pièges de routage) est `docs/deploiement.md` — à lire avant de toucher au
+`Dockerfile` ou à la configuration de déploiement.
+
 ### Front (`web/`)
 
 Le front est une SPA Vite + React + TypeScript strict, servie en statique par la Console.
