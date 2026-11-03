@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
@@ -88,6 +89,10 @@ _READ_PARAMETERS: Mapping[str, object] = {
             "minimum": 1,
             "maximum": 50,
             "description": "Blocs (ou correspondances) par appel. Défaut 20.",
+        },
+        "query": {
+            "type": "string",
+            "description": "Mot à chercher dans les paragraphes de cette page.",
         },
     },
     "required": ["page"],
@@ -169,9 +174,20 @@ _INVALID_PAGE_MESSAGE = (
     "de la page."
 )
 _REPLACE_REFUSED_MESSAGE = (
-    "Le remplacement du contenu exige une confirmation explicite et n'est "
-    "pas effectué par cette version du plugin. Utilise le mode append pour "
+    "Le remplacement du contenu exige une confirmation explicite. "
+    "Relance l'appel avec confirm=true, ou utilise le mode append pour "
     "ajouter du contenu."
+)
+_REPLACE_EMPTY_MESSAGE = (
+    "Le remplacement du contenu exige un contenu non vide. Indique le "
+    "Markdown qui doit remplacer le corps de la page."
+)
+_REPLACE_REFUSED_BY_NOTION_MESSAGE = (
+    "Notion a refusé le remplacement du contenu. Le plus souvent, ce refus "
+    "protège une sous-page ou une base enfant que le remplacement aurait "
+    "supprimée : elle n'a pas été touchée. Un Markdown invalide ou une page "
+    "trop volumineuse provoquent le même refus. Rien n'a été perdu et le "
+    "corps d'origine est intact."
 )
 _NO_TITLE_PROPERTY_MESSAGE = (
     "La page n'expose pas de propriété de titre : le renommage est impossible."
@@ -554,6 +570,59 @@ def _markdown_blocks(markdown: str) -> list[str]:
     return [markdown[start:stop] for start, stop in _markdown_ranges(markdown)]
 
 
+# Marques combinantes retirées pour comparer sans accents.
+_COMBINING_MARKS = re.compile(r"[\u0300-\u036f]")
+
+
+def _fold(text: str) -> str:
+    """Forme comparée : minuscules, sans accents ; jamais la forme rendue."""
+    decomposed = unicodedata.normalize("NFKD", text)
+    return _COMBINING_MARKS.sub("", decomposed).casefold()
+
+
+def _is_heading(block: str) -> bool:
+    """Vrai si le bloc est un titre Markdown."""
+    return bool(_HEADING.match(block))
+
+
+def _is_paragraph(block: str) -> bool:
+    """Vrai pour un paragraphe de premier niveau seulement.
+
+    Un titre, une liste, un tableau, un bloc de code et une région de balises
+    Notion ne sont jamais des paragraphes : le filtre par mot les ignore.
+    """
+    first = block.split("\n", 1)[0]
+    if _FENCE.match(first) or _HEADING.match(first) or _LIST_LINE.match(first):
+        return False
+    if first.lstrip().startswith("|"):
+        return False
+    match = _CONTAINER_TAG.match(first)
+    return not (match and match.group(1).lower() in _CONTAINER_TAGS)
+
+
+def _query_matches(blocks: list[str], query: str) -> list[str]:
+    """Paragraphes contenant le mot entier, chacun avec son titre de section.
+
+    La comparaison ignore casse et accents, mais le texte rendu garde les
+    siens. Le contexte est le dernier titre qui précède le paragraphe ; avant
+    le premier titre, il n'y en a aucun.
+    """
+    folded = _fold(query)
+    if not folded:
+        return []
+    pattern = re.compile(rf"(?<!\w){re.escape(folded)}(?!\w)")
+    heading = ""
+    matches: list[str] = []
+    for block in blocks:
+        if _is_heading(block):
+            heading = block
+            continue
+        if not _is_paragraph(block) or not pattern.search(_fold(block)):
+            continue
+        matches.append(f"{heading}\n\n{block}" if heading else block)
+    return matches
+
+
 def _properties(page: Mapping[str, Any]) -> dict[str, str]:
     """Propriétés non vides rendues en texte, dans l'ordre de la page."""
     raw = page.get("properties")
@@ -706,10 +775,20 @@ async def _read(
         MAX_READ_LIMIT,
         max(1, _read_int(arguments.get("limit"), DEFAULT_READ_LIMIT)),
     )
+    # Un filtre vide ou mal typé vaut absence de filtre : lecture paginée.
+    raw_query = arguments.get("query")
+    query = raw_query.strip() if isinstance(raw_query, str) else ""
+    query = query or None
 
     if page is None:
         _trace_read(
-            trace, None, offset, limit, started, reason="invalid page"
+            trace,
+            None,
+            offset,
+            limit,
+            started,
+            query=query,
+            reason="invalid page",
         )
         return _error(_INVALID_PAGE_MESSAGE)
 
@@ -725,6 +804,7 @@ async def _read(
                     offset,
                     limit,
                     started,
+                    query=query,
                     reason=f"HTTP {page_response.status_code}",
                 )
                 return _error(_status_error(page_response.status_code))
@@ -735,16 +815,30 @@ async def _read(
     except asyncio.CancelledError:
         raise
     except httpx2.TimeoutException:
-        _trace_read(trace, page, offset, limit, started, reason="timeout")
+        _trace_read(
+            trace, page, offset, limit, started, query=query, reason="timeout"
+        )
         return _error(_TIMEOUT_MESSAGE)
     except httpx2.RequestError as exc:
         _trace_read(
-            trace, page, offset, limit, started, reason=type(exc).__name__
+            trace,
+            page,
+            offset,
+            limit,
+            started,
+            query=query,
+            reason=type(exc).__name__,
         )
         return _error(_UNREACHABLE_MESSAGE)
     except Exception as exc:  # défense : le handler ne lève jamais
         _trace_read(
-            trace, page, offset, limit, started, reason=type(exc).__name__
+            trace,
+            page,
+            offset,
+            limit,
+            started,
+            query=query,
+            reason=type(exc).__name__,
         )
         return _error(_UNREACHABLE_MESSAGE)
 
@@ -755,6 +849,7 @@ async def _read(
             offset,
             limit,
             started,
+            query=query,
             reason=f"HTTP {markdown_response.status_code}",
         )
         return _error(_status_error(markdown_response.status_code))
@@ -770,18 +865,35 @@ async def _read(
             raise ValueError("unexpected read body")
     except (TypeError, ValueError):
         _trace_read(
-            trace, page, offset, limit, started, reason="unreadable body"
+            trace,
+            page,
+            offset,
+            limit,
+            started,
+            query=query,
+            reason="unreadable body",
         )
         return _error(_UNREADABLE_MESSAGE)
 
-    ranges = _markdown_ranges(markdown_object["markdown"])
-    selected = ranges[offset : offset + limit]
     markdown = markdown_object["markdown"]
-    content = (
-        markdown[selected[0][0] : selected[-1][1]] if selected else ""
-    )
+    ranges = _markdown_ranges(markdown)
+    if query is None:
+        selected = ranges[offset : offset + limit]
+        # La tranche d'origine garde les séparateurs de Notion.
+        content = (
+            markdown[selected[0][0] : selected[-1][1]] if selected else ""
+        )
+        remaining = len(ranges)
+        match_count = 0
+    else:
+        candidates = _query_matches(_markdown_blocks(markdown), query)
+        selected = candidates[offset : offset + limit]
+        # Une correspondance est synthétisée : titre de section + paragraphe.
+        content = "\n\n".join(selected)
+        remaining = len(candidates)
+        match_count = len(candidates)
     next_offset = offset + len(selected)
-    has_more = next_offset < len(ranges)
+    has_more = next_offset < remaining
     truncated = markdown_object.get("truncated") is True
     unknown = markdown_object.get("unknown_block_ids")
     unknown_ids = list(unknown) if isinstance(unknown, list) else []
@@ -799,8 +911,8 @@ async def _read(
         "total_blocks": len(ranges),
         "truncated": truncated,
         "unknown_block_ids": unknown_ids,
-        "query": None,
-        "match_count": 0,
+        "query": query,
+        "match_count": match_count,
     }
     note = _reading_note(truncated, unknown_ids)
     if note:
@@ -811,6 +923,8 @@ async def _read(
         offset,
         limit,
         started,
+        query=query,
+        match_count=match_count,
         blocks=len(selected),
         chars=len(content),
         total_blocks=len(ranges),
@@ -827,6 +941,8 @@ def _trace_read(
     limit: int,
     started: float,
     *,
+    query: str | None = None,
+    match_count: int = 0,
     blocks: int = 0,
     chars: int = 0,
     total_blocks: int = 0,
@@ -834,7 +950,11 @@ def _trace_read(
     unknown_ids: list[object] | None = None,
     reason: str | None = None,
 ) -> None:
-    """Trace une lecture : comptes, durée, statut ; jamais le contenu."""
+    """Trace une lecture : comptes, durée, statut ; jamais le contenu.
+
+    Avec un filtre, la Trace porte aussi le mot cherché et le nombre de
+    correspondances ; le contenu, lui, n'y entre jamais.
+    """
     entry: dict[str, object] = {
         "page": page,
         "offset": offset,
@@ -849,6 +969,9 @@ def _trace_read(
         ),
         "status": "error" if reason is not None else "ok",
     }
+    if query is not None:
+        entry["query"] = query
+        entry["match_count"] = match_count
     if reason is not None:
         entry["reason"] = reason
     trace("ReadPage", entry)
@@ -1085,6 +1208,18 @@ def _append_body(content: str) -> dict[str, object]:
     }
 
 
+def _replace_body(content: str) -> dict[str, object]:
+    """Corps exact du remplacement : suppression de contenu toujours refusée."""
+    return {
+        "type": "replace_content",
+        "replace_content": {
+            "new_str": content,
+            "allow_deleting_content": False,
+        },
+        "markdown_version": MARKDOWN_VERSION,
+    }
+
+
 def _rename_body(key: str, title: str) -> dict[str, object]:
     """Corps exact du renommage, sur la propriété de titre découverte."""
     return {
@@ -1136,10 +1271,26 @@ def _write_message(status: int | None, reason: str) -> str:
     return _UNREACHABLE_MESSAGE
 
 
+def _replace_message(status: int | None, reason: str) -> str:
+    """Phrase d'un remplacement échoué : un 400 est le refus de Notion.
+
+    Un 400 couvre la protection d'une sous-page ou d'une base enfant, mais
+    aussi un Markdown invalide ou une page trop volumineuse : la phrase nomme
+    les trois sans affirmer lequel s'applique.
+    """
+    if status == 400:
+        return _REPLACE_REFUSED_BY_NOTION_MESSAGE
+    return _write_message(status, reason)
+
+
 def _partial_message(
-    title_failure: str | None, content_failure: str | None
+    title_failure: str | None,
+    content_failure: str | None,
+    *,
+    mode: str = "append",
 ) -> str:
     """Phrase d'un succès partiel : ce qui a réussi, ce qui a échoué."""
+    verb = "remplacé" if mode == "replace" else "ajouté"
     if title_failure and content_failure:
         message = (
             "Ni le titre ni le contenu n'ont pu être mis à jour. "
@@ -1147,13 +1298,13 @@ def _partial_message(
         )
     elif title_failure:
         message = (
-            "Le contenu a été ajouté, mais le titre n'a pas pu être "
+            f"Le contenu a été {verb}, mais le titre n'a pas pu être "
             f"modifié. {title_failure}"
         )
     else:
         message = (
             "Le titre a été mis à jour, mais le contenu n'a pas pu être "
-            f"ajouté. {content_failure}"
+            f"{verb}. {content_failure}"
         )
     if "relis" not in message.lower():
         message += " Relis la page avant de réessayer."
@@ -1168,9 +1319,12 @@ async def _update(
     """Ajoute du contenu, renomme, et dit clairement un succès partiel.
 
     La page est lue d'abord pour découvrir la clé de sa propriété de titre et
-    rendre son identité. Le renommage et l'ajout sont deux écritures séparées,
-    tentées indépendamment ; aucune n'est rejouée. Le remplacement appartient
-    au ticket #117 : ``mode=replace`` est refusé sans aucune écriture.
+    rendre son identité. Le renommage et l'écriture du corps sont deux
+    opérations séparées, tentées indépendamment ; aucune n'est rejouée.
+
+    Le remplacement est refusé sans ``confirm: true`` et sans contenu, avant
+    tout appel HTTP. Avec confirmation, il envoie ``replace_content`` avec
+    ``allow_deleting_content: false`` : une sous-page n'est jamais détachée.
     """
     started = asyncio.get_running_loop().time()
     page_ref = _page_id(arguments.get("page"))
@@ -1179,7 +1333,7 @@ async def _update(
         return _error(_INVALID_PAGE_MESSAGE)
 
     mode = _update_mode(arguments.get("mode"))
-    if mode == "replace":
+    if mode == "replace" and arguments.get("confirm") is not True:
         _trace_update(
             trace, page_ref, mode, started, reason="replace refused"
         )
@@ -1193,6 +1347,12 @@ async def _update(
         if isinstance(raw_content, str) and raw_content.strip()
         else ""
     )
+
+    if mode == "replace" and not content:
+        _trace_update(
+            trace, page_ref, mode, started, reason="empty content"
+        )
+        return _error(_REPLACE_EMPTY_MESSAGE)
 
     try:
         async with _client(settings, REQUEST_TIMEOUT) as client:
@@ -1263,10 +1423,15 @@ async def _update(
                 title_reason = reason
 
     if content:
+        body = (
+            _replace_body(content)
+            if mode == "replace"
+            else _append_body(content)
+        )
         status, result, reason = await _patch(
             settings,
             f"/v1/pages/{page_ref}/markdown",
-            _append_body(content),
+            body,
         )
         if reason is None:
             content_updated = True
@@ -1275,7 +1440,11 @@ async def _update(
             ):
                 warnings = result["warnings"]
         else:
-            content_failure = _write_message(status, reason)
+            content_failure = (
+                _replace_message(status, reason)
+                if mode == "replace"
+                else _write_message(status, reason)
+            )
             content_reason = reason
 
     chars = (len(title) if title_updated else 0) + (
@@ -1308,7 +1477,9 @@ async def _update(
         )
         return {
             "status": "error",
-            "message": _partial_message(title_failure, content_failure),
+            "message": _partial_message(
+                title_failure, content_failure, mode=mode
+            ),
             **flags,
         }
 
