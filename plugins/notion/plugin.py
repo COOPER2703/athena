@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
@@ -88,6 +89,10 @@ _READ_PARAMETERS: Mapping[str, object] = {
             "minimum": 1,
             "maximum": 50,
             "description": "Blocs (ou correspondances) par appel. Défaut 20.",
+        },
+        "query": {
+            "type": "string",
+            "description": "Mot à chercher dans les paragraphes de cette page.",
         },
     },
     "required": ["page"],
@@ -551,6 +556,59 @@ def _markdown_blocks(markdown: str) -> list[str]:
     return blocks
 
 
+# Marques combinantes retirées pour comparer sans accents.
+_COMBINING_MARKS = re.compile(r"[\u0300-\u036f]")
+
+
+def _fold(text: str) -> str:
+    """Forme comparée : minuscules, sans accents ; jamais la forme rendue."""
+    decomposed = unicodedata.normalize("NFKD", text)
+    return _COMBINING_MARKS.sub("", decomposed).casefold()
+
+
+def _is_heading(block: str) -> bool:
+    """Vrai si le bloc est un titre Markdown."""
+    return bool(_HEADING.match(block))
+
+
+def _is_paragraph(block: str) -> bool:
+    """Vrai pour un paragraphe de premier niveau seulement.
+
+    Un titre, une liste, un tableau, un bloc de code et une région de balises
+    Notion ne sont jamais des paragraphes : le filtre par mot les ignore.
+    """
+    first = block.split("\n", 1)[0]
+    if _FENCE.match(first) or _HEADING.match(first) or _LIST_LINE.match(first):
+        return False
+    if first.lstrip().startswith("|"):
+        return False
+    match = _CONTAINER_TAG.match(first)
+    return not (match and match.group(1).lower() in _CONTAINER_TAGS)
+
+
+def _query_matches(blocks: list[str], query: str) -> list[str]:
+    """Paragraphes contenant le mot entier, chacun avec son titre de section.
+
+    La comparaison ignore casse et accents, mais le texte rendu garde les
+    siens. Le contexte est le dernier titre qui précède le paragraphe ; avant
+    le premier titre, il n'y en a aucun.
+    """
+    folded = _fold(query)
+    if not folded:
+        return []
+    pattern = re.compile(rf"(?<!\w){re.escape(folded)}(?!\w)")
+    heading = ""
+    matches: list[str] = []
+    for block in blocks:
+        if _is_heading(block):
+            heading = block
+            continue
+        if not _is_paragraph(block) or not pattern.search(_fold(block)):
+            continue
+        matches.append(f"{heading}\n\n{block}" if heading else block)
+    return matches
+
+
 def _properties(page: Mapping[str, Any]) -> dict[str, str]:
     """Propriétés non vides rendues en texte, dans l'ordre de la page."""
     raw = page.get("properties")
@@ -703,10 +761,20 @@ async def _read(
         MAX_READ_LIMIT,
         max(1, _read_int(arguments.get("limit"), DEFAULT_READ_LIMIT)),
     )
+    # Un filtre vide ou mal typé vaut absence de filtre : lecture paginée.
+    raw_query = arguments.get("query")
+    query = raw_query.strip() if isinstance(raw_query, str) else ""
+    query = query or None
 
     if page is None:
         _trace_read(
-            trace, None, offset, limit, started, reason="invalid page"
+            trace,
+            None,
+            offset,
+            limit,
+            started,
+            query=query,
+            reason="invalid page",
         )
         return _error(_INVALID_PAGE_MESSAGE)
 
@@ -722,6 +790,7 @@ async def _read(
                     offset,
                     limit,
                     started,
+                    query=query,
                     reason=f"HTTP {page_response.status_code}",
                 )
                 return _error(_status_error(page_response.status_code))
@@ -732,16 +801,30 @@ async def _read(
     except asyncio.CancelledError:
         raise
     except httpx2.TimeoutException:
-        _trace_read(trace, page, offset, limit, started, reason="timeout")
+        _trace_read(
+            trace, page, offset, limit, started, query=query, reason="timeout"
+        )
         return _error(_TIMEOUT_MESSAGE)
     except httpx2.RequestError as exc:
         _trace_read(
-            trace, page, offset, limit, started, reason=type(exc).__name__
+            trace,
+            page,
+            offset,
+            limit,
+            started,
+            query=query,
+            reason=type(exc).__name__,
         )
         return _error(_UNREACHABLE_MESSAGE)
     except Exception as exc:  # défense : le handler ne lève jamais
         _trace_read(
-            trace, page, offset, limit, started, reason=type(exc).__name__
+            trace,
+            page,
+            offset,
+            limit,
+            started,
+            query=query,
+            reason=type(exc).__name__,
         )
         return _error(_UNREACHABLE_MESSAGE)
 
@@ -752,6 +835,7 @@ async def _read(
             offset,
             limit,
             started,
+            query=query,
             reason=f"HTTP {markdown_response.status_code}",
         )
         return _error(_status_error(markdown_response.status_code))
@@ -767,15 +851,27 @@ async def _read(
             raise ValueError("unexpected read body")
     except (TypeError, ValueError):
         _trace_read(
-            trace, page, offset, limit, started, reason="unreadable body"
+            trace,
+            page,
+            offset,
+            limit,
+            started,
+            query=query,
+            reason="unreadable body",
         )
         return _error(_UNREADABLE_MESSAGE)
 
     blocks = _markdown_blocks(markdown_object["markdown"])
-    selected = blocks[offset : offset + limit]
+    if query is None:
+        candidates = blocks
+        match_count = 0
+    else:
+        candidates = _query_matches(blocks, query)
+        match_count = len(candidates)
+    selected = candidates[offset : offset + limit]
     content = "\n\n".join(selected)
     next_offset = offset + len(selected)
-    has_more = next_offset < len(blocks)
+    has_more = next_offset < len(candidates)
     truncated = markdown_object.get("truncated") is True
     unknown = markdown_object.get("unknown_block_ids")
     unknown_ids = list(unknown) if isinstance(unknown, list) else []
@@ -793,8 +889,8 @@ async def _read(
         "total_blocks": len(blocks),
         "truncated": truncated,
         "unknown_block_ids": unknown_ids,
-        "query": None,
-        "match_count": 0,
+        "query": query,
+        "match_count": match_count,
     }
     note = _reading_note(truncated, unknown_ids)
     if note:
@@ -805,6 +901,8 @@ async def _read(
         offset,
         limit,
         started,
+        query=query,
+        match_count=match_count,
         blocks=len(selected),
         chars=len(content),
         total_blocks=len(blocks),
@@ -821,6 +919,8 @@ def _trace_read(
     limit: int,
     started: float,
     *,
+    query: str | None = None,
+    match_count: int = 0,
     blocks: int = 0,
     chars: int = 0,
     total_blocks: int = 0,
@@ -828,7 +928,11 @@ def _trace_read(
     unknown_ids: list[object] | None = None,
     reason: str | None = None,
 ) -> None:
-    """Trace une lecture : comptes, durée, statut ; jamais le contenu."""
+    """Trace une lecture : comptes, durée, statut ; jamais le contenu.
+
+    Avec un filtre, la Trace porte aussi le mot cherché et le nombre de
+    correspondances ; le contenu, lui, n'y entre jamais.
+    """
     entry: dict[str, object] = {
         "page": page,
         "offset": offset,
@@ -843,6 +947,9 @@ def _trace_read(
         ),
         "status": "error" if reason is not None else "ok",
     }
+    if query is not None:
+        entry["query"] = query
+        entry["match_count"] = match_count
     if reason is not None:
         entry["reason"] = reason
     trace("ReadPage", entry)

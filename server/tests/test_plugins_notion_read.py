@@ -42,6 +42,10 @@ READ_PARAMETERS: dict = {
             "maximum": 50,
             "description": "Blocs (ou correspondances) par appel. Défaut 20.",
         },
+        "query": {
+            "type": "string",
+            "description": "Mot à chercher dans les paragraphes de cette page.",
+        },
     },
     "required": ["page"],
 }
