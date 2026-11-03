@@ -386,6 +386,7 @@ def _tool_bindings(
     """Les Tools de ce ticket ; les tickets suivants ajoutent une ligne ici."""
     return (
         _search_tool(settings, trace),
+        _create_tool(settings, trace),
         _update_tool(settings, trace),
     )
 
@@ -887,6 +888,238 @@ def _trace_update(
     if reason is not None:
         entry["reason"] = reason
     trace("UpdatePage", entry)
+
+
+# -- Tool ``create_page`` ------------------------------------------------------
+
+
+_CREATE_DESCRIPTION = (
+    "Crée une page Notion sous une page parente, avec un titre et un corps "
+    "Markdown."
+)
+
+_CREATE_PARAMETERS: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "title": {
+            "type": "string",
+            "description": "Titre de la page.",
+        },
+        "content": {
+            "type": "string",
+            "description": "Corps en Markdown Notion (v2). Optionnel.",
+        },
+        "parent": {
+            "type": "string",
+            "description": (
+                "Identifiant ou URL d'une page parente. "
+                "Défaut : la page configurée."
+            ),
+        },
+    },
+    "required": ["title"],
+}
+
+_CREATE_VALIDATION_MESSAGE = (
+    "Notion a refusé le Markdown de la page (Markdown invalide, plus de "
+    "5 000 blocs ou limite de taille atteinte). Réessaie avec un contenu "
+    "plus court ou plus simple."
+)
+
+
+def _create_tool(settings: _Settings, trace: Trace) -> ToolBinding:
+    """Déclare ``create_page`` et son handler : un appel ne lève jamais."""
+
+    async def handle(
+        arguments: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        return await _create(settings, arguments, trace)
+
+    return ToolBinding(
+        spec=ToolSpec(
+            name="create_page",
+            description=_CREATE_DESCRIPTION,
+            parameters=_CREATE_PARAMETERS,
+        ),
+        handler=handle,
+    )
+
+
+def _create_parent(settings: _Settings, raw: object) -> str | None:
+    """Parent demandé, ou page configurée quand ``parent`` est vide."""
+    if raw is None:
+        return _page_id(settings.parent_page_id)
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    return _page_id(text or settings.parent_page_id)
+
+
+def _create_body(parent: str, title: str, content: str) -> dict[str, object]:
+    """Corps exact de ``POST /v1/pages`` (spec #111).
+
+    La propriété de titre est envoyée explicitement. Le Markdown et sa version
+    n'apparaissent que s'il y a un corps : la version seule est un 400.
+    """
+    body: dict[str, object] = {
+        "parent": {"type": "page_id", "page_id": parent},
+        "properties": {
+            "title": {
+                "type": "title",
+                "title": [
+                    {
+                        "type": "text",
+                        "text": {"content": title},
+                    }
+                ],
+            }
+        },
+    }
+    if content:
+        body["markdown"] = content
+        body["markdown_version"] = MARKDOWN_VERSION
+    return body
+
+
+def _created_summary(
+    page: Mapping[str, Any], fallback_title: str
+) -> dict[str, object]:
+    """Projette la page créée ; le titre demandé sert de repli."""
+    summary = _page_brief(page)
+    if summary["title"] == "(sans titre)":
+        summary["title"] = fallback_title
+    return summary
+
+
+async def _create(
+    settings: _Settings,
+    arguments: Mapping[str, object],
+    trace: Trace,
+) -> Mapping[str, object]:
+    """Crée une page, ou rend une phrase française ; ne lève jamais."""
+    title_value = arguments.get("title")
+    title = title_value.strip() if isinstance(title_value, str) else ""
+    content_value = arguments.get("content")
+    content = content_value if isinstance(content_value, str) else ""
+    parent = _create_parent(settings, arguments.get("parent"))
+    started = asyncio.get_running_loop().time()
+
+    if parent is None:
+        # Aucun appel HTTP : l'identifiant est refusé avant le réseau.
+        _trace_create(
+            trace,
+            parent=None,
+            title=title,
+            content=content,
+            started=started,
+            reason="invalid parent",
+        )
+        return _error(_INVALID_PAGE_MESSAGE)
+
+    body = _create_body(parent, title, content)
+    try:
+        async with _client(settings, REQUEST_TIMEOUT) as client:
+            response = await client.post(
+                settings.base_url + "/v1/pages", json=body
+            )
+    except asyncio.CancelledError:
+        raise
+    except httpx2.TimeoutException:
+        _trace_create(
+            trace,
+            parent=parent,
+            title=title,
+            content=content,
+            started=started,
+            reason="timeout",
+        )
+        return _error(_TIMEOUT_MESSAGE)
+    except httpx2.RequestError as exc:
+        _trace_create(
+            trace,
+            parent=parent,
+            title=title,
+            content=content,
+            started=started,
+            reason=type(exc).__name__,
+        )
+        return _error(_UNREACHABLE_MESSAGE)
+    except Exception as exc:  # défense : le handler ne lève jamais
+        _trace_create(
+            trace,
+            parent=parent,
+            title=title,
+            content=content,
+            started=started,
+            reason=type(exc).__name__,
+        )
+        return _error(_UNREACHABLE_MESSAGE)
+
+    if response.status_code >= 400:
+        status = response.status_code
+        _trace_create(
+            trace,
+            parent=parent,
+            title=title,
+            content=content,
+            started=started,
+            reason=f"HTTP {status}",
+        )
+        if status == 400:
+            return _error(_CREATE_VALIDATION_MESSAGE)
+        return _error(_status_error(status, write=True))
+
+    try:
+        page = response.json()
+    except (TypeError, ValueError):
+        page = None
+    if not isinstance(page, dict):
+        _trace_create(
+            trace,
+            parent=parent,
+            title=title,
+            content=content,
+            started=started,
+            reason="unreadable body",
+        )
+        return _error(_UNREADABLE_MESSAGE)
+
+    payload = {
+        "status": "ok",
+        "page": _created_summary(page, title),
+    }
+    _trace_create(
+        trace,
+        parent=parent,
+        title=title,
+        content=content,
+        started=started,
+    )
+    return payload
+
+
+def _trace_create(
+    trace: Trace,
+    *,
+    parent: str | None,
+    title: str,
+    content: str,
+    started: float,
+    reason: str | None = None,
+) -> None:
+    """Trace une création sans jamais y placer le texte de la page."""
+    entry: dict[str, object] = {
+        "parent": parent,
+        "title_chars": len(title),
+        "content_chars": len(content),
+        "duration_ms": round(
+            (asyncio.get_running_loop().time() - started) * 1000, 1
+        ),
+        "status": "error" if reason is not None else "ok",
+    }
+    if reason is not None:
+        entry["reason"] = reason
+    trace("CreatePage", entry)
 
 
 def _status_error(status: int, *, write: bool = False) -> str:
