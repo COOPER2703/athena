@@ -153,7 +153,7 @@ def test_update_page_is_declared_with_append_default_and_confirm(
                 assert "append" in spec.parameters_json_schema["properties"][
                     "mode"
                 ]["description"]
-                assert "ajoute" in spec.description
+                assert "Ajoute du contenu" in spec.description
 
     asyncio.run(scenario())
 
