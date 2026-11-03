@@ -131,6 +131,41 @@ _UPDATE_PARAMETERS: Mapping[str, object] = {
     "required": ["page"],
 }
 
+# Instruction d'usage posée dans le prompt de toute Session (spec #111,
+# ticket #120) : quand appeler chaque Tool, ce qui exige confirmation, le
+# sous-ensemble Markdown garanti et les limites assumées.
+INSTRUCTION = (
+    "Les Tools Notion ne voient que les pages partagées avec la connexion, "
+    "et rien d'autre ; les bases de données et les sources de données sont "
+    "hors périmètre, et seul le titre s'écrit parmi les propriétés. "
+    "N'invente jamais un identifiant ni une URL de page : n'utilise que ceux "
+    "rendus par `search_pages` ou donnés par l'utilisateur.\n"
+    "`search_pages` : quand l'utilisateur nomme une page sans identifiant ni "
+    "URL. Si plusieurs titres se ressemblent, lis les titres candidats à voix "
+    "haute et fais choisir ; suis `next_cursor` s'il reste des résultats.\n"
+    "`read_page` : quand l'utilisateur veut le contenu, un détail, ou « la "
+    "suite ». Reprends avec `offset` et `next_offset`. Utilise `query` pour "
+    "retrouver un mot dans les paragraphes de cette page seulement, avec son "
+    "titre de section ; ne cherche jamais dans tout le workspace.\n"
+    "`create_page` : pour créer une page sous la page parente par défaut, ou "
+    "sous un parent que l'utilisateur nomme ; confirme le parent quand il en "
+    "nomme un.\n"
+    "`update_page` : ajoute du contenu par défaut ; ne remplace le corps "
+    "qu'après une confirmation explicite, avec `mode=replace` et "
+    "`confirm=true`. Pour corriger un titre dicté, renomme.\n"
+    "`trash_page` : seulement après confirmation explicite, après avoir lu le "
+    "titre et annoncé les `child_pages` emportées.\n"
+    "`restore_page` : pour annuler une mise à la corbeille.\n"
+    "Markdown garanti en écriture : titres 1 à 4, paragraphes, listes à puces "
+    "et numérotées, cases à cocher, citations, blocs de code avec un nom de "
+    "langage court, gras, italique, barré et code en ligne, liens, tableaux "
+    "GFM en pipe tables, et "
+    '<columns><column ratio="50">…</column><column ratio="50">…</column>'
+    "</columns> pour les colonnes. Limites : 2 000 caractères par texte "
+    "enrichi, 100 blocs par ajout, 5 000 blocs à la création ; au-delà, "
+    "Notion refuse plutôt que de couper en silence."
+)
+
 _UNREACHABLE_MESSAGE = (
     "Notion est injoignable. Réessaie dans un instant."
 )
@@ -226,6 +261,7 @@ async def create(context: PluginContext) -> PluginBinding:
     return PluginBinding(
         name=context.name,
         tools=_tool_bindings(settings, context.trace),
+        instruction=INSTRUCTION,
     )
 
 
