@@ -99,7 +99,7 @@ _READ_PARAMETERS: Mapping[str, object] = {
 }
 
 _UPDATE_DESCRIPTION = (
-    "ajoute du contenu à une page, remplace son corps sur confirmation, "
+    "Ajoute du contenu à une page, remplace son corps sur confirmation, "
     "ou la renomme."
 )
 

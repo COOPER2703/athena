@@ -198,7 +198,7 @@ DESCRIPTIONS: dict[str, str] = {
         "corps Markdown."
     ),
     "update_page": (
-        "ajoute du contenu à une page, remplace son corps sur confirmation, "
+        "Ajoute du contenu à une page, remplace son corps sur confirmation, "
         "ou la renomme."
     ),
     "trash_page": (
