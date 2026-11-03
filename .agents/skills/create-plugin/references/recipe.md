@@ -101,8 +101,8 @@ plugin does not decide whether it is announced; the kernel judges it at Repos.
 
 `PluginBinding.instruction` is composed into the system prompt of every Session where the
 plugin's Tools are declared. It is a usage policy, not a schema: when to call, when not to,
-what to say before calling, how to phrase a failure. Announcement sessions have no Tools and
-therefore no plugin instruction.
+what to say before calling, how to phrase a failure. An Announcement Session carries the same
+instruction but declares no Tools (ADR-0017).
 
 ## Tests
 

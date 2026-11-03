@@ -87,8 +87,8 @@ plugin prevents the server from serving anything.
 - `name` — must equal `context.name`.
 - `tools` — a tuple of `ToolBinding(spec, handler)`.
 - `instruction` — a usage policy for Gemini, composed into the system prompt of every Session
-  where the plugin's Tools are declared. It is not a schema and it is not included in
-  Announcement sessions, which have no Tools.
+  where the plugin's Tools are declared. It is not a schema. An Announcement Session carries
+  the same instruction but declares no Tools (ADR-0017).
 
 `ToolSpec(name, description, parameters)` is the declaration Gemini sees. `parameters` is a
 JSON Schema mapping, passed as-is. The handler receives a `Mapping[str, object]` and returns a
@@ -96,11 +96,12 @@ JSON Schema mapping, passed as-is. The handler receives a `Mapping[str, object]`
 
 ### Tool round-trip
 
-At the opening of each Live connection, the kernel declares the kernel Tools plus the Tools of
-every activated plugin. Gemini calls a Tool; the kernel executes the handler; the result goes
-back as a `FunctionResponse`. The plugin's handler is the only code that leaves the server,
-towards the external platform. The kernel does not rename or prefix platform Tools: their
-names are the platform's.
+At the opening of each ordinary Live connection, the kernel declares the kernel Tools plus the
+Tools of every activated plugin. An Announcement connection declares **no** Tools, so that
+external content can never trigger an action (ADR-0017). Gemini calls a Tool; the kernel
+executes the handler; the result goes back as a `FunctionResponse`. The plugin's handler is
+the only code that leaves the server, towards the external platform. The kernel does not
+rename or prefix platform Tools: their names are the platform's.
 
 A plugin activated by a successful retry becomes visible to the **next** Live connection, not
 the current one, because the Tool list is frozen when the connection opens.
