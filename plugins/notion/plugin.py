@@ -48,6 +48,14 @@ _SEARCH_DESCRIPTION = (
     "Cherche des pages Notion par titre et rend les candidats avec leur URL."
 )
 
+_READ_DESCRIPTION = (
+    "Lit une page Notion en Markdown, par blocs, avec ses propriétés."
+)
+
+# Blocs de premier niveau rendus par appel : défaut 20, bornes 1..50.
+DEFAULT_READ_LIMIT = 20
+MAX_READ_LIMIT = 50
+
 _TOOL_PARAMETERS: Mapping[str, object] = {
     "type": "object",
     "properties": {
@@ -61,6 +69,28 @@ _TOOL_PARAMETERS: Mapping[str, object] = {
         },
     },
     "required": ["query"],
+}
+
+_READ_PARAMETERS: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "page": {
+            "type": "string",
+            "description": "Identifiant ou URL de la page.",
+        },
+        "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Bloc (ou correspondance) de départ. Défaut 0.",
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "description": "Blocs (ou correspondances) par appel. Défaut 20.",
+        },
+    },
+    "required": ["page"],
 }
 
 _UNREACHABLE_MESSAGE = (
@@ -101,6 +131,18 @@ _STATUS_MESSAGE = (
     "Notion a renvoyé une erreur (réponse {status}). "
     "Réessaie dans un instant."
 )
+_INVALID_PAGE_MESSAGE = (
+    "L'identifiant ou l'URL de la page est invalide. "
+    "Donne un identifiant Notion ou une URL de page."
+)
+_TRUNCATED_AND_UNKNOWN_NOTE = (
+    "Le contenu de la page est tronqué par Notion ; "
+    "certains blocs n'ont pas pu être lus."
+)
+_TRUNCATED_NOTE = (
+    "Le contenu de la page est tronqué par Notion ; la fin peut manquer."
+)
+_UNKNOWN_NOTE = "Certains blocs de la page n'ont pas pu être lus."
 
 Trace = Callable[..., None]
 
@@ -332,15 +374,438 @@ def _page_summary(page: Mapping[str, Any]) -> dict[str, object]:
     }
 
 
+# -- Tool ``read_page`` --------------------------------------------------------
+
+
+# Marqueur d'ouverture d'un bloc de code clôturé par le même caractère.
+_FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+# Ligne de liste à puces ou numérotée, éventuellement indentée.
+_LIST_LINE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
+# Titre Markdown : un à six dièses en début de ligne.
+_HEADING = re.compile(r"^\s{0,3}#{1,6}\s")
+# Balise Notion ouvrant une région à garder entière (colonnes, tableau, etc.).
+_CONTAINER_TAG = re.compile(r"^\s*<([a-z][a-z-]*)", re.IGNORECASE)
+_CONTAINER_TAGS = frozenset(
+    (
+        "columns",
+        "table",
+        "callout",
+        "toggle",
+        "page",
+        "database",
+        "synced-block",
+    )
+)
+
+
+def _starts_block(line: str) -> bool:
+    """Vrai si la ligne ouvre un bloc de premier niveau."""
+    if _FENCE.match(line) or _HEADING.match(line):
+        return True
+    if _LIST_LINE.match(line) or line.lstrip().startswith("|"):
+        return True
+    match = _CONTAINER_TAG.match(line)
+    return bool(match and match.group(1).lower() in _CONTAINER_TAGS)
+
+
+def _fence_block(lines: list[str], start: int) -> int:
+    """Indice qui suit la clôture d'un bloc de code (ou la fin du texte)."""
+    match = _FENCE.match(lines[start])
+    if match is None:
+        return start + 1
+    marker = match.group(1)
+    closing = re.compile(
+        rf"^\s*{re.escape(marker[0])}{{{len(marker)},}}\s*$"
+    )
+    index = start + 1
+    while index < len(lines):
+        if closing.match(lines[index]):
+            return index + 1
+        index += 1
+    return len(lines)
+
+
+def _container_block(lines: list[str], start: int, tag: str) -> int:
+    """Indice qui suit la balise fermante de même nom, imbrication comprise.
+
+    Seule la balise ouvrante compte : ``<column>`` imbriqué dans ``<columns>``
+    ne clôt donc jamais le groupe trop tôt.
+    """
+    opening = re.compile(
+        rf"<{re.escape(tag)}(?=[\s>/])", re.IGNORECASE
+    )
+    closing = re.compile(rf"</{re.escape(tag)}\s*>", re.IGNORECASE)
+    depth = 0
+    index = start
+    while index < len(lines):
+        line = lines[index]
+        # Une balise auto-fermante ne change pas la profondeur.
+        cleaned = re.sub(
+            rf"<{re.escape(tag)}(?=[\s>/])[^>]*?/>",
+            "",
+            line,
+            flags=re.IGNORECASE,
+        )
+        depth += len(opening.findall(cleaned)) - len(closing.findall(cleaned))
+        index += 1
+        if depth <= 0:
+            break
+    return index
+
+
+def _markdown_blocks(markdown: str) -> list[str]:
+    """Découpe un Markdown en blocs de premier niveau sans en couper un seul.
+
+    Un bloc de code, un tableau GFM, une région de balises Notion et une suite
+    de lignes de liste restent entiers ; un titre ou un paragraphe est un bloc.
+    """
+    lines = markdown.splitlines()
+    blocks: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            index += 1
+            continue
+
+        if _FENCE.match(line):
+            end = _fence_block(lines, index)
+        elif line.lstrip().startswith("|"):
+            end = index + 1
+            while end < len(lines) and lines[end].lstrip().startswith("|"):
+                end += 1
+        elif (
+            (match := _CONTAINER_TAG.match(line))
+            and match.group(1).lower() in _CONTAINER_TAGS
+        ):
+            end = _container_block(lines, index, match.group(1))
+        elif _LIST_LINE.match(line):
+            end = index + 1
+            while end < len(lines) and _LIST_LINE.match(lines[end]):
+                end += 1
+        elif _HEADING.match(line):
+            end = index + 1
+        else:
+            end = index + 1
+            while (
+                end < len(lines)
+                and lines[end].strip()
+                and not _starts_block(lines[end])
+            ):
+                end += 1
+
+        blocks.append("\n".join(lines[index:end]))
+        index = end
+    return blocks
+
+
+def _properties(page: Mapping[str, Any]) -> dict[str, str]:
+    """Propriétés non vides rendues en texte, dans l'ordre de la page."""
+    raw = page.get("properties")
+    if not isinstance(raw, dict):
+        return {}
+    rendered: dict[str, str] = {}
+    for name, prop in raw.items():
+        if not isinstance(name, str) or not isinstance(prop, dict):
+            continue
+        text = _property_text(prop)
+        if text:
+            rendered[name] = text
+    return rendered
+
+
+def _property_text(prop: Mapping[str, Any]) -> str:
+    """Rend une propriété Notion en texte ; un type inconnu est omis."""
+    kind = prop.get("type")
+    if kind == "title":
+        return _rich_text(prop.get("title"))
+    if kind == "rich_text":
+        return _rich_text(prop.get("rich_text"))
+    if kind in ("select", "status"):
+        option = prop.get(kind)
+        if not isinstance(option, dict):
+            return ""
+        return _text(option.get("name")).strip()
+    if kind == "date":
+        date = prop.get("date")
+        if not isinstance(date, dict):
+            return ""
+        return _text(date.get("start")).strip()
+    if kind == "number":
+        return _number_text(prop.get("number"))
+    if kind == "checkbox":
+        return "oui" if prop.get("checkbox") is True else "non"
+    if kind in ("url", "email", "phone_number"):
+        return _text(prop.get(kind)).strip()
+    if kind == "formula":
+        formula = prop.get("formula")
+        return _formula_text(formula) if isinstance(formula, dict) else ""
+    if kind == "people":
+        return _people_text(prop.get("people"))
+    return ""
+
+
+def _number_text(value: object) -> str:
+    """Nombre Notion en texte ; un booléen n'est jamais un nombre."""
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def _formula_text(formula: Mapping[str, Any]) -> str:
+    """Résultat d'une formule, quel que soit son type."""
+    result = formula.get("result")
+    if isinstance(result, bool):
+        return "oui" if result else "non"
+    if isinstance(result, dict):
+        return _text(result.get("start")).strip()
+    return _number_text(result)
+
+
+def _people_text(people: object) -> str:
+    """Noms des personnes, séparés par une virgule."""
+    if not isinstance(people, list):
+        return ""
+    names = [
+        _text(person.get("name")).strip()
+        for person in people
+        if isinstance(person, dict)
+    ]
+    return ", ".join(name for name in names if name)
+
+
+def _rich_text(items: object) -> str:
+    """Concatène le ``plain_text`` d'un tableau de texte enrichi."""
+    if not isinstance(items, list):
+        return ""
+    return "".join(
+        _text(part.get("plain_text"))
+        for part in items
+        if isinstance(part, dict)
+    ).strip()
+
+
+def _reading_note(truncated: bool, unknown_ids: list[object]) -> str:
+    """Phrase française posée quand Notion signale une lecture incomplète."""
+    if truncated and unknown_ids:
+        return _TRUNCATED_AND_UNKNOWN_NOTE
+    if truncated:
+        return _TRUNCATED_NOTE
+    if unknown_ids:
+        return _UNKNOWN_NOTE
+    return ""
+
+
+def _read_int(value: object, default: int) -> int:
+    """Entier sûr d'un argument du modèle ; le défaut couvre le doute."""
+    if isinstance(value, bool) or value is None:
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return default
+    return default
+
+
+def _read_tool(settings: _Settings, trace: Trace) -> ToolBinding:
+    """Déclare ``read_page`` et son handler : un appel ne lève jamais."""
+
+    async def handle(
+        arguments: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        return await _read(settings, arguments, trace)
+
+    return ToolBinding(
+        spec=ToolSpec(
+            name="read_page",
+            description=_READ_DESCRIPTION,
+            parameters=_READ_PARAMETERS,
+        ),
+        handler=handle,
+    )
+
+
+async def _read(
+    settings: _Settings,
+    arguments: Mapping[str, object],
+    trace: Trace,
+) -> Mapping[str, object]:
+    """Lit une page en Markdown, paginée par blocs de premier niveau.
+
+    Un appel ne lève jamais : une panne devient une phrase française. Un
+    identifiant invalide est refusé avant le réseau. Aucun retry.
+    """
+    started = asyncio.get_running_loop().time()
+    page = _page_id(arguments.get("page"))
+    offset = max(0, _read_int(arguments.get("offset"), 0))
+    limit = min(
+        MAX_READ_LIMIT,
+        max(1, _read_int(arguments.get("limit"), DEFAULT_READ_LIMIT)),
+    )
+
+    if page is None:
+        _trace_read(
+            trace, None, offset, limit, started, reason="invalid page"
+        )
+        return _error(_INVALID_PAGE_MESSAGE)
+
+    try:
+        async with _client(settings, REQUEST_TIMEOUT) as client:
+            page_response = await client.get(
+                settings.base_url + f"/v1/pages/{page}"
+            )
+            if page_response.status_code >= 400:
+                _trace_read(
+                    trace,
+                    page,
+                    offset,
+                    limit,
+                    started,
+                    reason=f"HTTP {page_response.status_code}",
+                )
+                return _error(_status_error(page_response.status_code))
+            markdown_response = await client.get(
+                settings.base_url + f"/v1/pages/{page}/markdown",
+                params={"markdown_version": MARKDOWN_VERSION},
+            )
+    except asyncio.CancelledError:
+        raise
+    except httpx2.TimeoutException:
+        _trace_read(trace, page, offset, limit, started, reason="timeout")
+        return _error(_TIMEOUT_MESSAGE)
+    except httpx2.RequestError as exc:
+        _trace_read(
+            trace, page, offset, limit, started, reason=type(exc).__name__
+        )
+        return _error(_UNREACHABLE_MESSAGE)
+    except Exception as exc:  # défense : le handler ne lève jamais
+        _trace_read(
+            trace, page, offset, limit, started, reason=type(exc).__name__
+        )
+        return _error(_UNREACHABLE_MESSAGE)
+
+    if markdown_response.status_code >= 400:
+        _trace_read(
+            trace,
+            page,
+            offset,
+            limit,
+            started,
+            reason=f"HTTP {markdown_response.status_code}",
+        )
+        return _error(_status_error(markdown_response.status_code))
+
+    try:
+        page_object = page_response.json()
+        markdown_object = markdown_response.json()
+        if (
+            not isinstance(page_object, dict)
+            or not isinstance(markdown_object, dict)
+            or not isinstance(markdown_object.get("markdown"), str)
+        ):
+            raise ValueError("unexpected read body")
+    except (TypeError, ValueError):
+        _trace_read(
+            trace, page, offset, limit, started, reason="unreadable body"
+        )
+        return _error(_UNREADABLE_MESSAGE)
+
+    blocks = _markdown_blocks(markdown_object["markdown"])
+    selected = blocks[offset : offset + limit]
+    content = "\n\n".join(selected)
+    next_offset = offset + len(selected)
+    has_more = next_offset < len(blocks)
+    truncated = markdown_object.get("truncated") is True
+    unknown = markdown_object.get("unknown_block_ids")
+    unknown_ids = list(unknown) if isinstance(unknown, list) else []
+
+    payload: dict[str, object] = {
+        "status": "ok",
+        "page": {
+            **_page_summary(page_object),
+            "properties": _properties(page_object),
+        },
+        "content": content,
+        "offset": offset,
+        "next_offset": next_offset,
+        "has_more": has_more,
+        "total_blocks": len(blocks),
+        "truncated": truncated,
+        "unknown_block_ids": unknown_ids,
+        "query": None,
+        "match_count": 0,
+    }
+    note = _reading_note(truncated, unknown_ids)
+    if note:
+        payload["note"] = note
+    _trace_read(
+        trace,
+        page,
+        offset,
+        limit,
+        started,
+        blocks=len(selected),
+        chars=len(content),
+        total_blocks=len(blocks),
+        truncated=truncated,
+        unknown_ids=unknown_ids,
+    )
+    return payload
+
+
+def _trace_read(
+    trace: Trace,
+    page: str | None,
+    offset: int,
+    limit: int,
+    started: float,
+    *,
+    blocks: int = 0,
+    chars: int = 0,
+    total_blocks: int = 0,
+    truncated: bool = False,
+    unknown_ids: list[object] | None = None,
+    reason: str | None = None,
+) -> None:
+    """Trace une lecture : comptes, durée, statut ; jamais le contenu."""
+    entry: dict[str, object] = {
+        "page": page,
+        "offset": offset,
+        "limit": limit,
+        "blocks": blocks,
+        "chars": chars,
+        "total_blocks": total_blocks,
+        "truncated": truncated,
+        "unknown_block_ids": list(unknown_ids or ()),
+        "duration_ms": round(
+            (asyncio.get_running_loop().time() - started) * 1000, 1
+        ),
+        "status": "error" if reason is not None else "ok",
+    }
+    if reason is not None:
+        entry["reason"] = reason
+    trace("ReadPage", entry)
+
+
 # -- Tool ``search_pages`` -----------------------------------------------------
 
 
 def _tool_bindings(
     settings: _Settings, trace: Trace
 ) -> tuple[ToolBinding, ...]:
-    """Les Tools de ce ticket ; les tickets suivants ajoutent une ligne ici."""
+    """Les Tools du plugin ; les tickets suivants ajoutent une ligne ici."""
     return (
         _search_tool(settings, trace),
+        _read_tool(settings, trace),
     )
 
 

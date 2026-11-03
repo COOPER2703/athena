@@ -119,7 +119,7 @@ def test_refused_probe_degrades_the_start_then_repairs_itself(
 
                 # Les Tools arrivent à la Connexion Live suivante.
                 async with live_session(transport, live):
-                    assert set(declared(live)) == {"search_pages"}
+                    assert set(declared(live)) == {"read_page", "search_pages"}
 
     asyncio.run(scenario())
 
@@ -170,12 +170,12 @@ def test_a_probe_5xx_is_traced_as_degraded_without_blocking_the_start(
                     {
                         "name": "notion",
                         "state": "activated",
-                        "tools": ["search_pages"],
+                        "tools": ["read_page", "search_pages"],
                     }
                 ]
 
                 async with live_session(transport, live):
-                    assert set(declared(live)) == {"search_pages"}
+                    assert set(declared(live)) == {"read_page", "search_pages"}
 
     asyncio.run(scenario())
 
@@ -378,13 +378,13 @@ def test_search_pages_is_declared_and_returns_page_candidates(
                     {
                         "name": "notion",
                         "state": "activated",
-                        "tools": ["search_pages"],
+                        "tools": ["read_page", "search_pages"],
                     }
                 ]
 
                 async with live_session(transport, live) as session:
                     tools = declared(live)
-                    assert set(tools) == {"search_pages"}
+                    assert set(tools) == {"read_page", "search_pages"}
                     assert dict(
                         tools["search_pages"].parameters_json_schema
                     ) == SEARCH_PARAMETERS
