@@ -252,10 +252,13 @@ INFO [plugins] ReadPage {"blocks": 17, "chars": N, "duration_ms": N, "limit": 20
 ```
 
 - `has_more` est faux quand `next_offset` atteint le total. Un tableau et un groupe de
-  colonnes ne sont **jamais coupés** par la pagination.
+  colonnes ne sont **jamais coupés** par la pagination. Une liste compte **un bloc par item
+  de premier niveau** : une puce et son contenu indenté (continuation, liste imbriquée)
+  restent ensemble, mais deux puces voisines sont deux blocs.
 - `truncated` et `unknown_block_ids` sont ceux de Notion, transmis tels quels ; quand ils
-  sont posés, le résultat porte une phrase `note` qui prévient que la lecture est
-  incomplète. Le plugin ne coupe jamais silencieusement.
+  sont posés, le résultat porte une phrase `note` en français qui prévient que la lecture
+  est incomplète (`truncated`, `unknown_block_ids` ou les deux). Le plugin ne coupe jamais
+  silencieusement.
 - Le contenu de la page n'apparaît **pas** dans la Trace : seuls les comptes et la durée.
 
 ### 3.3 Retrouver un mot dans une page
@@ -284,8 +287,10 @@ Donnez l'URL ou l'identifiant d'une page qui appartient à une base, puis dites 
 
 Attendu : `read_page` rend les propriétés en texte, dans l'ordre de la page, en plus du
 contenu. Les propriétés vides sont omises. Types rendus : titre, texte enrichi,
-sélection/statut, date, nombre, case à cocher (oui/non), URL, e-mail, téléphone, formule et
-personnes.
+sélection/statut, date, nombre, case à cocher (oui/non), URL, e-mail, téléphone, formule,
+personnes, **étiquettes** (`multi_select`, noms séparés par une virgule), **relations**
+(noms ou identifiants liés), **rollup** (valeur calculée), **fichiers** (noms joints) et
+**identifiant unique** (`préfixe-numéro`).
 
 Le plugin **ne touche jamais** aux bases, aux data sources, aux vues ni aux schémas : il lit
 la page comme n'importe quelle autre. Seule la propriété de **titre** est écrite (renommage,
@@ -480,6 +485,7 @@ Le résultat rend l'identifiant, le titre et l'URL de la page restaurée. Une pa
 | `400` sur un remplacement | Refus de Notion : protection d'une sous-page ou d'une base enfant, Markdown invalide, page trop grosse | Rien n'a été perdu : relire la page. Ne jamais contourner en supprimant la sous-page. |
 | `503` / `504` sur une écriture | Écriture **incertaine** : elle peut avoir été enregistrée | **Relire la page** avant de réessayer ; ne pas rejouer à l'aveugle. |
 | Délai de 10 s ou réseau muet | Notion injoignable | La phrase invite à réessayer plus tard ; aucun retry automatique. |
+| `5xx` sur la sonde de la page parente | Notion répond mal à la sonde | État `activated` et Trace `ProbeDegraded` : les Tools diront la vérité au prochain appel, sans redémarrage. |
 | Le serveur démarre sans les Tools Notion | Notion injoignable ou jeton refusé au démarrage | État `failed` dans la Console, retente toutes les 5 s ; rouvrir une Session quand l'état passe `activated`. |
 | Le serveur refuse de démarrer et nomme `parent_page_id` | Page parente introuvable ou non partagée, ou capacité **Lire le contenu** absente : défaut de **configuration** | Partager la page avec la connexion et vérifier la capacité **Lire le contenu**, puis redémarrer. Ce n'est pas une panne réessayable (code de sortie 2). |
 | Le serveur refuse de démarrer et nomme `ATHENA_PLUGIN_NOTION_TOKEN` | Secret requis absent | Renseigner la variable (environnement ou `.env`), puis redémarrer (code de sortie 2). |
@@ -502,10 +508,11 @@ quand Notion revient, l'état passe `activated` sans redémarrage :
 INFO [plugins] PluginState {"plugin": "notion", "retry": true, "state": "activated", "tools": 6}
 ```
 
-Un `5xx` sur la sonde `GET /v1/users/me` n'empêche pas l'activation : Notion répond, c'est
-sa sonde qui est en défaut. La Trace est
-`ProbeDegraded {"plugin": "notion", "status": 500}`. Un jeton absent, lui, n'est jamais
-dégradé : c'est une erreur de configuration fatale.
+Un `5xx` sur l'une ou l'autre sonde (`GET /v1/users/me` ou `GET /v1/pages/{parent_page_id}`)
+n'empêche pas l'activation : Notion répond, c'est sa sonde qui est en défaut. La Trace est
+`ProbeDegraded {"plugin": "notion", "status": 500}`. Seuls un `404` ou un `403` sur la page
+parente sont fatals (défaut de configuration) ; un jeton absent, lui, n'est jamais dégradé :
+c'est une erreur de configuration fatale.
 
 ## Vérification automatisée
 
@@ -517,29 +524,24 @@ make generate
 Aucun test ne contacte le vrai Notion : un **faux serveur en processus** enregistre chaque
 requête (méthode, chemin, en-têtes, corps) et programme les réponses.
 
-- `server/tests/test_plugins_notion_search.py` — manifeste exact, secret absent, jeton
-  refusé, Notion injoignable, `5xx` de sonde, `parent_page_id` absent/invalide/non partagé,
-  recherche, plafond de dix résultats, curseur, erreurs françaises sans retry, jeton absent
-  des Traces/de l'instantané, Annonce sans Tool.
-- `server/tests/test_plugins_notion_read.py` — pagination par blocs et reprise, tableau et
-  colonnes entiers, propriétés, troncature, `404`, URL, `429` unique, délai.
-- `server/tests/test_plugins_notion_query.py` — casse et accents, mot entier, titres de
-  section, pagination des correspondances, succès vide, page unique.
-- `server/tests/test_plugins_notion_create.py` — parent configuré et parent nommé, titre
-  explicite, `v2` à côté du titre, refus de Markdown, parent non partagé, délai.
-- `server/tests/test_plugins_notion_update.py` — ajout en fin, renommage séparé, ordre des
-  écritures, succès partiels, avertissements, `503` incertain, remplacement sans
-  confirmation.
-- `server/tests/test_plugins_notion_replace.py` — refus sans `confirm` sans aucun appel
-  HTTP, `replace_content` sans suppression, protection d'une sous-page, `503`/`504`, `404`.
-- `server/tests/test_plugins_notion_trash.py` — schémas exacts, comptage paginé des
-  sous-pages, refus sans écriture, `5xx` incertain, restauration et relecture.
-- `server/tests/test_plugins_notion_markdown.py` — tableaux GFM et balises de colonnes
-  transmis tels quels, `v2` explicite, Markdown invalide en une phrase.
-- `server/tests/test_plugins_notion_transverse.py` — les six schémas et la ligne de Console,
-  l'instruction dans le prompt, l'Annonce avec instruction mais sans Tool, le jeton absent
-  alors que les Traces de Tool apparaissent, un `429` en une seule requête, un `503`/`504`
-  d'écriture incertain et tenté une seule fois.
+- `server/tests/test_plugins_notion.py` — un seul fichier, organisé par sections :
+  - manifeste exact, secret absent, jeton refusé, Notion injoignable, `5xx` de sonde
+    (compte et page parente), `parent_page_id` absent/invalide/non partagé, recherche,
+    plafond de dix résultats, curseur, erreurs françaises sans retry, jeton absent des
+    Traces/de l'instantané, Annonce sans Tool ;
+  - lecture : pagination par blocs et reprise, tableau et colonnes entiers, un bloc par item
+    de liste, propriétés (dont étiquettes, relations, rollup, fichiers, identifiant unique),
+    troncature, `404`, URL, `429` unique, délai ;
+  - filtre par mot : casse et accents, mot entier, titres de section, paragraphes seulement
+    (ni citation ni séparateur horizontal), pagination des correspondances, succès vide,
+    page unique ;
+  - création, ajout/renommage, remplacement protégé, corbeille/restauration, tableaux et
+    colonnes : requêtes exactes, succès partiels, avertissements tracés par code, `503`
+    incertain, refus sans écriture ;
+  - transverse : les six schémas et la ligne exacte de Console, l'instruction dans le
+    prompt, l'Annonce avec instruction mais sans Tool, le jeton absent alors que les Traces
+    de Tool apparaissent, un `429` en une seule requête, un `503`/`504` d'écriture incertain
+    et tenté une seule fois.
 - `server/tests/test_plugins.py`, `server/tests/test_plugins_loader.py` et
   `server/tests/test_app_integration.py` — registre, états, retente, Tools déclarés à la
   Connexion Live suivante, instantané de la Console.
