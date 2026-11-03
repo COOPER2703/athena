@@ -11,3 +11,11 @@ auth.db
 node_modules/
 web/dist/
 plugins.json
+
+# Skills tiers installés par `npx skills add` et épinglés dans `skills-lock.json`.
+# Le skill maison `.agents/skills/create-plugin/` reste versionné.
+.agents/skills/domain-modeling/
+.agents/skills/grilling/
+.agents/skills/grill-with-docs/
+.agents/skills/to-spec/
+.agents/skills/to-tickets/
