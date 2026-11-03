@@ -1,9 +1,10 @@
-"""Harnais partagé des tests du plugin ``notion`` (ticket #112).
+"""Harnais partagé des tests du plugin ``notion``.
 
 Mêmes formes que ``test_plugins_websearch.py`` : un faux Gemini Live retient
 les Configs ouvertes, l'App tourne pour de vrai sur une socket éphémère, et le
 plugin réel est copié dans ``tmp_path`` pour être activé par ``plugins.json``.
-Chaque ticket écrit ses tests dans son propre fichier et importe d'ici.
+Les projections d'objets Notion et la session de test vivent ici, une seule
+fois, pour tous les tests du plugin.
 """
 
 from __future__ import annotations
@@ -275,3 +276,77 @@ def program_probe(
         status=parent_status,
         body={"object": "page", "id": parent},
     )
+
+
+def page_object(
+    page_id: str,
+    title: str = "Journal de bord",
+    *,
+    key: str = "Titre",
+    url: str | None = None,
+    edited: str = "2026-10-01T10:00:00.000Z",
+    properties: dict[str, Any] | None = None,
+) -> dict:
+    """Objet page Notion minimal, avec sa propriété de titre nommable."""
+    rendered: dict[str, Any] = {
+        key: {
+            "id": "title",
+            "type": "title",
+            "title": [
+                {
+                    "type": "text",
+                    "plain_text": title,
+                    "text": {"content": title},
+                }
+            ],
+        }
+    }
+    rendered.update(properties or {})
+    return {
+        "object": "page",
+        "id": page_id,
+        "url": url if url is not None else f"https://www.notion.so/{page_id}",
+        "last_edited_time": edited,
+        "properties": rendered,
+    }
+
+
+def markdown_body(
+    markdown: str,
+    *,
+    truncated: bool = False,
+    unknown_block_ids: list[str] | None = None,
+) -> dict:
+    """Réponse de ``GET /v1/pages/{id}/markdown``."""
+    return {
+        "object": "page_markdown",
+        "id": "page",
+        "markdown": markdown,
+        "truncated": truncated,
+        "unknown_block_ids": unknown_block_ids or [],
+    }
+
+
+@contextlib.asynccontextmanager
+async def notion_session(
+    tmp_path: Path,
+    stub: Any,
+    *,
+    sink: RecordingTraceSink | None = None,
+    timeout: float | None = None,
+) -> AsyncIterator[
+    tuple[Any, Any, Any, RecordingTraceSink, RecordingTraceSink]
+]:
+    """App réelle, Connexion Live, plugin réel branché sur le faux serveur."""
+    sink = sink if sink is not None else RecordingTraceSink()
+    registry, loader = build_plugins(
+        tmp_path, sink, stub.base_url, timeout=timeout
+    )
+    async with running_app(registry=registry, loader=loader) as (
+        app,
+        live,
+        transport,
+        app_sink,
+    ):
+        async with live_session(transport, live) as session:
+            yield app, live, session, sink, app_sink
