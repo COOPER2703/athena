@@ -142,7 +142,9 @@ def test_update_page_is_declared_with_append_default_and_confirm(
                 async with live_session(transport, live):
                     tools = declared(live)
 
-                # Les tickets suivants ajoutent leurs Tools à cet ensemble.
+                # L'ensemble exact des six Tools est asserté par le test
+                # transverse du ticket #120 : ici, on tolère les Tools des
+                # tickets suivants.
                 assert {"search_pages", "update_page"} <= set(tools)
                 spec = tools["update_page"]
                 assert dict(spec.parameters_json_schema) == UPDATE_PARAMETERS
