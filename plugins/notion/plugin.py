@@ -101,6 +101,9 @@ _STATUS_MESSAGE = (
     "Notion a renvoyé une erreur (réponse {status}). "
     "Réessaie dans un instant."
 )
+_INVALID_PAGE_MESSAGE = (
+    "Je n'ai pas reconnu cette page Notion. Donne son identifiant ou son URL."
+)
 
 Trace = Callable[..., None]
 
@@ -341,6 +344,8 @@ def _tool_bindings(
     """Les Tools de ce ticket ; les tickets suivants ajoutent une ligne ici."""
     return (
         _search_tool(settings, trace),
+        _trash_tool(settings, trace),
+        _restore_tool(settings, trace),
     )
 
 
@@ -480,6 +485,357 @@ def _trace_search(
     if reason is not None:
         entry["reason"] = reason
     trace("Search", entry)
+
+
+# -- Tools ``trash_page`` et ``restore_page`` ---------------------------------
+
+
+_TRASH_DESCRIPTION = "Met une page Notion à la corbeille, de façon réversible."
+_RESTORE_DESCRIPTION = "Sort une page Notion de la corbeille."
+
+_TRASH_PARAMETERS: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "page": {
+            "type": "string",
+            "description": "Identifiant ou URL de la page.",
+        },
+        "confirm": {
+            "type": "boolean",
+            "description": "Doit valoir true ; sinon le Tool refuse.",
+        },
+    },
+    "required": ["page"],
+}
+
+_RESTORE_PARAMETERS: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "page": {
+            "type": "string",
+            "description": "Identifiant ou URL de la page en corbeille.",
+        },
+    },
+    "required": ["page"],
+}
+
+# Nombre de blocs enfants lus par page (maximum accepté par Notion).
+BLOCKS_PAGE_SIZE = 100
+
+
+class _ActionFailed(Exception):
+    """Échec d'un appel : porte la phrase française et le motif de la Trace."""
+
+    def __init__(self, message: str, reason: str) -> None:
+        super().__init__(reason)
+        self.message = message
+        self.reason = reason
+
+
+def _trash_tool(settings: _Settings, trace: Trace) -> ToolBinding:
+    """Déclare ``trash_page`` et son handler : un appel ne lève jamais."""
+
+    async def handle(
+        arguments: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        return await _trash(settings, arguments, trace)
+
+    return ToolBinding(
+        spec=ToolSpec(
+            name="trash_page",
+            description=_TRASH_DESCRIPTION,
+            parameters=_TRASH_PARAMETERS,
+        ),
+        handler=handle,
+    )
+
+
+def _restore_tool(settings: _Settings, trace: Trace) -> ToolBinding:
+    """Déclare ``restore_page`` et son handler : un appel ne lève jamais."""
+
+    async def handle(
+        arguments: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        return await _restore(settings, arguments, trace)
+
+    return ToolBinding(
+        spec=ToolSpec(
+            name="restore_page",
+            description=_RESTORE_DESCRIPTION,
+            parameters=_RESTORE_PARAMETERS,
+        ),
+        handler=handle,
+    )
+
+
+def _trash_confirmation_message(title: str, child_pages: int) -> str:
+    """Phrase qui annonce la page et ses sous-pages avant toute écriture."""
+    if child_pages:
+        return (
+            f"La page « {title} » et ses {child_pages} sous-pages seront "
+            "mises à la corbeille. Redemande-moi la suppression avec "
+            "confirm=true pour confirmer."
+        )
+    return (
+        f"La page « {title} » sera mise à la corbeille. "
+        "Redemande-moi la suppression avec confirm=true pour confirmer."
+    )
+
+
+def _page_reference(
+    summary: Mapping[str, object], page: str
+) -> dict[str, object]:
+    """Référence rendue au modèle : identifiant résolu, titre, URL."""
+    return {
+        "id": summary.get("id") or page,
+        "title": summary.get("title") or "(sans titre)",
+        "url": summary.get("url") or "",
+    }
+
+
+async def _notion_call(
+    client: httpx2.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    params: Mapping[str, str] | None = None,
+    body: Mapping[str, object] | None = None,
+    write: bool = False,
+) -> dict[str, object]:
+    """Un appel REST Notion, ou une ``_ActionFailed`` portant la phrase.
+
+    Un délai, un transport muet, un corps illisible et un statut d'erreur
+    deviennent tous une phrase française ; aucun essai n'est rejoué.
+    """
+    try:
+        response = await client.request(method, url, params=params, json=body)
+    except asyncio.CancelledError:
+        raise
+    except httpx2.TimeoutException as exc:
+        raise _ActionFailed(_TIMEOUT_MESSAGE, "timeout") from exc
+    except httpx2.RequestError as exc:
+        raise _ActionFailed(_UNREACHABLE_MESSAGE, type(exc).__name__) from exc
+
+    if response.status_code >= 400:
+        raise _ActionFailed(
+            _status_error(response.status_code, write=write),
+            f"HTTP {response.status_code}",
+        )
+    try:
+        payload = response.json()
+    except (TypeError, ValueError) as exc:
+        raise _ActionFailed(_UNREADABLE_MESSAGE, "unreadable body") from exc
+    if not isinstance(payload, dict):
+        raise _ActionFailed(_UNREADABLE_MESSAGE, "unreadable body")
+    return payload
+
+
+async def _page_object(
+    client: httpx2.AsyncClient, settings: _Settings, page: str
+) -> dict[str, object]:
+    """``GET /v1/pages/{id}`` : titre, URL et propriétés de la page."""
+    return await _notion_call(
+        client, "GET", settings.base_url + f"/v1/pages/{page}"
+    )
+
+
+async def _child_page_count(
+    client: httpx2.AsyncClient, settings: _Settings, page: str
+) -> int:
+    """Compte les blocs ``child_page`` en suivant le curseur Notion."""
+    url = settings.base_url + f"/v1/blocks/{page}/children"
+    count = 0
+    cursor: str | None = None
+    while True:
+        params = {"page_size": str(BLOCKS_PAGE_SIZE)}
+        if cursor is not None:
+            params["start_cursor"] = cursor
+        body = await _notion_call(client, "GET", url, params=params)
+        results = body.get("results")
+        if not isinstance(results, list):
+            raise _ActionFailed(_UNREADABLE_MESSAGE, "unreadable body")
+        count += sum(
+            1
+            for block in results
+            if isinstance(block, dict) and block.get("type") == "child_page"
+        )
+        next_cursor = body.get("next_cursor")
+        if (
+            not body.get("has_more")
+            or not isinstance(next_cursor, str)
+            or not next_cursor
+        ):
+            return count
+        cursor = next_cursor
+
+
+async def _trash(
+    settings: _Settings,
+    arguments: Mapping[str, object],
+    trace: Trace,
+) -> Mapping[str, object]:
+    """Met une page à la corbeille, après lecture et confirmation explicite.
+
+    Sans ``confirm: true``, le Tool ne fait aucune écriture : il lit la page et
+    ses sous-pages, puis rend une phrase qui les annonce au modèle.
+    """
+    started = asyncio.get_running_loop().time()
+    page = _page_id(arguments.get("page"))
+    if page is None:
+        _trace_trash(trace, page=None, started=started, reason="invalid page")
+        return _error(_INVALID_PAGE_MESSAGE)
+    confirmed = arguments.get("confirm") is True
+    child_pages: int | None = None
+
+    try:
+        async with _client(settings, REQUEST_TIMEOUT) as client:
+            summary = _page_summary(await _page_object(client, settings, page))
+            reference = _page_reference(summary, page)
+            child_pages = await _child_page_count(client, settings, page)
+            if not confirmed:
+                _trace_trash(
+                    trace,
+                    page=page,
+                    started=started,
+                    child_pages=child_pages,
+                    reason="confirmation",
+                )
+                return {
+                    "status": "error",
+                    "message": _trash_confirmation_message(
+                        str(reference["title"]), child_pages
+                    ),
+                    "page": reference,
+                    "child_pages": child_pages,
+                }
+            await _notion_call(
+                client,
+                "PATCH",
+                settings.base_url + f"/v1/pages/{page}",
+                body={"in_trash": True},
+                write=True,
+            )
+    except _ActionFailed as failure:
+        _trace_trash(
+            trace,
+            page=page,
+            started=started,
+            child_pages=child_pages,
+            reason=failure.reason,
+        )
+        return _error(failure.message)
+
+    _trace_trash(trace, page=page, started=started, child_pages=child_pages)
+    return {
+        "status": "ok",
+        "page": reference,
+        "child_pages": child_pages,
+        "restorable": True,
+    }
+
+
+async def _restore(
+    settings: _Settings,
+    arguments: Mapping[str, object],
+    trace: Trace,
+) -> Mapping[str, object]:
+    """Sort une page de la corbeille et rend son identifiant, titre et URL."""
+    started = asyncio.get_running_loop().time()
+    page = _page_id(arguments.get("page"))
+    if page is None:
+        _trace_restore(
+            trace, page=None, started=started, reason="invalid page"
+        )
+        return _error(_INVALID_PAGE_MESSAGE)
+
+    try:
+        async with _client(settings, REQUEST_TIMEOUT) as client:
+            body = await _notion_call(
+                client,
+                "PATCH",
+                settings.base_url + f"/v1/pages/{page}",
+                body={"in_trash": False},
+                write=True,
+            )
+            summary = _page_summary(body)
+            if not summary["url"] or not isinstance(
+                body.get("properties"), dict
+            ):
+                # Le corps de l'écriture ne portait pas la page : on la relit.
+                summary = _page_summary(
+                    await _page_object(client, settings, page)
+                )
+    except _ActionFailed as failure:
+        _trace_restore(
+            trace, page=page, started=started, reason=failure.reason
+        )
+        return _error(failure.message)
+
+    _trace_restore(trace, page=page, started=started)
+    return {
+        "status": "ok",
+        "page": _page_reference(summary, page),
+    }
+
+
+def _trace_trash(
+    trace: Trace,
+    *,
+    page: str | None,
+    started: float,
+    child_pages: int | None = None,
+    reason: str | None = None,
+) -> None:
+    """Trace une mise à la corbeille : page, sous-pages, durée, statut."""
+    extra = {} if child_pages is None else {"child_pages": child_pages}
+    _trace_page_action(
+        trace,
+        "TrashPage",
+        page=page,
+        started=started,
+        extra=extra,
+        reason=reason,
+    )
+
+
+def _trace_restore(
+    trace: Trace,
+    *,
+    page: str | None,
+    started: float,
+    reason: str | None = None,
+) -> None:
+    """Trace une restauration : page, durée, statut."""
+    _trace_page_action(
+        trace,
+        "RestorePage",
+        page=page,
+        started=started,
+        extra={},
+        reason=reason,
+    )
+
+
+def _trace_page_action(
+    trace: Trace,
+    kind: str,
+    *,
+    page: str | None,
+    started: float,
+    extra: Mapping[str, object],
+    reason: str | None,
+) -> None:
+    """Trace commune aux actions de corbeille : ni contenu, ni jeton."""
+    entry: dict[str, object] = dict(extra)
+    if page is not None:
+        entry["page"] = page
+    entry["duration_ms"] = round(
+        (asyncio.get_running_loop().time() - started) * 1000, 1
+    )
+    entry["status"] = "error" if reason is not None else "ok"
+    if reason is not None:
+        entry["reason"] = reason
+    trace(kind, entry)
 
 
 def _status_error(status: int, *, write: bool = False) -> str:
