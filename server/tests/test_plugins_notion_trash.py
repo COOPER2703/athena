@@ -14,7 +14,6 @@ import pytest
 
 from conftest import RecordingTraceSink
 from notion_harness import (
-    DEFAULT_PARENT,
     SECRET,
     build_plugins,
     call_tool,
