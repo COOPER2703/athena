@@ -556,22 +556,12 @@ def test_mode_replace_is_refused_without_confirmation_and_without_any_write(
                         "update_page",
                         {"page": TARGET, "content": "Tout", "mode": "replace"},
                     )
-                    with_confirm = await call_tool(
-                        session,
-                        "update_page",
-                        {
-                            "page": TARGET,
-                            "content": "Tout",
-                            "mode": "replace",
-                            "confirm": True,
-                        },
-                    )
 
-                for payload in (without, with_confirm):
-                    assert payload["status"] == "error"
-                    assert "remplacement" in payload["message"]
-                    assert "confirmation" in payload["message"]
-                # Aucune écriture : #117 possède le remplacement.
+                assert without["status"] == "error"
+                assert "remplacement" in without["message"]
+                assert "confirmation" in without["message"]
+                # Sans confirmation, aucune écriture n'est tentée : le
+                # remplacement confirmé appartient au ticket #117.
                 assert _writes(stub) == []
 
     asyncio.run(scenario())
