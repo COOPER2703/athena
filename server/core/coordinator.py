@@ -484,8 +484,8 @@ class Coordinator:
         et l'instruction d'Annonce s'y ajoute pour qu'Athena sache qu'un
         Événement a ouvert la Session. Elle s'en distingue sur un point, qui
         est **structurel** : la Connexion est ouverte sans aucun outil, pour
-        qu'un Événement piégé ne puisse jamais déclencher une action (#81,
-        amendement d'ADR-0013 à venir). Le message du juge est la phrase à
+        qu'un Événement piégé ne puisse jamais déclencher une action (#81 ;
+        ADR-0020). Le message du juge est la phrase à
         prononcer ; les faits assainis du lot sont transmis au Live comme
         contexte (``facts``), sans être prononcés, pour qu'Athena puisse
         détailler l'Événement à la demande. La Connexion est marquée ``auto`` :
@@ -530,7 +530,10 @@ class Coordinator:
                 connection_id=self._connection_id,
                 instruction=instruction,
                 # Aucun outil : le contenu externe qui a déclenché l'Annonce
-                # ne peut jamais se traduire par une action (#81).
+                # ne peut jamais se traduire par une action (#81). Décision
+                # **provisoire** : les Sessions d'Annonce exposeront les Tools
+                # ordinaires dès qu'un système anti-injection existera
+                # (ADR-0020, « Décision à réviser »).
                 tools=(),
             ),
             StartIdleTimer(
@@ -702,8 +705,15 @@ class Coordinator:
         """
         return "\n\n".join(section for section in sections if section).strip()
 
+    def _in_live_session(self) -> bool:
+        """Vrai pendant une Session Live active ou visible (jamais au Repos)."""
+        return self._state in (
+            SessionState.LIVE_ACTIVE,
+            SessionState.SESSION_VISIBLE,
+        )
+
     def _on_client_audio(self, event: ClientAudio) -> list[Command]:
-        if self._state in (SessionState.LIVE_ACTIVE, SessionState.SESSION_VISIBLE):
+        if self._in_live_session():
             # Raw mic bytes are not voice activity: never re-arm the idle timer.
             return [
                 SendAudioToLlm(connection_id=self._connection_id, data=event.data),
@@ -760,12 +770,12 @@ class Coordinator:
         if self._state is SessionState.LIVE_ACTIVE:
             self._audio_buffer.append(event.data)
             return [
-                self._end_session_grace_timer(),
+                self._rearm_grace_timer(),
                 *(await self._become_visible("LlmAudio")),
             ]
         if self._state is SessionState.SESSION_VISIBLE:
             return [
-                self._end_session_grace_timer(),
+                self._rearm_grace_timer(),
                 SendAudioToClient(client_id=self._client_id, data=event.data),
                 *self._decision("LlmAudio"),
             ]
@@ -882,18 +892,19 @@ class Coordinator:
         flux de trace (ADR-0014).
 
         ``end_session`` relève de la politique du noyau (#130) : il n'est
-        accepté que dans une Session active et ouvre alors une **Clôture en
-        attente** — le résultat part au modèle d'abord, puis la grâce de 3 s
-        remplace le timeout d'inactivité. Hors Session active, le modèle reçoit
-        une erreur et aucun timer n'est armé.
+        accepté que dans une Session **ordinaire** active et ouvre alors une
+        **Clôture en attente** — le résultat part au modèle d'abord, puis la
+        grâce de 3 s remplace le timeout d'inactivité. Une Connexion de
+        jugement ou une Session d'Annonce n'est pas ordinaire (``tools=()``,
+        ADR-0020) : le modèle reçoit une erreur et aucun timer n'est armé.
         """
         plugin = self._tool_owner(event.name)
         is_end_session = event.name == END_SESSION
-        # Le Tool de clôture n'a de sens que dans une Session active : hors de
-        # là, le modèle reçoit une erreur et aucun timer n'est armé (#130).
-        active = self._state in (
-            SessionState.LIVE_ACTIVE,
-            SessionState.SESSION_VISIBLE,
+        # Le Tool de clôture n'a de sens que dans une Session ordinaire active :
+        # ni la Connexion de jugement (``_judging``) ni la Session automatique
+        # d'Annonce (``_auto``) ne peuvent ouvrir une clôture (#130, ADR-0020).
+        ordinary = (
+            self._in_live_session() and not self._judging and not self._auto
         )
         commands: list[Command] = [
             self._trace(
@@ -909,10 +920,10 @@ class Coordinator:
                 },
             )
         ]
-        if is_end_session and not active:
+        if is_end_session and not ordinary:
             result: Mapping[str, object] = {
                 "status": "error",
-                "message": "end_session outside an active session",
+                "message": "end_session outside an ordinary active session",
             }
         elif self._tools is None:
             result = {
@@ -950,7 +961,7 @@ class Coordinator:
         # rappelant le Tool. Hors Session active, aucun timer.
         if (
             is_end_session
-            and active
+            and ordinary
             and result.get("status") == "ok"
             and not self._end_session_pending
         ):
@@ -1083,7 +1094,7 @@ class Coordinator:
     def _rearm_timer(self) -> StartIdleTimer:
         return StartIdleTimer(connection_id=self._connection_id, timeout=IDLE_TIMEOUT)
 
-    def _end_session_grace_timer(self) -> StartIdleTimer:
+    def _rearm_grace_timer(self) -> StartIdleTimer:
         """Réarmement d'audio : la grâce pendant une Clôture en attente.
 
         Hors clôture, c'est le timeout d'inactivité ordinaire. Les deux partagent
