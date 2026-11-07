@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -46,11 +47,13 @@ def test_build_app_builds_the_detector_from_the_wake_word_config(
 ) -> None:
     monkeypatch.setenv("ATHENA_ACCESS_TOKEN", "ath_secret")
     monkeypatch.setenv("ATHENA_WAKE_WORD", "1")
-    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    calls: list[object] = []
 
     class RecordingDetector:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            calls.append((args, kwargs))
+        @classmethod
+        def from_config(cls, cfg: object) -> "RecordingDetector":
+            calls.append(cfg)
+            return cls()
 
         def process(self, chunk: bytes) -> None:
             return None
@@ -63,17 +66,7 @@ def test_build_app_builds_the_detector_from_the_wake_word_config(
 
     _build_app(cfg)
 
-    assert calls == [
-        (
-            (cfg.wake_word.model_path,),
-            {
-                "threshold": cfg.wake_word.threshold,
-                "pre_roll_ms": cfg.wake_word.pre_roll_ms,
-                "vad": cfg.wake_word.vad,
-                "vad_model_path": cfg.wake_word.vad_model_path,
-            },
-        )
-    ]
+    assert calls == [cfg.wake_word]
 
 
 def test_build_app_refuses_to_start_without_an_access_token(
@@ -128,6 +121,35 @@ def test_cli_reports_an_unavailable_wake_word(
 
     assert excinfo.value.code == 2
     assert "/tmp/manquant.onnx" in capsys.readouterr().err
+
+
+def test_cli_exits_2_when_the_real_model_constructor_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    model = tmp_path / "athena.onnx"
+    model.write_bytes(b"corrupted")
+    monkeypatch.setenv("ATHENA_ACCESS_TOKEN", "ath_secret")
+    monkeypatch.setenv("ATHENA_WAKE_WORD", "1")
+    monkeypatch.setenv("ATHENA_WAKE_WORD_MODEL", str(model))
+
+    module = types.ModuleType("openwakeword.model")
+
+    def broken_model(**kwargs: object) -> None:
+        raise RuntimeError("ONNX runtime: modèle illisible")
+
+    module.Model = broken_model
+    monkeypatch.setitem(sys.modules, "openwakeword.model", module)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli()
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "Veille indisponible" in err
+    assert "athena.onnx" in err
+    assert "Traceback" not in err
 
 
 def test_entrypoints_are_exposed() -> None:

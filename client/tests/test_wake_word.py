@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import sys
+import types
 
 import numpy as np
 import pytest
 
+from client.config import WakeWordConfig
 from client.wake_word import (
     Detection,
     OpenWakeWordDetector,
@@ -366,6 +369,140 @@ def test_close_resets_the_model_and_stops_scoring() -> None:
     assert scorer.chunks == []
     detector.close()
     assert scorer.resets == 1
+
+
+def test_the_pre_roll_is_cleared_after_a_detection() -> None:
+    scorer = FakeScorer(score_sequence=[0.9, 0.9])
+    detector = OpenWakeWordDetector(
+        threshold=0.5, pre_roll_ms=300, scorer=scorer
+    )
+    before = _pcm(5000, 7)
+
+    first = detector.process(before)
+    assert first is not None
+    assert first.pre_roll == before[-9600:]
+
+    after = _pcm(1000, 8)
+    second = detector.process(after)
+
+    assert second is not None
+    # L'audio d'avant la Session précédente ne doit pas fuiter dans le
+    # pré-roll de la détection suivante.
+    assert second.pre_roll == after
+
+
+def test_reset_clears_the_pre_roll_window() -> None:
+    scorer = FakeScorer(score_sequence=[0.1, 0.9])
+    detector = OpenWakeWordDetector(
+        threshold=0.5, pre_roll_ms=300, scorer=scorer
+    )
+
+    assert detector.process(_pcm(2000, 7)) is None
+    detector.reset()
+    detection = detector.process(_pcm(1000, 8))
+
+    assert detection is not None
+    assert detection.pre_roll == _pcm(1000, 8)
+
+
+def test_a_model_construction_failure_is_reported_with_its_path(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = tmp_path / "athena.onnx"
+    model.write_bytes(b"corrupted")
+    melspec = tmp_path / "melspectrogram.onnx"
+    melspec.write_bytes(b"features")
+    embedding = tmp_path / "embedding_model.onnx"
+    embedding.write_bytes(b"features")
+
+    module = types.ModuleType("openwakeword.model")
+
+    def broken_model(**kwargs: object) -> None:
+        raise RuntimeError("modèle ONNX corrompu")
+
+    module.Model = broken_model
+    monkeypatch.setitem(sys.modules, "openwakeword.model", module)
+
+    with pytest.raises(WakeWordUnavailableError, match="athena.onnx"):
+        OpenWakeWordDetector(
+            model_path=model,
+            threshold=0.5,
+            melspec_model_path=melspec,
+            embedding_model_path=embedding,
+        )
+
+
+def test_a_vad_construction_failure_is_reported_with_its_path(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vad_model = tmp_path / "silero_vad.onnx"
+    vad_model.write_bytes(b"corrupted")
+
+    module = types.ModuleType("openwakeword.vad")
+
+    def broken_vad(**kwargs: object) -> None:
+        raise RuntimeError("provider onnxruntime indisponible")
+
+    module.VAD = broken_vad
+    monkeypatch.setitem(sys.modules, "openwakeword.vad", module)
+
+    with pytest.raises(WakeWordUnavailableError, match="silero_vad.onnx"):
+        OpenWakeWordDetector(
+            threshold=0.5, scorer=FakeScorer(), vad=True, vad_model_path=vad_model
+        )
+
+
+def test_a_single_info_log_summarizes_the_loaded_configuration(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO, logger="athena.client"):
+        OpenWakeWordDetector(
+            threshold=0.6, pre_roll_ms=250, scorer=FakeScorer()
+        )
+
+    infos = [record for record in caplog.records if record.levelname == "INFO"]
+    assert len(infos) == 1
+    message = infos[0].getMessage()
+    assert "athena.onnx" in message
+    assert "seuil=0.60" in message
+    assert "VAD=désactivé" in message
+    assert "pré-roll=250" in message
+
+
+def test_the_info_log_says_when_the_vad_is_enabled(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO, logger="athena.client"):
+        OpenWakeWordDetector(
+            threshold=0.5,
+            pre_roll_ms=300,
+            scorer=FakeScorer(),
+            vad=True,
+            vad_model=FakeVad(),
+        )
+
+    infos = [record for record in caplog.records if record.levelname == "INFO"]
+    assert len(infos) == 1
+    assert "VAD=activé" in infos[0].getMessage()
+
+
+def test_from_config_forwards_the_wake_word_settings() -> None:
+    cfg = WakeWordConfig(
+        model_path="/tmp/custom.onnx",
+        threshold=0.7,
+        pre_roll_ms=120,
+        vad=True,
+    )
+    scorer = FakeScorer()
+    vad = FakeVad()
+
+    detector = OpenWakeWordDetector.from_config(
+        cfg, scorer=scorer, vad_model=vad
+    )
+
+    assert detector.process(_pcm(1024)) is not None
+    assert scorer.chunks[0].size == 1024
+    assert vad.chunks
 
 
 def test_missing_model_fails_with_a_clear_error(tmp_path) -> None:

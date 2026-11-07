@@ -39,6 +39,8 @@ ACCESS_TOKEN_ENV = "ATHENA_ACCESS_TOKEN"
 # répertoire de travail.
 _CLIENT_DIR = Path(__file__).resolve().parent
 DEFAULT_WAKE_WORD_MODEL = _CLIENT_DIR / "models" / "athena.onnx"
+DEFAULT_WAKE_WORD_MELSPEC_MODEL = _CLIENT_DIR / "models" / "melspectrogram.onnx"
+DEFAULT_WAKE_WORD_EMBEDDING_MODEL = _CLIENT_DIR / "models" / "embedding_model.onnx"
 DEFAULT_WAKE_WORD_VAD_MODEL = _CLIENT_DIR / "models" / "silero_vad.onnx"
 
 
