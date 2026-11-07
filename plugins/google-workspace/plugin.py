@@ -14,7 +14,8 @@ Un appel de Tool, lui, ne lève jamais : une panne devient une phrase rendue au
 modèle.
 
 Le socle (comptes, jetons, HTTP, erreurs) est partagé : les Tools Gmail et
-Calendar des tickets suivants n'ajoutent qu'un schéma et une opération.
+Calendar des tickets suivants n'ajoutent qu'un schéma et une opération. Ce
+ticket apporte la recherche Gmail et la lecture de l'agenda.
 """
 
 from __future__ import annotations
@@ -25,7 +26,9 @@ import html
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Mapping
+from urllib.parse import quote
 
 import httpx2
 
@@ -71,6 +74,17 @@ GMAIL_THREADS_PATH = "/gmail/v1/users/me/threads"
 
 # En-têtes de métadonnées demandés à Gmail pour chaque message.
 GMAIL_METADATA_HEADERS = ("From", "Subject", "Date")
+
+# Fenêtre par défaut de ``calendar_list_events`` : maintenant, puis sept jours.
+CALENDAR_DEFAULT_WINDOW_DAYS = 7
+
+# Bornes de ``calendar_list_events`` : dix événements par défaut, cinquante au plus.
+CALENDAR_MAX_RESULTS_DEFAULT = 10
+CALENDAR_MAX_RESULTS_MAX = 50
+CALENDAR_MAX_RESULTS_MIN = 1
+
+# Chemin Calendar ; l'identifiant d'agenda y est encodé séparément.
+CALENDAR_EVENTS_BASE_PATH = "/calendar/v3/calendars"
 
 # -- Schémas des Tools --------------------------------------------------------
 
@@ -141,6 +155,51 @@ GMAIL_READ_PARAMETERS: Mapping[str, object] = {
         },
     },
     "required": [],
+}
+
+CALENDAR_LIST_EVENTS_DESCRIPTION = (
+    "Liste les événements d'agenda d'une période."
+)
+
+CALENDAR_LIST_EVENTS_PARAMETERS: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "account": {
+            "type": "string",
+            "description": (
+                "Clé du compte Google à utiliser ; le compte par défaut "
+                "quand il est absent."
+            ),
+        },
+        "time_min": {
+            "type": "string",
+            "description": (
+                "Début de la période, RFC 3339 avec décalage. Défaut : "
+                "maintenant."
+            ),
+        },
+        "time_max": {
+            "type": "string",
+            "description": (
+                "Fin de la période, RFC 3339 avec décalage. Défaut : "
+                "maintenant + sept jours."
+            ),
+        },
+        "max_results": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "description": "Nombre d'événements rendus, de 1 à 50. Défaut 10.",
+        },
+        "calendar_id": {
+            "type": "string",
+            "description": "Identifiant de l'agenda. Défaut : « primary ».",
+        },
+        "query": {
+            "type": "string",
+            "description": "Recherche plein texte dans les événements.",
+        },
+    },
 }
 
 # -- Instruction de plugin ----------------------------------------------------
@@ -245,6 +304,37 @@ _READ_VALIDATION_MESSAGE = (
 _READ_NOT_FOUND_MESSAGE = (
     _READ_PREFIX + "le message ou le fil demandé est introuvable."
 )
+
+# Phrases propres à l'agenda : un échec de lecture ne nomme jamais Gmail.
+_CALENDAR_PREFIX = "La lecture de l'agenda n'a pas abouti : "
+
+_CALENDAR_UNREACHABLE_MESSAGE = (
+    _CALENDAR_PREFIX
+    + "le service Agenda est injoignable. Réessaie dans un instant."
+)
+_CALENDAR_TIMEOUT_MESSAGE = (
+    _CALENDAR_PREFIX
+    + "le service Agenda n'a pas répondu à temps. Réessaie dans un instant."
+)
+_CALENDAR_UNREADABLE_MESSAGE = (
+    _CALENDAR_PREFIX
+    + "le service Agenda a renvoyé une réponse illisible. "
+    "Réessaie dans un instant."
+)
+_CALENDAR_REFUSED_MESSAGE = (
+    _CALENDAR_PREFIX
+    + "l'accès au compte a été refusé. Réessaie dans un instant."
+)
+_CALENDAR_FORBIDDEN_MESSAGE = _CALENDAR_PREFIX + "l'accès à cet agenda est refusé."
+_CALENDAR_RATE_MESSAGE = (
+    _CALENDAR_PREFIX
+    + "trop de requêtes ont été envoyées. Réessaie dans un instant."
+)
+_CALENDAR_VALIDATION_MESSAGE = (
+    _CALENDAR_PREFIX
+    + "la période ou la requête a été refusée. Vérifie les dates demandées."
+)
+_CALENDAR_NOT_FOUND_MESSAGE = _CALENDAR_PREFIX + "l'agenda demandé est introuvable."
 
 
 class _TokenError(Exception):
@@ -759,6 +849,7 @@ def _tool_bindings(
     return (
         _gmail_search_tool(settings, trace),
         _gmail_read_tool(settings, trace),
+        _calendar_list_events_tool(settings, trace),
     )
 
 
@@ -943,6 +1034,306 @@ def _message_id(item: object) -> str | None:
     if isinstance(identifier, str) and identifier.strip():
         return identifier.strip()
     return None
+
+
+# -- Tool ``calendar_list_events`` -------------------------------------------
+
+
+def _calendar_list_events_tool(
+    settings: _Settings, trace: Trace
+) -> ToolBinding:
+    """Déclare ``calendar_list_events`` et son handler : jamais d'exception."""
+
+    async def handle(arguments: Mapping[str, object]) -> Mapping[str, object]:
+        return await _calendar_list_events(settings, arguments, trace)
+
+    return ToolBinding(
+        spec=ToolSpec(
+            name="calendar_list_events",
+            description=CALENDAR_LIST_EVENTS_DESCRIPTION,
+            parameters=CALENDAR_LIST_EVENTS_PARAMETERS,
+        ),
+        handler=handle,
+    )
+
+
+async def _calendar_list_events(
+    settings: _Settings,
+    arguments: Mapping[str, object],
+    trace: Trace,
+) -> Mapping[str, object]:
+    """Liste les événements d'une période, sans jamais lever."""
+    tool = "calendar_list_events"
+    started = asyncio.get_running_loop().time()
+
+    account = _resolve_account(settings, arguments.get("account"))
+    if account is None:
+        raw = arguments.get("account")
+        shown = raw.strip() if isinstance(raw, str) and raw.strip() else ""
+        key = _account_key(shown) if shown else ""
+        message = (
+            f"Le compte « {shown} » est inconnu. "
+            f"Comptes disponibles : {_account_names(settings)}."
+        )
+        return _fail(trace, tool, key, started, "invalid_account", message)
+
+    calendar_id = _optional_text(arguments.get("calendar_id")) or "primary"
+    time_min, time_max = _calendar_window(
+        arguments.get("time_min"), arguments.get("time_max")
+    )
+    max_results = _bounded_int(
+        arguments.get("max_results"),
+        default=CALENDAR_MAX_RESULTS_DEFAULT,
+        minimum=CALENDAR_MAX_RESULTS_MIN,
+        maximum=CALENDAR_MAX_RESULTS_MAX,
+    )
+    page_token = _optional_text(arguments.get("page_token"))
+    query = _optional_text(arguments.get("query"))
+
+    try:
+        events, next_page_token = await _list_calendar_events(
+            settings,
+            account,
+            trace,
+            calendar_id=calendar_id,
+            time_min=time_min,
+            time_max=time_max,
+            max_results=max_results,
+            page_token=page_token,
+            query=query,
+        )
+    except asyncio.CancelledError:
+        raise
+    except _AccountUnavailable as exc:
+        return _fail(trace, tool, account.key, started, "unavailable", exc.message)
+    except _RequestFailure as exc:
+        return _fail(trace, tool, account.key, started, exc.status, exc.message)
+    except Exception as exc:  # défense : le handler ne lève jamais
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            type(exc).__name__,
+            _CALENDAR_UNREADABLE_MESSAGE,
+        )
+
+    payload: dict[str, object] = {
+        "status": "ok",
+        "account": account.key,
+        "calendar_id": calendar_id,
+        "events": events,
+    }
+    if next_page_token:
+        payload["next_page_token"] = next_page_token
+    _trace_tool(trace, tool, account.key, started, "ok", len(events))
+    return payload
+
+
+def _calendar_window(
+    raw_min: object, raw_max: object
+) -> tuple[str, str]:
+    """Période demandée, sinon maintenant puis maintenant + sept jours.
+
+    Les valeurs rendues sont RFC 3339 avec décalage, calculées à l'appel.
+    """
+    now = datetime.now().astimezone()
+    time_min = _optional_text(raw_min) or _rfc3339(now)
+    time_max = _optional_text(raw_max) or _rfc3339(
+        now + timedelta(days=CALENDAR_DEFAULT_WINDOW_DAYS)
+    )
+    return time_min, time_max
+
+
+def _rfc3339(moment: datetime) -> str:
+    """Instant RFC 3339 avec décalage, à la seconde."""
+    return moment.isoformat(timespec="seconds")
+
+
+async def _list_calendar_events(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    *,
+    calendar_id: str,
+    time_min: str,
+    time_max: str,
+    max_results: int,
+    page_token: str | None,
+    query: str | None,
+) -> tuple[list[dict[str, object]], str | None]:
+    """``GET /calendar/v3/calendars/{id}/events`` en événements dépliés."""
+    params: dict[str, object] = {
+        "timeMin": time_min,
+        "timeMax": time_max,
+        "maxResults": max_results,
+        "singleEvents": "true",
+        "orderBy": "startTime",
+    }
+    if page_token is not None:
+        params["pageToken"] = page_token
+    if query is not None:
+        params["q"] = query
+
+    url = (
+        settings.api_base_url
+        + CALENDAR_EVENTS_BASE_PATH
+        + "/"
+        + quote(calendar_id, safe="")
+        + "/events"
+    )
+    response = await _calendar_authorized_get(
+        settings, account, trace, url, params
+    )
+    if response.status_code >= 400:
+        raise _RequestFailure(
+            _calendar_status_error(response.status_code),
+            f"HTTP {response.status_code}",
+        )
+    body = _calendar_json_body(response)
+
+    events: list[dict[str, object]] = []
+    listed = body.get("items")
+    if isinstance(listed, list):
+        for item in listed[:max_results]:
+            event = _calendar_event(item)
+            if event is not None:
+                events.append(event)
+    next_page_token = _optional_text(body.get("nextPageToken"))
+    return events, next_page_token
+
+
+def _calendar_event(item: object) -> dict[str, object] | None:
+    """Événement rendu au modèle ; ``all_day`` suit ``start.date``."""
+    if not isinstance(item, dict):
+        return None
+    start, all_day = _calendar_bound(item.get("start"))
+    end, _ = _calendar_bound(item.get("end"))
+    return {
+        "id": _text(item.get("id")),
+        "summary": _text(item.get("summary")),
+        "start": start,
+        "end": end,
+        "all_day": all_day,
+        "location": _text(item.get("location")),
+        "attendees": _calendar_attendees(item.get("attendees")),
+        "status": _text(item.get("status")),
+        "html_link": _text(item.get("htmlLink")),
+    }
+
+
+def _calendar_bound(value: object) -> tuple[str, bool]:
+    """Borne d'événement et son caractère journée entière."""
+    if not isinstance(value, dict):
+        return "", False
+    date = value.get("date")
+    if isinstance(date, str) and date.strip():
+        return date.strip(), True
+    moment = value.get("dateTime")
+    if isinstance(moment, str):
+        return moment, False
+    return "", False
+
+
+def _calendar_attendees(value: object) -> list[dict[str, str]]:
+    """Participants réduits à leur courriel et à leur réponse."""
+    if not isinstance(value, list):
+        return []
+    attendees: list[dict[str, str]] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        attendees.append(
+            {
+                "email": _text(entry.get("email")),
+                "response_status": _text(entry.get("responseStatus")),
+            }
+        )
+    return attendees
+
+
+async def _calendar_authorized_get(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    url: str,
+    params: Mapping[str, object],
+) -> httpx2.Response:
+    """GET porteur du Bearer ; un 401 rafraîchit et rejoue une seule fois."""
+    try:
+        token = await _access_token(settings, account, trace)
+    except _TokenError as exc:
+        raise _AccountUnavailable(account.key) from exc
+
+    response = await _calendar_get(url, token, params)
+    if response.status_code != 401:
+        return response
+
+    try:
+        token = await _access_token(settings, account, trace, force=True)
+    except _TokenError as exc:
+        raise _AccountUnavailable(account.key) from exc
+    return await _calendar_get(url, token, params)
+
+
+async def _calendar_get(
+    url: str, token: str, params: Mapping[str, object]
+) -> httpx2.Response:
+    """Un GET Calendar, ou une ``_RequestFailure`` déjà en français."""
+    try:
+        async with httpx2.AsyncClient(
+            timeout=httpx2.Timeout(REQUEST_TIMEOUT),
+            headers={"Authorization": f"Bearer {token}"},
+        ) as client:
+            return await client.get(url, params=dict(params))
+    except asyncio.CancelledError:
+        raise
+    except httpx2.TimeoutException as exc:
+        raise _RequestFailure(_CALENDAR_TIMEOUT_MESSAGE, "timeout") from exc
+    except httpx2.RequestError as exc:
+        raise _RequestFailure(
+            _CALENDAR_UNREACHABLE_MESSAGE, type(exc).__name__
+        ) from exc
+    except Exception as exc:  # défense : le handler ne lève jamais
+        raise _RequestFailure(
+            _CALENDAR_UNREACHABLE_MESSAGE, type(exc).__name__
+        ) from exc
+
+
+def _calendar_json_body(response: httpx2.Response) -> Mapping[str, Any]:
+    """Corps JSON objet ; tout le reste est une réponse illisible."""
+    try:
+        body = response.json()
+    except (TypeError, ValueError) as exc:
+        raise _RequestFailure(
+            _CALENDAR_UNREADABLE_MESSAGE, "unreadable"
+        ) from exc
+    if not isinstance(body, dict):
+        raise _RequestFailure(_CALENDAR_UNREADABLE_MESSAGE, "unreadable")
+    return body
+
+
+def _calendar_status_error(status: int) -> str:
+    """Phrase française d'un statut Calendar, jamais une exception brute."""
+    if status == 400:
+        return _CALENDAR_VALIDATION_MESSAGE
+    if status == 401:
+        return _CALENDAR_REFUSED_MESSAGE
+    if status == 403:
+        return _CALENDAR_FORBIDDEN_MESSAGE
+    if status == 404:
+        return _CALENDAR_NOT_FOUND_MESSAGE
+    if status in (429, 529):
+        return _CALENDAR_RATE_MESSAGE
+    if status >= 500:
+        return (
+            _CALENDAR_PREFIX
+            + f"le service Agenda est indisponible (réponse {status})."
+        )
+    return (
+        _CALENDAR_PREFIX
+        + f"le service Agenda a renvoyé une erreur (réponse {status})."
+    )
 
 
 def _resolve_account(settings: _Settings, raw: object) -> _Account | None:

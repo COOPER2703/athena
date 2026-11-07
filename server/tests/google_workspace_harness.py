@@ -469,6 +469,50 @@ def gmail_read_thread(
     }
 
 
+def calendar_event(
+    event_id: str,
+    *,
+    summary: str = "Déjeuner jeudi",
+    start: str = "2026-11-12T12:00:00+01:00",
+    end: str = "2026-11-12T13:30:00+01:00",
+    all_day: bool = False,
+    location: str = "Cantine",
+    attendees: Sequence[tuple[str, str]] = (),
+    status: str = "confirmed",
+    html_link: str = "https://calendar.google.com/calendar/event?eid=e1",
+) -> dict[str, Any]:
+    """Événement d'agenda tel que ``GET /calendar/v3/.../events`` le rend.
+
+    ``all_day`` place la date dans ``start.date`` / ``end.date`` (fin
+    exclusive), sinon dans ``start.dateTime`` / ``end.dateTime``. Les
+    participants sont des couples ``(courriel, responseStatus)``.
+    """
+    bound = "date" if all_day else "dateTime"
+    return {
+        "id": event_id,
+        "summary": summary,
+        "start": {bound: start},
+        "end": {bound: end},
+        "location": location,
+        "attendees": [
+            {"email": email, "responseStatus": response_status}
+            for email, response_status in attendees
+        ],
+        "status": status,
+        "htmlLink": html_link,
+    }
+
+
+def calendar_event_list(
+    *events: Mapping[str, Any], next_page_token: str | None = None
+) -> dict[str, Any]:
+    """Objet Calendar rendu par ``GET /calendar/v3/.../events``."""
+    body: dict[str, Any] = {"items": list(events)}
+    if next_page_token is not None:
+        body["nextPageToken"] = next_page_token
+    return body
+
+
 @contextlib.asynccontextmanager
 async def google_workspace_session(
     tmp_path: Path,
