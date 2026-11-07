@@ -138,6 +138,27 @@ def test_connect_sends_register(monkeypatch: pytest.MonkeyPatch) -> None:
     asyncio.run(scenario())
 
 
+def test_connected_tracks_the_socket_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        conn = FakeConnection()
+
+        async def connect(url: str, **_: Any) -> FakeConnection:
+            return conn
+
+        monkeypatch.setattr(ws_client, "websockets", fake_websockets(connect))
+        transport = WsTransport(client_config(server_url="ws://x", ping_interval=100.0))
+
+        assert transport.connected is False
+        await transport.connect()
+        assert transport.connected is True
+        await transport.disconnect()
+        assert transport.connected is False
+
+    asyncio.run(scenario())
+
+
 def test_handshake_carries_the_access_token_in_the_authorization_header(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -8,6 +8,11 @@ import sys
 from client.app import ClientApp
 from client.audio_io import AudioIO
 from client.config import AppConfig
+from client.wake_word import (
+    OpenWakeWordDetector,
+    WakeWordDetector,
+    WakeWordUnavailableError,
+)
 from client.ws_client import (
     AccessTokenRefusedError,
     MissingAccessTokenError,
@@ -18,12 +23,33 @@ from client.ws_client import (
 log = logging.getLogger("athena.client")
 
 
+def _build_detector(cfg: AppConfig) -> WakeWordDetector | None:
+    """Charge le modèle une seule fois, uniquement si la Veille est active."""
+    if not cfg.wake_word.enabled:
+        log.info("Veille désactivée (ATHENA_WAKE_WORD=0)")
+        return None
+    wake_word = cfg.wake_word
+    detector = OpenWakeWordDetector(
+        wake_word.model_path,
+        threshold=wake_word.threshold,
+        pre_roll_ms=wake_word.pre_roll_ms,
+        vad=wake_word.vad,
+        vad_model_path=wake_word.vad_model_path,
+    )
+    log.info("Veille active (pré-roll=%d ms)", wake_word.pre_roll_ms)
+    return detector
+
+
 def _build_app(cfg: AppConfig) -> ClientApp:
     # Le Jeton est validé avant d'ouvrir le micro : un Client sans credential
-    # échoue tout de suite, avec un message qui dit où le récupérer.
+    # échoue tout de suite, avec un message qui dit où le récupérer. Le modèle
+    # est chargé ensuite ; c'est ``run()`` qui ouvre réellement le micro.
     require_access_token(cfg.client)
     transport = WsTransport(cfg.client)
-    return ClientApp(cfg, audio=AudioIO(cfg.audio), transport=transport)
+    detector = _build_detector(cfg)
+    return ClientApp(
+        cfg, audio=AudioIO(cfg.audio), transport=transport, detector=detector
+    )
 
 
 async def _enter_loop(app: ClientApp) -> None:
@@ -87,6 +113,9 @@ def cli() -> None:
         raise SystemExit(2) from exc
     except AccessTokenRefusedError as exc:
         print(f"Connexion refusée : {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+    except WakeWordUnavailableError as exc:
+        print(f"Veille indisponible : {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 
 
