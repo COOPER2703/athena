@@ -17,9 +17,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import email.policy
 import json
 import re
 import shutil
+from email import message_from_bytes
+from email.message import Message
 from pathlib import Path
 from typing import Any, AsyncIterator, Mapping, Sequence
 from types import SimpleNamespace
@@ -352,6 +355,42 @@ def gmail_metadata(
             ]
         },
     }
+
+
+def gmail_reply_source(
+    message_id: str,
+    *,
+    thread_id: str | None = None,
+    sender: str = "Camille <camille@example.test>",
+    to: str = "perso@example.test",
+    cc: str | None = None,
+    subject: str = "Déjeuner jeudi",
+    message_header: str | None = "<original@example.test>",
+    references: str | None = None,
+) -> dict[str, Any]:
+    """Message d'origine d'une réponse : fil, expéditeur, destinataires, en-têtes."""
+    headers: dict[str, str] = {"To": to}
+    if cc is not None:
+        headers["Cc"] = cc
+    if message_header is not None:
+        headers["Message-ID"] = message_header
+    if references is not None:
+        headers["References"] = references
+    return gmail_metadata(
+        message_id,
+        thread_id=thread_id,
+        sender=sender,
+        subject=subject,
+        headers=headers,
+    )
+
+
+def gmail_sent_message(request: Mapping[str, Any]) -> Message:
+    """Message MIME envoyé à Gmail, décodé depuis son champ ``raw`` base64url."""
+    raw = request["body"]["raw"]
+    return message_from_bytes(
+        base64.urlsafe_b64decode(raw), policy=email.policy.default
+    )
 
 
 def gmail_message_list(

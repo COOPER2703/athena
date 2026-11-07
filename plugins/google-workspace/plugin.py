@@ -22,12 +22,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import email.policy
 import html
 import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Mapping
+from email.message import EmailMessage
+from email.utils import formataddr, getaddresses
+from typing import Any, Iterable, Mapping
 from urllib.parse import quote
 
 import httpx2
@@ -74,6 +77,20 @@ GMAIL_THREADS_PATH = "/gmail/v1/users/me/threads"
 
 # En-têtes de métadonnées demandés à Gmail pour chaque message.
 GMAIL_METADATA_HEADERS = ("From", "Subject", "Date")
+
+# En-têtes nécessaires pour répondre : fil, expéditeur, destinataires, objet.
+GMAIL_REPLY_HEADERS = (
+    "From",
+    "To",
+    "Cc",
+    "Subject",
+    "Message-ID",
+    "References",
+)
+
+# Profil Gmail : sert uniquement à reconnaître sa propre adresse dans un
+# « répondre à tous ».
+GMAIL_PROFILE_PATH = "/gmail/v1/users/me/profile"
 
 # Fenêtre par défaut de ``calendar_list_events`` : maintenant, puis sept jours.
 CALENDAR_DEFAULT_WINDOW_DAYS = 7
@@ -157,6 +174,78 @@ GMAIL_READ_PARAMETERS: Mapping[str, object] = {
     "required": [],
 }
 
+GMAIL_SEND_DESCRIPTION = "Envoie un mail en texte brut."
+
+GMAIL_SEND_PARAMETERS: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "to": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
+            "description": "Destinataires principaux, au moins un.",
+        },
+        "cc": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Destinataires en copie.",
+        },
+        "bcc": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Destinataires en copie cachée.",
+        },
+        "subject": {
+            "type": "string",
+            "description": "Objet du mail.",
+        },
+        "body": {
+            "type": "string",
+            "description": "Corps du mail, en texte brut.",
+        },
+        "account": {
+            "type": "string",
+            "description": (
+                "Clé du compte Google à utiliser ; le compte par défaut "
+                "quand il est absent."
+            ),
+        },
+    },
+    "required": ["to", "subject", "body"],
+}
+
+GMAIL_REPLY_DESCRIPTION = "Répond dans le fil d'un message Gmail."
+
+GMAIL_REPLY_PARAMETERS: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "message_id": {
+            "type": "string",
+            "description": "Identifiant du message auquel répondre.",
+        },
+        "body": {
+            "type": "string",
+            "description": "Corps de la réponse, en texte brut.",
+        },
+        "reply_all": {
+            "type": "boolean",
+            "description": (
+                "Répondre aussi aux autres destinataires du message d'origine."
+            ),
+        },
+        "account": {
+            "type": "string",
+            "description": (
+                "Clé du compte Google à utiliser ; le compte par défaut "
+                "quand il est absent."
+            ),
+        },
+    },
+    "required": ["message_id", "body"],
+}
+
+# -- Instruction de plugin ----------------------------------------------------
+
 CALENDAR_LIST_EVENTS_DESCRIPTION = (
     "Liste les événements d'agenda d'une période."
 )
@@ -201,6 +290,8 @@ CALENDAR_LIST_EVENTS_PARAMETERS: Mapping[str, object] = {
         },
     },
 }
+
+# -- Instruction de plugin ----------------------------------------------------
 
 # -- Instruction de plugin ----------------------------------------------------
 
@@ -335,6 +426,25 @@ _CALENDAR_VALIDATION_MESSAGE = (
     + "la période ou la requête a été refusée. Vérifie les dates demandées."
 )
 _CALENDAR_NOT_FOUND_MESSAGE = _CALENDAR_PREFIX + "l'agenda demandé est introuvable."
+
+# Phrases propres à l'envoi et à la réponse : le préfixe change, pas le reste.
+_SEND_PREFIX = "L'envoi du mail n'a pas abouti : "
+_REPLY_PREFIX = "La réponse au mail n'a pas abouti : "
+
+_DELIVERY_UNREACHABLE = (
+    "le service Gmail est injoignable. Réessaie dans un instant."
+)
+_DELIVERY_TIMEOUT = (
+    "le service Gmail n'a pas répondu à temps. Réessaie dans un instant."
+)
+_DELIVERY_UNREADABLE = (
+    "le service Gmail a renvoyé une réponse illisible. Réessaie dans un instant."
+)
+_DELIVERY_REFUSED = "l'accès au compte a été refusé. Réessaie dans un instant."
+_DELIVERY_FORBIDDEN = "l'accès à ce compte est refusé."
+_DELIVERY_RATE = "trop de requêtes ont été envoyées. Réessaie dans un instant."
+_DELIVERY_VALIDATION = "la requête a été refusée."
+_DELIVERY_NOT_FOUND = "le message demandé est introuvable."
 
 
 class _TokenError(Exception):
@@ -868,6 +978,8 @@ def _tool_bindings(
     return (
         _gmail_search_tool(settings, trace),
         _gmail_read_tool(settings, trace),
+        _gmail_send_tool(settings, trace),
+        _gmail_reply_tool(settings, trace),
         _calendar_list_events_tool(settings, trace),
     )
 
@@ -1053,6 +1165,568 @@ def _message_id(item: object) -> str | None:
     if isinstance(identifier, str) and identifier.strip():
         return identifier.strip()
     return None
+
+
+# -- Tools ``gmail_send`` et ``gmail_reply`` ----------------------------------
+
+
+def _gmail_send_tool(settings: _Settings, trace: Trace) -> ToolBinding:
+    """Déclare ``gmail_send`` et son handler : un appel ne lève jamais."""
+
+    async def handle(arguments: Mapping[str, object]) -> Mapping[str, object]:
+        return await _gmail_send(settings, arguments, trace)
+
+    return ToolBinding(
+        spec=ToolSpec(
+            name="gmail_send",
+            description=GMAIL_SEND_DESCRIPTION,
+            parameters=GMAIL_SEND_PARAMETERS,
+        ),
+        handler=handle,
+    )
+
+
+async def _gmail_send(
+    settings: _Settings,
+    arguments: Mapping[str, object],
+    trace: Trace,
+) -> Mapping[str, object]:
+    """Compose un MIME texte UTF-8 et l'envoie, sans jamais lever."""
+    tool = "gmail_send"
+    started = asyncio.get_running_loop().time()
+
+    account = _resolve_account(settings, arguments.get("account"))
+    if account is None:
+        raw = arguments.get("account")
+        shown = raw.strip() if isinstance(raw, str) and raw.strip() else ""
+        key = _account_key(shown) if shown else ""
+        return _fail(
+            trace,
+            tool,
+            key,
+            started,
+            "invalid_account",
+            _unknown_account_message(settings, shown),
+        )
+
+    to = _addresses(arguments.get("to"))
+    cc = _addresses(arguments.get("cc"))
+    bcc = _addresses(arguments.get("bcc"))
+    subject = arguments.get("subject")
+    body = arguments.get("body")
+
+    if not to:
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            "invalid_to",
+            _SEND_PREFIX + "le destinataire est absent ou invalide.",
+        )
+    if cc is None or bcc is None:
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            "invalid_recipient",
+            _SEND_PREFIX + "un destinataire en copie est invalide.",
+        )
+    if not isinstance(subject, str):
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            "invalid_subject",
+            _SEND_PREFIX + "l'objet est absent.",
+        )
+    if not isinstance(body, str) or not body.strip():
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            "invalid_body",
+            _SEND_PREFIX + "le corps est vide.",
+        )
+
+    try:
+        raw = _compose_raw_message(
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            subject=subject,
+            body=body,
+        )
+        sent = await _send_raw_message(
+            settings,
+            account,
+            trace,
+            raw=raw,
+            thread_id=None,
+            prefix=_SEND_PREFIX,
+        )
+    except asyncio.CancelledError:
+        raise
+    except _AccountUnavailable as exc:
+        return _fail(trace, tool, account.key, started, "unavailable", exc.message)
+    except _RequestFailure as exc:
+        return _fail(trace, tool, account.key, started, exc.status, exc.message)
+    except Exception as exc:  # défense : le handler ne lève jamais
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            type(exc).__name__,
+            _SEND_PREFIX + _DELIVERY_UNREADABLE,
+        )
+
+    payload: dict[str, object] = {
+        "status": "ok",
+        "message_id": _text(sent.get("id")),
+        "thread_id": _text(sent.get("threadId")),
+    }
+    _trace_tool(trace, tool, account.key, started, "ok")
+    return payload
+
+
+def _gmail_reply_tool(settings: _Settings, trace: Trace) -> ToolBinding:
+    """Déclare ``gmail_reply`` et son handler : un appel ne lève jamais."""
+
+    async def handle(arguments: Mapping[str, object]) -> Mapping[str, object]:
+        return await _gmail_reply(settings, arguments, trace)
+
+    return ToolBinding(
+        spec=ToolSpec(
+            name="gmail_reply",
+            description=GMAIL_REPLY_DESCRIPTION,
+            parameters=GMAIL_REPLY_PARAMETERS,
+        ),
+        handler=handle,
+    )
+
+
+async def _gmail_reply(
+    settings: _Settings,
+    arguments: Mapping[str, object],
+    trace: Trace,
+) -> Mapping[str, object]:
+    """Répond dans le fil d'un message, sans jamais lever."""
+    tool = "gmail_reply"
+    started = asyncio.get_running_loop().time()
+
+    account = _resolve_account(settings, arguments.get("account"))
+    if account is None:
+        raw = arguments.get("account")
+        shown = raw.strip() if isinstance(raw, str) and raw.strip() else ""
+        key = _account_key(shown) if shown else ""
+        return _fail(
+            trace,
+            tool,
+            key,
+            started,
+            "invalid_account",
+            _unknown_account_message(settings, shown),
+        )
+
+    message_id = _optional_text(arguments.get("message_id"))
+    body = arguments.get("body")
+    if message_id is None:
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            "invalid_message_id",
+            _REPLY_PREFIX + "l'identifiant du message d'origine est absent.",
+        )
+    if not isinstance(body, str) or not body.strip():
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            "invalid_body",
+            _REPLY_PREFIX + "le corps est vide.",
+        )
+    reply_all = arguments.get("reply_all") is True
+
+    try:
+        original = await _reply_source(
+            settings, account, trace, message_id
+        )
+        headers = _headers(original)
+        thread_id = _text(original.get("threadId"))
+        in_reply_to, references = _reply_references(headers)
+
+        self_address = (
+            await _profile_address(settings, account, trace)
+            if reply_all
+            else ""
+        )
+        to, cc = _reply_recipients(
+            headers, self_address=self_address, reply_all=reply_all
+        )
+        if not to:
+            raise _RequestFailure(
+                _REPLY_PREFIX
+                + "le destinataire du message d'origine est introuvable.",
+                "unreadable",
+            )
+
+        raw = _compose_raw_message(
+            to=to,
+            cc=cc,
+            subject=_reply_subject(headers.get("subject", "")),
+            body=body,
+            in_reply_to=in_reply_to,
+            references=references,
+        )
+        sent = await _send_raw_message(
+            settings,
+            account,
+            trace,
+            raw=raw,
+            thread_id=thread_id or None,
+            prefix=_REPLY_PREFIX,
+        )
+    except asyncio.CancelledError:
+        raise
+    except _AccountUnavailable as exc:
+        return _fail(trace, tool, account.key, started, "unavailable", exc.message)
+    except _RequestFailure as exc:
+        return _fail(trace, tool, account.key, started, exc.status, exc.message)
+    except Exception as exc:  # défense : le handler ne lève jamais
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            type(exc).__name__,
+            _REPLY_PREFIX + _DELIVERY_UNREADABLE,
+        )
+
+    response_thread = _text(sent.get("threadId")) or thread_id
+    payload: dict[str, object] = {
+        "status": "ok",
+        "message_id": _text(sent.get("id")),
+        "thread_id": response_thread,
+    }
+    _trace_tool(trace, tool, account.key, started, "ok")
+    return payload
+
+
+async def _reply_source(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    message_id: str,
+) -> Mapping[str, Any]:
+    """Métadonnées du message d'origine, jamais son corps ni ses pièces."""
+    params: dict[str, object] = {
+        "format": "metadata",
+        "metadataHeaders": list(GMAIL_REPLY_HEADERS),
+    }
+    url = settings.api_base_url + GMAIL_MESSAGES_PATH + "/" + message_id
+    response = await _authorized_delivery(
+        settings,
+        account,
+        trace,
+        "GET",
+        url,
+        prefix=_REPLY_PREFIX,
+        params=params,
+    )
+    if response.status_code >= 400:
+        raise _RequestFailure(
+            _delivery_status_error(_REPLY_PREFIX, response.status_code),
+            f"HTTP {response.status_code}",
+        )
+    return _delivery_json_body(response, _REPLY_PREFIX)
+
+
+async def _profile_address(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+) -> str:
+    """Adresse du compte, pour s'exclure soi-même d'un « répondre à tous »."""
+    url = settings.api_base_url + GMAIL_PROFILE_PATH
+    response = await _authorized_delivery(
+        settings, account, trace, "GET", url, prefix=_REPLY_PREFIX
+    )
+    if response.status_code >= 400:
+        raise _RequestFailure(
+            _delivery_status_error(_REPLY_PREFIX, response.status_code),
+            f"HTTP {response.status_code}",
+        )
+    body = _delivery_json_body(response, _REPLY_PREFIX)
+    address = _optional_text(body.get("emailAddress"))
+    if address is None:
+        raise _RequestFailure(
+            _REPLY_PREFIX + "le profil Gmail est introuvable.", "unreadable"
+        )
+    return address
+
+
+_REPLY_SUBJECT = re.compile(r"^\s*re\s*:", re.IGNORECASE)
+
+
+def _reply_subject(subject: str) -> str:
+    """Objet ``Re:`` sans empiler les préfixes déjà présents."""
+    if _REPLY_SUBJECT.match(subject):
+        return subject
+    return "Re: " + subject
+
+
+def _reply_references(
+    headers: Mapping[str, str],
+) -> tuple[str | None, tuple[str, ...]]:
+    """``In-Reply-To`` et ``References`` dérivés du message d'origine."""
+    message_header = _optional_text(headers.get("message-id"))
+    identifiers = (headers.get("references") or "").split()
+    if message_header is not None and message_header not in identifiers:
+        identifiers.append(message_header)
+    return message_header, tuple(identifiers)
+
+
+def _reply_recipients(
+    headers: Mapping[str, str],
+    *,
+    self_address: str,
+    reply_all: bool,
+) -> tuple[list[str], list[str]]:
+    """Destinataires du message d'origine, l'adresse du compte exclue."""
+    sender = _header_recipients(headers.get("from", ""))
+    if not sender:
+        return [], []
+    excluded = (self_address,) if self_address else ()
+    to = _merge_recipients([sender], excluded=excluded)
+    cc: list[tuple[str, str]] = []
+    if reply_all:
+        to = _merge_recipients(
+            [sender, _header_recipients(headers.get("to", ""))],
+            excluded=excluded,
+        )
+        cc = _merge_recipients(
+            [_header_recipients(headers.get("cc", ""))],
+            excluded=excluded,
+            already=(address for _, address in to),
+        )
+    return _render_recipients(to), _render_recipients(cc)
+
+
+def _header_recipients(value: str) -> list[tuple[str, str]]:
+    """Couples (nom affiché, adresse) d'un en-tête, adresses vides écartées."""
+    recipients: list[tuple[str, str]] = []
+    for name, address in getaddresses([value]):
+        address = address.strip()
+        if address:
+            recipients.append((name.strip(), address))
+    return recipients
+
+
+def _merge_recipients(
+    groups: list[list[tuple[str, str]]],
+    *,
+    excluded: tuple[str, ...] = (),
+    already: Iterable[str] = (),
+) -> list[tuple[str, str]]:
+    """Fusionne des destinataires sans doublon d'adresse ni adresse exclue."""
+    seen = {address.lower() for address in already}
+    blocked = {address.lower() for address in excluded}
+    merged: list[tuple[str, str]] = []
+    for group in groups:
+        for name, address in group:
+            key = address.lower()
+            if key in seen or key in blocked:
+                continue
+            seen.add(key)
+            merged.append((name, address))
+    return merged
+
+
+def _render_recipients(recipients: list[tuple[str, str]]) -> list[str]:
+    return [
+        formataddr((name, address)) if name else address
+        for name, address in recipients
+    ]
+
+
+async def _send_raw_message(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    *,
+    raw: str,
+    thread_id: str | None,
+    prefix: str,
+) -> Mapping[str, Any]:
+    """``POST /messages`` avec ``raw`` ; ``threadId`` seulement pour une réponse."""
+    payload: dict[str, object] = {"raw": raw}
+    if thread_id:
+        payload["threadId"] = thread_id
+    url = settings.api_base_url + GMAIL_MESSAGES_PATH
+    response = await _authorized_delivery(
+        settings, account, trace, "POST", url, payload=payload, prefix=prefix
+    )
+    if response.status_code >= 400:
+        raise _RequestFailure(
+            _delivery_status_error(prefix, response.status_code),
+            f"HTTP {response.status_code}",
+        )
+    return _delivery_json_body(response, prefix)
+
+
+def _delivery_json_body(
+    response: httpx2.Response, prefix: str
+) -> Mapping[str, Any]:
+    """Corps JSON objet d'un envoi ; tout le reste est une réponse illisible."""
+    try:
+        body = response.json()
+    except (TypeError, ValueError) as exc:
+        raise _RequestFailure(
+            prefix + _DELIVERY_UNREADABLE, "unreadable"
+        ) from exc
+    if not isinstance(body, dict):
+        raise _RequestFailure(prefix + _DELIVERY_UNREADABLE, "unreadable")
+    return body
+
+
+def _compose_raw_message(
+    *,
+    to: list[str],
+    cc: list[str] | None = None,
+    bcc: list[str] | None = None,
+    subject: str,
+    body: str,
+    in_reply_to: str | None = None,
+    references: tuple[str, ...] = (),
+) -> str:
+    """Message ``text/plain`` UTF-8, encodé base64url comme l'exige Gmail."""
+    message = EmailMessage()
+    message["To"] = ", ".join(to)
+    if cc:
+        message["Cc"] = ", ".join(cc)
+    if bcc:
+        message["Bcc"] = ", ".join(bcc)
+    if in_reply_to:
+        message["In-Reply-To"] = in_reply_to
+    if references:
+        message["References"] = " ".join(references)
+    message["Subject"] = subject
+    message.set_content(body, subtype="plain", charset="utf-8", cte="base64")
+    return base64.urlsafe_b64encode(
+        message.as_bytes(policy=email.policy.SMTP)
+    ).decode("ascii")
+
+
+def _addresses(value: object) -> list[str] | None:
+    """Liste d'adresses non vides ; ``None`` quand la forme est invalide."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        return None
+    addresses: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            return None
+        addresses.append(item.strip())
+    return addresses
+
+
+async def _authorized_delivery(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    method: str,
+    url: str,
+    *,
+    prefix: str,
+    params: Mapping[str, object] | None = None,
+    payload: Mapping[str, object] | None = None,
+) -> httpx2.Response:
+    """Requête porteuse du Bearer ; un 401 rafraîchit et rejoue une seule fois."""
+    try:
+        token = await _access_token(settings, account, trace)
+    except _TokenError as exc:
+        raise _AccountUnavailable(account.key) from exc
+
+    response = await _delivery_request(
+        method, url, token, prefix=prefix, params=params, payload=payload
+    )
+    if response.status_code != 401:
+        return response
+
+    try:
+        token = await _access_token(settings, account, trace, force=True)
+    except _TokenError as exc:
+        raise _AccountUnavailable(account.key) from exc
+    return await _delivery_request(
+        method, url, token, prefix=prefix, params=params, payload=payload
+    )
+
+
+async def _delivery_request(
+    method: str,
+    url: str,
+    token: str,
+    *,
+    prefix: str,
+    params: Mapping[str, object] | None = None,
+    payload: Mapping[str, object] | None = None,
+) -> httpx2.Response:
+    """Une requête d'envoi, ou une ``_RequestFailure`` en français."""
+    try:
+        async with httpx2.AsyncClient(
+            timeout=httpx2.Timeout(REQUEST_TIMEOUT),
+            headers={"Authorization": f"Bearer {token}"},
+        ) as client:
+            return await client.request(
+                method,
+                url,
+                params=dict(params or {}),
+                json=dict(payload) if payload is not None else None,
+            )
+    except asyncio.CancelledError:
+        raise
+    except httpx2.TimeoutException as exc:
+        raise _RequestFailure(prefix + _DELIVERY_TIMEOUT, "timeout") from exc
+    except httpx2.RequestError as exc:
+        raise _RequestFailure(
+            prefix + _DELIVERY_UNREACHABLE, type(exc).__name__
+        ) from exc
+    except Exception as exc:  # défense : le handler ne lève jamais
+        raise _RequestFailure(
+            prefix + _DELIVERY_UNREACHABLE, type(exc).__name__
+        ) from exc
+
+
+def _delivery_status_error(prefix: str, status: int) -> str:
+    """Phrase française d'un statut Gmail pour l'envoi ou la réponse."""
+    if status == 400:
+        return prefix + _DELIVERY_VALIDATION
+    if status == 401:
+        return prefix + _DELIVERY_REFUSED
+    if status == 403:
+        return prefix + _DELIVERY_FORBIDDEN
+    if status in (404, 410):
+        return prefix + _DELIVERY_NOT_FOUND
+    if status in (429, 529):
+        return prefix + _DELIVERY_RATE
+    if status >= 500:
+        return prefix + f"le service Gmail est indisponible (réponse {status})."
+    return prefix + f"le service Gmail a renvoyé une erreur (réponse {status})."
+
+
+def _unknown_account_message(settings: _Settings, shown: str) -> str:
+    return (
+        f"Le compte « {shown} » est inconnu. "
+        f"Comptes disponibles : {_account_names(settings)}."
+    )
 
 
 # -- Tool ``calendar_list_events`` -------------------------------------------
