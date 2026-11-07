@@ -61,8 +61,7 @@ La **Veille** est active par défaut. Le chargement du modèle précède l'ouver
 et apparaît dans le terminal du client :
 
 ```text
-Modèle de Wake word chargé (modèle=…/client/models/athena.onnx, seuil=0.50)
-Veille active (pré-roll=300 ms)
+Modèle de Wake word chargé (modèle=…/client/models/athena.onnx, seuil=0.50, VAD=désactivé, pré-roll=300 ms)
 ```
 
 Dites **« Athena »** (prononciation française, « a-té-na »), puis la commande, sans attendre :
@@ -91,10 +90,12 @@ ATHENA_WAKE_WORD=0 python -m client
 
 Le Client logue alors `Veille désactivée (ATHENA_WAKE_WORD=0)` et ne charge aucun modèle.
 
-La Veille est suspendue en Session, tant qu'Athena joue de l'audio (playback non vide), et
-hors connexion ; elle se réarme après la fin de Session, le playback vidé et un cooldown de
-2 s (`Veille en cooldown pendant 2.0 s`). Si aucun `SessionStarted` ni audio serveur n'arrive
-dans les 10 s après un déclenchement, le Client revient en `LISTENING` avec un `WARNING`
+La Veille est suspendue en Session et tant qu'Athena joue de l'audio (playback non vide,
+dernier chunk en cours d'écriture compris) ; elle se réarme après la fin de Session, le
+playback vidé et un cooldown de 2 s (`Veille en cooldown pendant 2.0 s`). L'inférence reste
+locale et hors ligne, mais hors connexion une détection est seulement loguée, jamais
+déclenchée ni rejouée. Si aucun `SessionStarted` ni audio serveur n'arrive dans les 10 s
+après un déclenchement, le Client revient en `LISTENING` avec un `WARNING`
 (`Session fantôme : aucune confirmation serveur…`) ; ce garde-fou vaut aussi pour le
 push-to-talk.
 
