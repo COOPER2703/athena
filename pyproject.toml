@@ -46,11 +46,13 @@ exclude = ["protocol/tests", "server/tests", "client/tests"]
 # y compris si un `.gitignore` local les masque.
 include = [
     "client/models/*.onnx",
+    "client/models/*.json",
     "client/models/*.md",
     "client/models/*.txt",
 ]
 artifacts = [
     "client/models/*.onnx",
+    "client/models/*.json",
     "client/models/*.md",
     "client/models/*.txt",
 ]

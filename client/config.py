@@ -39,6 +39,7 @@ ACCESS_TOKEN_ENV = "ATHENA_ACCESS_TOKEN"
 # répertoire de travail.
 _CLIENT_DIR = Path(__file__).resolve().parent
 DEFAULT_WAKE_WORD_MODEL = _CLIENT_DIR / "models" / "athena.onnx"
+DEFAULT_WAKE_WORD_VAD_MODEL = _CLIENT_DIR / "models" / "silero_vad.onnx"
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +107,11 @@ class WakeWordConfig:
         )
     )
     vad: bool = field(default_factory=lambda: _get_flag("ATHENA_WAKE_WORD_VAD", False))
+    vad_model_path: Path = field(
+        default_factory=lambda: _get_path(
+            "ATHENA_WAKE_WORD_VAD_MODEL", DEFAULT_WAKE_WORD_VAD_MODEL
+        )
+    )
     session_start_timeout_seconds: float = field(
         default_factory=lambda: _get_float(
             "ATHENA_WAKE_WORD_SESSION_START_TIMEOUT_SECONDS", 10.0
