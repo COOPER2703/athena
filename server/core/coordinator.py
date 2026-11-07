@@ -43,12 +43,19 @@ from server.core.events import (
 )
 from server.core.plugins import PluginRegistry
 from server.core.ports import EventJudge, Judgment, MemoryStore, ToolSpec
+from server.core.session_tools import END_SESSION
 from server.core.state import SessionState
 from server.core.tools import ToolRegistry
 from server.core.untrusted import flatten_untrusted, sanitize_untrusted
 
 _TRACE_SOURCE = "core"
 IDLE_TIMEOUT = 30.0
+# Grâce d'une **Clôture en attente** (#130) : quand le modèle appelle
+# ``end_session``, la Session ne se ferme pas brutalement. Le résultat du Tool
+# part au modèle, puis la Connexion est refermée 3 s après le dernier audio du
+# modèle — le temps de finir la phrase d'adieu. Chaque ``LlmAudio`` relance
+# cette grâce sur la même clé de timer que l'inactivité.
+END_SESSION_GRACE_TIMEOUT = 3.0
 # Filet de sécurité de l'Annonce (ADR-0007, amendé) : une Connexion Live n'est
 # ouverte que si le jugement **texte** a décidé d'annoncer, mais si le modèle ne
 # produit aucun son, elle est refermée vite — plus court que l'inactivité d'une
@@ -139,6 +146,10 @@ class Coordinator:
         self._visible = False
         self._auto = False
         self._judging = False
+        # Clôture en attente (#130) : le modèle a demandé la fin de la Session,
+        # la Connexion reste ouverte pendant la grâce. La politique de fermeture
+        # vit ici, pas dans le handler du Tool (ADR-0008).
+        self._end_session_pending = False
         self._session_counter = 0
         self._audio_buffer: list[bytes] = []
         self._recent_utterances: list[str] = []
@@ -477,6 +488,7 @@ class Coordinator:
         self._client_id = self._registered_client_id
         self._auto = True
         self._judging = True
+        self._end_session_pending = False
         self._state = SessionState.LIVE_CONNECTING
         self._recent_utterances = []
 
@@ -598,6 +610,7 @@ class Coordinator:
         self._client_id = event.client_id
         self._auto = event.auto
         self._state = SessionState.LIVE_CONNECTING
+        self._end_session_pending = False
         self._recent_utterances = []
         self._injected_memories = set()
 
@@ -726,12 +739,12 @@ class Coordinator:
         if self._state is SessionState.LIVE_ACTIVE:
             self._audio_buffer.append(event.data)
             return [
-                self._rearm_timer(),
+                self._end_session_grace_timer(),
                 *(await self._become_visible("LlmAudio")),
             ]
         if self._state is SessionState.SESSION_VISIBLE:
             return [
-                self._rearm_timer(),
+                self._end_session_grace_timer(),
                 SendAudioToClient(client_id=self._client_id, data=event.data),
                 *self._decision("LlmAudio"),
             ]
@@ -839,8 +852,21 @@ class Coordinator:
         trace porte le plugin propriétaire (``core`` pour un Tool du noyau,
         ``null`` pour un nom inconnu), pour attribuer appels et erreurs dans le
         flux de trace (ADR-0014).
+
+        ``end_session`` relève de la politique du noyau (#130) : il n'est
+        accepté que dans une Session active et ouvre alors une **Clôture en
+        attente** — le résultat part au modèle d'abord, puis la grâce de 3 s
+        remplace le timeout d'inactivité. Hors Session active, le modèle reçoit
+        une erreur et aucun timer n'est armé.
         """
         plugin = self._tool_owner(event.name)
+        is_end_session = event.name == END_SESSION
+        # Le Tool de clôture n'a de sens que dans une Session active : hors de
+        # là, le modèle reçoit une erreur et aucun timer n'est armé (#130).
+        active = self._state in (
+            SessionState.LIVE_ACTIVE,
+            SessionState.SESSION_VISIBLE,
+        )
         commands: list[Command] = [
             self._trace(
                 "ToolCall",
@@ -855,8 +881,13 @@ class Coordinator:
                 },
             )
         ]
-        if self._tools is None:
+        if is_end_session and not active:
             result: Mapping[str, object] = {
+                "status": "error",
+                "message": "end_session outside an active session",
+            }
+        elif self._tools is None:
+            result = {
                 "status": "error",
                 "message": f"unknown tool: {event.name}",
             }
@@ -885,6 +916,23 @@ class Coordinator:
                 },
             )
         )
+        # Première clôture acceptée : grâce de 3 s sur la clé de la Connexion
+        # (elle remplace le timeout d'inactivité). Un second appel pendant la
+        # clôture rend un succès sans réarmer : on ne prolonge pas la Session en
+        # rappelant le Tool. Hors Session active, aucun timer.
+        if (
+            is_end_session
+            and active
+            and result.get("status") == "ok"
+            and not self._end_session_pending
+        ):
+            self._end_session_pending = True
+            commands.append(
+                StartIdleTimer(
+                    connection_id=self._connection_id,
+                    timeout=END_SESSION_GRACE_TIMEOUT,
+                )
+            )
         return commands
 
     def _tool_owner(self, name: str) -> str | None:
@@ -935,6 +983,11 @@ class Coordinator:
     async def _on_timer_fired(self, event: TimerFired) -> list[Command]:
         if event.connection_id == EVENT_WINDOW_TIMER_ID:
             return await self._on_event_window_fired()
+        # Échéance de la grâce d'une Clôture en attente : la Session se termine
+        # avec le motif décidé par le modèle, et le Client revient à LISTENING
+        # par le chemin de fin existant (``AnnounceSessionEnded``).
+        if self._end_session_pending and self._owns(event.connection_id):
+            return self._teardown(SessionEndReason.COMPLETED, "EndSession")
         if self._owns(event.connection_id) and self._state is not SessionState.IDLE:
             return self._teardown(SessionEndReason.TIMEOUT, "Timeout")
         return self._decision("TimerFired")
@@ -955,6 +1008,19 @@ class Coordinator:
 
     def _rearm_timer(self) -> StartIdleTimer:
         return StartIdleTimer(connection_id=self._connection_id, timeout=IDLE_TIMEOUT)
+
+    def _end_session_grace_timer(self) -> StartIdleTimer:
+        """Réarmement d'audio : la grâce pendant une Clôture en attente.
+
+        Hors clôture, c'est le timeout d'inactivité ordinaire. Les deux partagent
+        la clé de timer de la Connexion : armer l'un remplace l'autre.
+        """
+        timeout = (
+            END_SESSION_GRACE_TIMEOUT
+            if self._end_session_pending
+            else IDLE_TIMEOUT
+        )
+        return StartIdleTimer(connection_id=self._connection_id, timeout=timeout)
 
     def _owns(self, connection_id: str) -> bool:
         """Une identité vide n'est pas un joker : seul l'id courant compte."""
@@ -1063,6 +1129,7 @@ class Coordinator:
         self._auto = False
         self._judging = False
         self._announcing = False
+        self._end_session_pending = False
         self._judged_batch = []
         self._audio_buffer.clear()
         self._recent_utterances = []

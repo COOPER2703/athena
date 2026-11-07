@@ -52,6 +52,7 @@ message SessionEnded {
     SHUTDOWN = 4;
     ERROR = 5;
     CLIENT_GONE = 6;
+    COMPLETED = 7;
   }
 
   Reason reason = 1;
