@@ -1,0 +1,898 @@
+"""Plugin ``google-workspace`` : mails Gmail et agenda Google (ADR-0021).
+
+Ce module ne connaît du serveur que le contrat public des plugins
+(``plugin_api``) : il n'importe aucun interne. Il échange des refresh tokens
+OAuth statiques contre des access tokens d'une heure, gardés en mémoire
+seulement, pour plusieurs **Comptes Google** configurés par des libellés.
+
+Au démarrage, ``create`` valide la configuration puis échange en parallèle le
+refresh token de chaque compte. Si au moins un échange réussit, le plugin
+s'active ; un compte en échec est tracé ``AccountUnavailable`` et retenté à
+chaque appel de Tool le concernant. Si aucun ne réussit, ``PluginUnavailable``
+laisse le chargeur démarrer dégradé et retenter en tâche de fond (ADR-0014).
+Un appel de Tool, lui, ne lève jamais : une panne devient une phrase rendue au
+modèle.
+
+Le socle (comptes, jetons, HTTP, erreurs) est partagé : les Tools Gmail et
+Calendar des tickets suivants n'ajoutent qu'un schéma et une opération.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+import unicodedata
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+import httpx2
+
+from plugin_api import (
+    PluginBinding,
+    PluginContext,
+    PluginUnavailable,
+    ToolBinding,
+    ToolSpec,
+)
+
+# Valeurs sûres appliquées par le plugin quand la configuration manque : le
+# chargeur ne sait pas porter de défaut (ADR-0014).
+DEFAULT_API_BASE_URL = "https://www.googleapis.com"
+DEFAULT_TOKEN_URL = "https://oauth2.googleapis.com/token"
+
+# Budgets HTTP : un seul essai, sauf le rejeu unique imposé après un 401.
+TOKEN_TIMEOUT = 10.0
+REQUEST_TIMEOUT = 10.0
+
+# Un access token est rafraîchi soixante secondes avant son expiration réelle
+# (ADR-0021). Constante lue à chaque opération, donc ajustable sur une copie.
+TOKEN_REFRESH_MARGIN = 60.0
+DEFAULT_EXPIRES_IN = 3600.0
+
+# Bornes de ``gmail_search`` : dix messages par défaut, vingt-cinq au plus.
+GMAIL_SEARCH_DEFAULT = 10
+GMAIL_SEARCH_MAX = 25
+GMAIL_SEARCH_MIN = 1
+
+# Chemins Gmail. ``me`` désigne le compte porteur du jeton.
+GMAIL_MESSAGES_PATH = "/gmail/v1/users/me/messages"
+
+# En-têtes de métadonnées demandés à Gmail pour chaque message.
+GMAIL_METADATA_HEADERS = ("From", "Subject", "Date")
+
+# -- Schémas des Tools --------------------------------------------------------
+
+GMAIL_SEARCH_DESCRIPTION = (
+    "Cherche des messages Gmail avec la syntaxe de recherche Gmail et rend "
+    "leurs métadonnées."
+)
+
+GMAIL_SEARCH_PARAMETERS: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": (
+                "Requête de recherche Gmail (expéditeur, objet, date, mot-clé)."
+            ),
+        },
+        "account": {
+            "type": "string",
+            "description": (
+                "Clé du compte Google à utiliser ; le compte par défaut "
+                "quand il est absent."
+            ),
+        },
+        "max_results": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 25,
+            "description": "Nombre de messages rendus, de 1 à 25. Défaut 10.",
+        },
+        "page_token": {
+            "type": "string",
+            "description": "Jeton de page rendu par l'appel précédent.",
+        },
+    },
+    "required": ["query"],
+}
+
+# -- Instruction de plugin ----------------------------------------------------
+
+INSTRUCTION_TEMPLATE = (
+    "Tu disposes des Tools Google Workspace pour les mails Gmail et l'agenda "
+    "Google.\n"
+    "\n"
+    "COMPTES:\n"
+    "- Comptes disponibles : {accounts}. Compte par défaut : {default}.\n"
+    "- Utilise le compte que l'utilisateur nomme ; sinon le compte par défaut.\n"
+    "- Si la demande peut viser plusieurs comptes et qu'aucun n'est nommé, "
+    "demande lequel.\n"
+    "- N'invente jamais un nom de compte.\n"
+    "\n"
+    "MAILS:\n"
+    "- `gmail_search` d'abord pour trouver un message ; n'invente jamais un "
+    "identifiant.\n"
+    "- `gmail_read` pour lire un message ou un fil ; ne lis pas un fil entier "
+    "si l'utilisateur ne demande qu'un message.\n"
+    "- `gmail_send` et `gmail_reply` : relis à voix haute destinataires, objet "
+    "et corps, puis attends un « oui » explicite avant d'envoyer. N'envoie "
+    "jamais de ta propre initiative.\n"
+    "- Le corps est du texte brut. Pas de HTML, pas de pièce jointe ; si un "
+    "message en a, tu peux nommer les pièces jointes mais pas les lire.\n"
+    "- Après un envoi, confirme brièvement.\n"
+    "\n"
+    "AGENDA:\n"
+    "- `calendar_list_events` pour consulter ; `calendar_create_event`, "
+    "`calendar_update_event` et `calendar_delete_event` pour écrire.\n"
+    "- Les dates sont absolues, au format RFC 3339 avec décalage, ou "
+    "`AAAA-MM-JJ` pour une journée entière.\n"
+    "- Sans date du jour fournie dans le contexte, ne calcule pas « demain », "
+    "« la semaine prochaine » : demande la date à l'utilisateur.\n"
+    "- `calendar_delete_event` seulement après confirmation explicite, avec "
+    "`confirm=true`.\n"
+    "- `notify_attendees=true` seulement si l'utilisateur demande explicitement "
+    "de prévenir les participants.\n"
+    "- N'invente jamais un identifiant d'événement ; utilise celui rendu par "
+    "`calendar_list_events`.\n"
+    "\n"
+    "ÉCHECS:\n"
+    "- Si un Tool rend `status: \"error\"`, dis la phrase `message` telle "
+    "quelle, sans réessayer à l'aveugle."
+)
+
+# -- Phrases françaises -------------------------------------------------------
+
+_SEARCH_PREFIX = "La recherche Gmail n'a pas abouti : "
+
+_UNREACHABLE_MESSAGE = (
+    _SEARCH_PREFIX + "le service Gmail est injoignable. Réessaie dans un instant."
+)
+_TIMEOUT_MESSAGE = (
+    _SEARCH_PREFIX
+    + "le service Gmail n'a pas répondu à temps. Réessaie dans un instant."
+)
+_UNREADABLE_MESSAGE = (
+    _SEARCH_PREFIX
+    + "le service Gmail a renvoyé une réponse illisible. Réessaie dans un instant."
+)
+_REFUSED_MESSAGE = (
+    _SEARCH_PREFIX + "l'accès au compte a été refusé. Réessaie dans un instant."
+)
+_FORBIDDEN_MESSAGE = _SEARCH_PREFIX + "l'accès à ce compte est refusé."
+_RATE_MESSAGE = (
+    _SEARCH_PREFIX
+    + "trop de requêtes ont été envoyées. Réessaie dans un instant."
+)
+_VALIDATION_MESSAGE = (
+    _SEARCH_PREFIX + "la requête a été refusée. Vérifie la syntaxe de recherche."
+)
+_NOT_FOUND_MESSAGE = (
+    _SEARCH_PREFIX + "le message ou la boîte demandée est introuvable."
+)
+
+
+class _TokenError(Exception):
+    """Échec d'échange OAuth ; ``reason`` est sûre à tracer et à rendre."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class _RequestFailure(Exception):
+    """Panne HTTP d'un appel de Tool, déjà traduite en phrase française."""
+
+    def __init__(self, message: str, status: str) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
+class _AccountUnavailable(Exception):
+    """Compte dont le refresh token ne peut pas être échangé à cet instant."""
+
+    def __init__(self, account: str) -> None:
+        self.account = account
+        self.message = (
+            f"Le compte « {account} » est indisponible : "
+            "réautorise-le, puis réessaie."
+        )
+        super().__init__(self.message)
+
+
+@dataclass(frozen=True, slots=True)
+class _Account:
+    """Un Compte Google et son client OAuth ; aucun secret n'est jamais tracé."""
+
+    key: str
+    label: str
+    client_id: str
+    client_secret: str
+    refresh_token: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Settings:
+    """Configuration validée du plugin, comptes compris."""
+
+    accounts: tuple[_Account, ...]
+    default_account: str
+    api_base_url: str
+    token_url: str
+
+    def account(self, key: str) -> _Account | None:
+        for account in self.accounts:
+            if account.key == key:
+                return account
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class _AccessToken:
+    """Access token en mémoire et l'instant de son expiration réelle."""
+
+    value: str
+    expires_at: float
+
+
+class Trace:
+    """Contrat de ``PluginContext.trace`` : genre, payload, niveau nommé."""
+
+    def __call__(
+        self,
+        kind: str,
+        payload: Mapping[str, object] | None = None,
+        *,
+        level: str = "info",
+    ) -> None: ...
+
+
+# Ces caches vivent avec le module, donc une retente de ``create()`` ne jette
+# pas un jeton encore valide. Aucune persistance, aucun disque (ADR-0021).
+_TOKENS: dict[str, _AccessToken] = {}
+_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+async def create(context: PluginContext) -> PluginBinding:
+    """Valide les comptes, échange leurs refresh tokens, rend les Tools.
+
+    Seule cette étape peut lever ``PluginUnavailable`` : si aucun compte ne
+    peut être rafraîchi, la panne est réparable et le chargeur retente. Les
+    défauts de configuration, eux, sont des erreurs ordinaires donc fatales.
+    """
+    settings = _settings(context)
+    ready = await asyncio.gather(
+        *(
+            _prepare_account(settings, account, context.trace)
+            for account in settings.accounts
+        )
+    )
+    if not any(ready):
+        raise PluginUnavailable(
+            "google-workspace: aucun Compte Google n'a pu être rafraîchi"
+        )
+    return PluginBinding(
+        name=context.name,
+        tools=_tool_bindings(settings, context.trace),
+        instruction=_instruction(settings),
+    )
+
+
+async def _prepare_account(
+    settings: _Settings, account: _Account, trace: Trace
+) -> bool:
+    """Échange le refresh token d'un compte et trace son état de démarrage."""
+    try:
+        await _access_token(settings, account, trace, force=True)
+    except asyncio.CancelledError:
+        raise
+    except _TokenError as exc:
+        trace(
+            "AccountUnavailable",
+            {"account": account.key, "reason": exc.reason},
+            level="warning",
+        )
+        return False
+    except Exception as exc:  # défense : aucune valeur secrète dans la raison
+        trace(
+            "AccountUnavailable",
+            {"account": account.key, "reason": type(exc).__name__},
+            level="warning",
+        )
+        return False
+    trace("AccountReady", {"account": account.key})
+    return True
+
+
+def _instruction(settings: _Settings) -> str:
+    """Compose l'instruction en substituant les comptes et le défaut."""
+    return INSTRUCTION_TEMPLATE.replace(
+        "{accounts}", ", ".join(account.key for account in settings.accounts)
+    ).replace("{default}", settings.default_account)
+
+
+# -- Configuration ------------------------------------------------------------
+
+
+def _settings(context: PluginContext) -> _Settings:
+    """Valide les quatre listes parallèles, ou lève un défaut fatal explicite."""
+    config = context.config
+    secrets = context.secrets
+
+    def text(key: str, default: str = "") -> str:
+        return str(config.get(key, "")).strip() or default
+
+    labels = _entries("accounts", text("accounts"))
+    client_ids = _entries("client_id", str(secrets.get("client_id", "")))
+    client_secrets = _entries(
+        "client_secret", str(secrets.get("client_secret", ""))
+    )
+    refresh_tokens = _entries(
+        "refresh_token", str(secrets.get("refresh_token", ""))
+    )
+
+    lengths = {
+        "accounts": len(labels),
+        "client_id": len(client_ids),
+        "client_secret": len(client_secrets),
+        "refresh_token": len(refresh_tokens),
+    }
+    if len(set(lengths.values())) != 1:
+        rendered = ", ".join(f"{key}={value}" for key, value in lengths.items())
+        raise RuntimeError(
+            "configuration invalide : accounts, client_id, client_secret et "
+            f"refresh_token doivent avoir la même longueur ({rendered})"
+        )
+
+    accounts: list[_Account] = []
+    seen: dict[str, str] = {}
+    for label, client_id, client_secret, refresh_token in zip(
+        labels, client_ids, client_secrets, refresh_tokens
+    ):
+        key = _account_key(label)
+        if not key:
+            raise RuntimeError(
+                "configuration invalide : le libellé de compte "
+                f"{label!r} ne contient aucun caractère alphanumérique"
+            )
+        if key in seen:
+            raise RuntimeError(
+                "configuration invalide : les libellés "
+                f"{seen[key]!r} et {label!r} produisent la clé {key!r} en double"
+            )
+        seen[key] = label
+        accounts.append(
+            _Account(
+                key=key,
+                label=label,
+                client_id=client_id,
+                client_secret=client_secret,
+                refresh_token=refresh_token,
+            )
+        )
+
+    default_raw = text("default_account")
+    if default_raw:
+        default_account = _account_key(default_raw)
+        if default_account not in seen:
+            raise RuntimeError(
+                "configuration invalide : default_account "
+                f"{default_raw!r} ne correspond à aucun compte "
+                f"(comptes connus : {', '.join(seen)})"
+            )
+    else:
+        default_account = accounts[0].key
+
+    return _Settings(
+        accounts=tuple(accounts),
+        default_account=default_account,
+        api_base_url=text("api_base_url", DEFAULT_API_BASE_URL).rstrip("/"),
+        token_url=text("token_url", DEFAULT_TOKEN_URL),
+    )
+
+
+def _entries(name: str, raw: str) -> list[str]:
+    """Découpe une liste séparée par des virgules ; une entrée vide est fatale."""
+    values = [value.strip() for value in raw.split(",")]
+    for position, value in enumerate(values, start=1):
+        if not value:
+            raise RuntimeError(
+                "configuration invalide : "
+                f"{name} contient une entrée vide (position {position})"
+            )
+    return values
+
+
+def _account_key(label: str) -> str:
+    """Clé de compte : minuscules, accents retirés, non-alphanumériques en ``-``."""
+    folded = unicodedata.normalize("NFKD", label)
+    without_accents = "".join(
+        character
+        for character in folded
+        if not unicodedata.combining(character)
+    )
+    replaced = "".join(
+        character if character.isalnum() else "-"
+        for character in without_accents.lower()
+    )
+    return re.sub(r"-+", "-", replaced).strip("-")
+
+
+# -- Jetons OAuth -------------------------------------------------------------
+
+
+async def _access_token(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    *,
+    force: bool = False,
+) -> str:
+    """Rend un access token valide, rafraîchi 60 s avant expiration.
+
+    Un verrou asyncio par compte sérialise les rafraîchissements : plusieurs
+    Tools simultanés ne brûlent qu'un échange.
+    """
+    lock = _LOCKS.setdefault(account.key, asyncio.Lock())
+    async with lock:
+        now = asyncio.get_running_loop().time()
+        cached = _TOKENS.get(account.key)
+        if (
+            not force
+            and cached is not None
+            and now < cached.expires_at - TOKEN_REFRESH_MARGIN
+        ):
+            return cached.value
+        if force:
+            _TOKENS.pop(account.key, None)
+        return await _refresh(settings, account, trace)
+
+
+async def _refresh(
+    settings: _Settings, account: _Account, trace: Trace
+) -> str:
+    """``POST token_url`` en formulaire ; ne persiste jamais le jeton reçu."""
+    form = {
+        "grant_type": "refresh_token",
+        "client_id": account.client_id,
+        "client_secret": account.client_secret,
+        "refresh_token": account.refresh_token,
+    }
+    try:
+        async with httpx2.AsyncClient(
+            timeout=httpx2.Timeout(TOKEN_TIMEOUT)
+        ) as client:
+            response = await client.post(settings.token_url, data=form)
+    except asyncio.CancelledError:
+        raise
+    except httpx2.TimeoutException as exc:
+        reason = "timeout"
+        _trace_refresh_failed(trace, account, reason)
+        raise _TokenError(reason) from exc
+    except httpx2.RequestError as exc:
+        reason = type(exc).__name__
+        _trace_refresh_failed(trace, account, reason)
+        raise _TokenError(reason) from exc
+    except Exception as exc:  # défense : jamais de valeur secrète dans la raison
+        reason = type(exc).__name__
+        _trace_refresh_failed(trace, account, reason)
+        raise _TokenError(reason) from exc
+
+    if response.status_code != 200:
+        reason = _oauth_error(response)
+        _trace_refresh_failed(trace, account, reason)
+        raise _TokenError(reason)
+
+    try:
+        body = response.json()
+    except ValueError as exc:
+        reason = "unreadable"
+        _trace_refresh_failed(trace, account, reason)
+        raise _TokenError(reason) from exc
+    access = body.get("access_token") if isinstance(body, dict) else None
+    if not isinstance(access, str) or not access.strip():
+        reason = "unreadable"
+        _trace_refresh_failed(trace, account, reason)
+        raise _TokenError(reason)
+
+    expires_in = _expires_in(
+        body.get("expires_in") if isinstance(body, dict) else None
+    )
+    token = _AccessToken(
+        value=access.strip(),
+        expires_at=asyncio.get_running_loop().time() + expires_in,
+    )
+    _TOKENS[account.key] = token
+    return token.value
+
+
+def _oauth_error(response: httpx2.Response) -> str:
+    """Code d'erreur OAuth (``invalid_grant``…) ou statut, jamais un secret."""
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, str) and error.strip():
+            return error.strip()
+    return f"HTTP {response.status_code}"
+
+
+def _expires_in(value: object) -> float:
+    """Durée de vie du jeton ; une valeur absente ou illisible vaut une heure."""
+    if isinstance(value, bool):
+        return DEFAULT_EXPIRES_IN
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return DEFAULT_EXPIRES_IN
+    return DEFAULT_EXPIRES_IN
+
+
+def _trace_refresh_failed(
+    trace: Trace, account: _Account, reason: str
+) -> None:
+    """Trace un échange refusé sans jamais y placer un secret."""
+    trace(
+        "TokenRefreshFailed",
+        {"account": account.key, "reason": reason},
+        level="warning",
+    )
+
+
+# -- HTTP Gmail ---------------------------------------------------------------
+
+
+async def _authorized_get(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    url: str,
+    params: Mapping[str, object],
+) -> httpx2.Response:
+    """GET porteur du Bearer ; un 401 rafraîchit et rejoue une seule fois."""
+    try:
+        token = await _access_token(settings, account, trace)
+    except _TokenError as exc:
+        raise _AccountUnavailable(account.key) from exc
+
+    response = await _get(url, token, params)
+    if response.status_code != 401:
+        return response
+
+    try:
+        token = await _access_token(settings, account, trace, force=True)
+    except _TokenError as exc:
+        raise _AccountUnavailable(account.key) from exc
+    return await _get(url, token, params)
+
+
+async def _get(
+    url: str, token: str, params: Mapping[str, object]
+) -> httpx2.Response:
+    """Un GET, ou une ``_RequestFailure`` déjà traduite en français."""
+    try:
+        async with httpx2.AsyncClient(
+            timeout=httpx2.Timeout(REQUEST_TIMEOUT),
+            headers={"Authorization": f"Bearer {token}"},
+        ) as client:
+            return await client.get(url, params=dict(params))
+    except asyncio.CancelledError:
+        raise
+    except httpx2.TimeoutException as exc:
+        raise _RequestFailure(_TIMEOUT_MESSAGE, "timeout") from exc
+    except httpx2.RequestError as exc:
+        raise _RequestFailure(_UNREACHABLE_MESSAGE, type(exc).__name__) from exc
+    except Exception as exc:  # défense : le handler ne lève jamais
+        raise _RequestFailure(_UNREACHABLE_MESSAGE, type(exc).__name__) from exc
+
+
+def _json_body(response: httpx2.Response) -> Mapping[str, Any]:
+    """Corps JSON objet ; tout le reste est une réponse illisible."""
+    try:
+        body = response.json()
+    except (TypeError, ValueError) as exc:
+        raise _RequestFailure(_UNREADABLE_MESSAGE, "unreadable") from exc
+    if not isinstance(body, dict):
+        raise _RequestFailure(_UNREADABLE_MESSAGE, "unreadable")
+    return body
+
+
+def _status_error(status: int) -> str:
+    """Phrase française d'un statut Gmail, jamais une exception brute."""
+    if status == 400:
+        return _VALIDATION_MESSAGE
+    if status == 401:
+        return _REFUSED_MESSAGE
+    if status == 403:
+        return _FORBIDDEN_MESSAGE
+    if status == 404:
+        return _NOT_FOUND_MESSAGE
+    if status in (429, 529):
+        return _RATE_MESSAGE
+    if status >= 500:
+        return (
+            _SEARCH_PREFIX
+            + f"le service Gmail est indisponible (réponse {status})."
+        )
+    return _SEARCH_PREFIX + f"le service Gmail a renvoyé une erreur (réponse {status})."
+
+
+# -- Tool ``gmail_search`` ----------------------------------------------------
+
+
+def _tool_bindings(
+    settings: _Settings, trace: Trace
+) -> tuple[ToolBinding, ...]:
+    """Les Tools du plugin ; le socle ajoute ici ceux des tickets suivants."""
+    return (_gmail_search_tool(settings, trace),)
+
+
+def _gmail_search_tool(settings: _Settings, trace: Trace) -> ToolBinding:
+    """Déclare ``gmail_search`` et son handler : un appel ne lève jamais."""
+
+    async def handle(arguments: Mapping[str, object]) -> Mapping[str, object]:
+        return await _gmail_search(settings, arguments, trace)
+
+    return ToolBinding(
+        spec=ToolSpec(
+            name="gmail_search",
+            description=GMAIL_SEARCH_DESCRIPTION,
+            parameters=GMAIL_SEARCH_PARAMETERS,
+        ),
+        handler=handle,
+    )
+
+
+async def _gmail_search(
+    settings: _Settings,
+    arguments: Mapping[str, object],
+    trace: Trace,
+) -> Mapping[str, object]:
+    """Cherche des messages et rend leurs métadonnées, sans jamais lever."""
+    tool = "gmail_search"
+    started = asyncio.get_running_loop().time()
+
+    account = _resolve_account(settings, arguments.get("account"))
+    if account is None:
+        raw = arguments.get("account")
+        shown = raw.strip() if isinstance(raw, str) and raw.strip() else ""
+        key = _account_key(shown) if shown else ""
+        message = (
+            f"Le compte « {shown} » est inconnu. "
+            f"Comptes disponibles : {_account_names(settings)}."
+        )
+        return _fail(trace, tool, key, started, "invalid_account", message)
+
+    query = arguments.get("query")
+    if not isinstance(query, str) or not query.strip():
+        message = _SEARCH_PREFIX + "la requête est vide."
+        return _fail(trace, tool, account.key, started, "invalid_query", message)
+
+    max_results = _bounded_int(
+        arguments.get("max_results"),
+        default=GMAIL_SEARCH_DEFAULT,
+        minimum=GMAIL_SEARCH_MIN,
+        maximum=GMAIL_SEARCH_MAX,
+    )
+    page_token = _optional_text(arguments.get("page_token"))
+
+    try:
+        messages, next_page_token = await _search_messages(
+            settings,
+            account,
+            trace,
+            query=query.strip(),
+            max_results=max_results,
+            page_token=page_token,
+        )
+    except asyncio.CancelledError:
+        raise
+    except _AccountUnavailable as exc:
+        return _fail(trace, tool, account.key, started, "unavailable", exc.message)
+    except _RequestFailure as exc:
+        return _fail(trace, tool, account.key, started, exc.status, exc.message)
+    except Exception as exc:  # défense : le handler ne lève jamais
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            type(exc).__name__,
+            _UNREADABLE_MESSAGE,
+        )
+
+    payload: dict[str, object] = {
+        "status": "ok",
+        "account": account.key,
+        "messages": messages,
+    }
+    if next_page_token:
+        payload["next_page_token"] = next_page_token
+    _trace_tool(trace, tool, account.key, started, "ok", len(messages))
+    return payload
+
+
+async def _search_messages(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    *,
+    query: str,
+    max_results: int,
+    page_token: str | None,
+) -> tuple[list[dict[str, object]], str | None]:
+    """Liste les identifiants puis lit les métadonnées de chaque message."""
+    params: dict[str, object] = {
+        "q": query,
+        "maxResults": max_results,
+    }
+    if page_token is not None:
+        params["pageToken"] = page_token
+    url = settings.api_base_url + GMAIL_MESSAGES_PATH
+    response = await _authorized_get(settings, account, trace, url, params)
+    if response.status_code >= 400:
+        raise _RequestFailure(
+            _status_error(response.status_code),
+            f"HTTP {response.status_code}",
+        )
+    body = _json_body(response)
+
+    identifiers: list[str] = []
+    listed = body.get("messages")
+    if isinstance(listed, list):
+        for item in listed[:max_results]:
+            identifier = _message_id(item)
+            if identifier is not None:
+                identifiers.append(identifier)
+
+    messages = [
+        await _message_metadata(settings, account, trace, identifier)
+        for identifier in identifiers
+    ]
+    next_page_token = _optional_text(body.get("nextPageToken"))
+    return messages, next_page_token
+
+
+async def _message_metadata(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    identifier: str,
+) -> dict[str, object]:
+    """``GET /messages/{id}?format=metadata`` : jamais le corps ni les pièces."""
+    params: dict[str, object] = {
+        "format": "metadata",
+        "metadataHeaders": list(GMAIL_METADATA_HEADERS),
+    }
+    url = settings.api_base_url + GMAIL_MESSAGES_PATH + "/" + identifier
+    response = await _authorized_get(settings, account, trace, url, params)
+    if response.status_code >= 400:
+        raise _RequestFailure(
+            _status_error(response.status_code),
+            f"HTTP {response.status_code}",
+        )
+    body = _json_body(response)
+    headers = _headers(body)
+    return {
+        "id": _text(body.get("id")) or identifier,
+        "thread_id": _text(body.get("threadId")),
+        "from": headers.get("from", ""),
+        "subject": headers.get("subject", ""),
+        "date": headers.get("date", ""),
+        "snippet": _text(body.get("snippet")),
+    }
+
+
+def _headers(message: Mapping[str, Any]) -> dict[str, str]:
+    """En-têtes Gmail indexés en minuscules ; les noms connus sont rendus vides."""
+    values: dict[str, str] = {}
+    payload = message.get("payload")
+    if isinstance(payload, dict):
+        raw_headers = payload.get("headers")
+        if isinstance(raw_headers, list):
+            for header in raw_headers:
+                if not isinstance(header, dict):
+                    continue
+                name = header.get("name")
+                value = header.get("value")
+                if isinstance(name, str) and isinstance(value, str):
+                    values[name.lower()] = value
+    return values
+
+
+def _message_id(item: object) -> str | None:
+    """Identifiant d'un message listé, ou ``None`` si la forme est inattendue."""
+    if not isinstance(item, dict):
+        return None
+    identifier = item.get("id")
+    if isinstance(identifier, str) and identifier.strip():
+        return identifier.strip()
+    return None
+
+
+def _resolve_account(settings: _Settings, raw: object) -> _Account | None:
+    """Compte nommé (libellé ou clé), sinon le compte par défaut."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return settings.account(settings.default_account)
+    if not isinstance(raw, str):
+        return None
+    return settings.account(_account_key(raw))
+
+
+def _account_names(settings: _Settings) -> str:
+    return ", ".join(account.key for account in settings.accounts)
+
+
+def _bounded_int(
+    value: object, *, default: int, minimum: int, maximum: int
+) -> int:
+    """Entier borné ; une valeur absente ou illisible retombe sur le défaut."""
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, float):
+        number = int(value)
+    elif isinstance(value, str):
+        try:
+            number = int(float(value.strip()))
+        except ValueError:
+            return default
+    else:
+        return default
+    return max(minimum, min(maximum, number))
+
+
+def _optional_text(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _text(value: object) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def _trace_tool(
+    trace: Trace,
+    tool: str,
+    account: str,
+    started: float,
+    status: str,
+    result_count: int | None = None,
+) -> None:
+    """Trace un appel : outil, compte, durée, statut, nombre de résultats.
+
+    Jamais la requête Gmail, un objet, une adresse ou un corps.
+    """
+    payload: dict[str, object] = {
+        "tool": tool,
+        "account": account,
+        "duration_ms": round(
+            (asyncio.get_running_loop().time() - started) * 1000, 1
+        ),
+        "status": status,
+    }
+    if result_count is not None:
+        payload["result_count"] = result_count
+    trace("ToolCalled", payload)
+
+
+def _fail(
+    trace: Trace,
+    tool: str,
+    account: str,
+    started: float,
+    status: str,
+    message: str,
+) -> Mapping[str, object]:
+    """Trace l'échec puis rend la phrase française au modèle."""
+    _trace_tool(trace, tool, account, started, "error")
+    trace("ToolFailed", {"tool": tool, "account": account, "status": status})
+    return {"status": "error", "message": message}

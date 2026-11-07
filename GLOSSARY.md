@@ -351,6 +351,19 @@ Une page du workspace Notion, seule unité que le plugin `notion` lit et modifie
 données ou une data source n'est pas une Page.
 _Avoid_: Note, fiche, document, page web
 
+### Google Workspace
+
+**Compte Google**:
+Un compte Google dont Athena lit les mails et l'agenda, relié au plugin `google-workspace` par
+un libellé stable (`perso`, `pro`). Se distingue du **Compte** (identité d'accès à la Console),
+de l'**Utilisateur** (personne dont Athena se souvient) et du **Client** (appareil).
+_Avoid_: compte Workspace, compte Gmail, profil Google
+
+**Événement d'agenda**:
+Une entrée de l'agenda Google d'un Compte Google : début, fin, titre, lieu et participants
+éventuels. Se distingue de l'**Événement** (fait externe poussé vers Athena).
+_Avoid_: événement (seul), meeting, créneau
+
 ### Développement assisté
 
 Athena relaie vocalement le travail qu'opencode mène sur un projet : elle présente les
