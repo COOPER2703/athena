@@ -114,6 +114,11 @@ class ClientApp:
             self._state = ClientState.ACTIVE
             await self._drain_pending_live()
             await self._start_session_timeout()
+        except Exception:
+            # La transition a échoué : l'audio capté en attendant ne doit pas
+            # être rejoué après le pré-roll d'une tentative ultérieure.
+            self._pending_live.clear()
+            raise
         finally:
             self._starting = False
 

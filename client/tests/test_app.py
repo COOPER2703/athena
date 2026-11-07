@@ -132,6 +132,17 @@ class YieldingTransport(FakeTransport):
         await super().send_session_start()
 
 
+class FailingOnceTransport(FakeTransport):
+    """Échoue au premier ``SessionStart``, puis se comporte normalement."""
+
+    async def send_session_start(self) -> None:
+        if not hasattr(self, "_failed_once"):
+            self._failed_once = True
+            await asyncio.sleep(0)
+            raise RuntimeError("SessionStart non envoyé")
+        await super().send_session_start()
+
+
 async def wait_until(predicate: Any, timeout: float = 1.0) -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
@@ -361,6 +372,33 @@ def test_session_start_precedes_the_pre_roll_and_live_audio_without_a_race() -> 
         # chunk identique est de l'audio live ordinaire.
         assert transport.sent_audio.count(b"before-trigger") == 1
         assert detector.processed == [b"trigger"]
+
+    asyncio.run(scenario())
+
+
+def test_live_chunks_buffered_during_a_failed_transition_are_dropped() -> None:
+    async def scenario() -> None:
+        transport = FailingOnceTransport()
+        transport.connected = True
+        detector = FakeDetector(
+            {b"trigger": Detection(score=0.9, pre_roll=b"before-trigger")}
+        )
+        app = make_app(transport=transport, detector=detector)
+
+        failed = asyncio.create_task(app.forward_audio(b"trigger"))
+        await asyncio.sleep(0)
+        await app.forward_audio(b"stale")
+        with pytest.raises(RuntimeError, match="SessionStart non envoyé"):
+            await failed
+        assert app.state is ClientState.LISTENING
+
+        # La tentative suivante réussit : elle ne doit pas rejouer l'audio
+        # capté pendant la transition qui a échoué.
+        await app.forward_audio(b"trigger")
+
+        assert transport.session_starts == 1
+        assert transport.sent_audio == [b"before-trigger"]
+        assert b"stale" not in transport.sent_audio
 
     asyncio.run(scenario())
 
