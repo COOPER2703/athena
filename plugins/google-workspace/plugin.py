@@ -15,7 +15,8 @@ modèle.
 
 Le socle (comptes, jetons, HTTP, erreurs) est partagé : les Tools Gmail et
 Calendar des tickets suivants n'ajoutent qu'un schéma et une opération. Ce
-ticket apporte la recherche Gmail et la lecture de l'agenda.
+ticket apporte la recherche Gmail, la lecture de l'agenda, puis sa création,
+sa modification et sa suppression confirmée.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ import html
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 from email.utils import formataddr, getaddresses
 from typing import Any, Iterable, Mapping
@@ -291,7 +292,165 @@ CALENDAR_LIST_EVENTS_PARAMETERS: Mapping[str, object] = {
     },
 }
 
-# -- Instruction de plugin ----------------------------------------------------
+CALENDAR_CREATE_EVENT_DESCRIPTION = "Crée un événement d'agenda."
+
+CALENDAR_CREATE_EVENT_PARAMETERS: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "summary": {
+            "type": "string",
+            "description": "Titre de l'événement.",
+        },
+        "start": {
+            "type": "string",
+            "description": (
+                "Début, RFC 3339 avec décalage, ou AAAA-MM-JJ pour une "
+                "journée entière."
+            ),
+        },
+        "end": {
+            "type": "string",
+            "description": (
+                "Fin, RFC 3339 avec décalage, ou AAAA-MM-JJ pour une journée "
+                "entière (fin exclusive, un jour est ajouté)."
+            ),
+        },
+        "all_day": {
+            "type": "boolean",
+            "description": "Journée entière. Défaut : faux.",
+        },
+        "description": {
+            "type": "string",
+            "description": "Description de l'événement.",
+        },
+        "location": {
+            "type": "string",
+            "description": "Lieu de l'événement.",
+        },
+        "attendees": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Adresses e-mail des participants.",
+        },
+        "calendar_id": {
+            "type": "string",
+            "description": "Identifiant de l'agenda. Défaut : « primary ».",
+        },
+        "notify_attendees": {
+            "type": "boolean",
+            "description": "Prévient les participants. Défaut : faux.",
+        },
+        "account": {
+            "type": "string",
+            "description": (
+                "Clé du compte Google à utiliser ; le compte par défaut "
+                "quand il est absent."
+            ),
+        },
+    },
+    "required": ["summary", "start", "end"],
+}
+
+CALENDAR_UPDATE_EVENT_DESCRIPTION = "Modifie un événement d'agenda existant."
+
+CALENDAR_UPDATE_EVENT_PARAMETERS: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "event_id": {
+            "type": "string",
+            "description": (
+                "Identifiant de l'événement rendu par `calendar_list_events`."
+            ),
+        },
+        "calendar_id": {
+            "type": "string",
+            "description": "Identifiant de l'agenda. Défaut : « primary ».",
+        },
+        "summary": {
+            "type": "string",
+            "description": "Nouveau titre ; une chaîne vide l'efface.",
+        },
+        "start": {
+            "type": "string",
+            "description": (
+                "Nouveau début, RFC 3339 avec décalage, ou AAAA-MM-JJ pour "
+                "une journée entière."
+            ),
+        },
+        "end": {
+            "type": "string",
+            "description": (
+                "Nouvelle fin, RFC 3339 avec décalage, ou AAAA-MM-JJ pour une "
+                "journée entière (fin exclusive, un jour est ajouté)."
+            ),
+        },
+        "all_day": {
+            "type": "boolean",
+            "description": "Journée entière. Défaut : faux.",
+        },
+        "description": {
+            "type": "string",
+            "description": "Nouvelle description ; une chaîne vide l'efface.",
+        },
+        "location": {
+            "type": "string",
+            "description": "Nouveau lieu ; une chaîne vide l'efface.",
+        },
+        "attendees": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Participants ; la liste remplace la précédente.",
+        },
+        "notify_attendees": {
+            "type": "boolean",
+            "description": "Prévient les participants. Défaut : faux.",
+        },
+        "account": {
+            "type": "string",
+            "description": (
+                "Clé du compte Google à utiliser ; le compte par défaut "
+                "quand il est absent."
+            ),
+        },
+    },
+    "required": ["event_id"],
+}
+
+CALENDAR_DELETE_EVENT_DESCRIPTION = (
+    "Supprime un événement d'agenda après confirmation."
+)
+
+CALENDAR_DELETE_EVENT_PARAMETERS: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "event_id": {
+            "type": "string",
+            "description": (
+                "Identifiant de l'événement rendu par `calendar_list_events`."
+            ),
+        },
+        "calendar_id": {
+            "type": "string",
+            "description": "Identifiant de l'agenda. Défaut : « primary ».",
+        },
+        "confirm": {
+            "type": "boolean",
+            "description": "Doit valoir vrai après confirmation explicite.",
+        },
+        "notify_attendees": {
+            "type": "boolean",
+            "description": "Prévient les participants. Défaut : faux.",
+        },
+        "account": {
+            "type": "string",
+            "description": (
+                "Clé du compte Google à utiliser ; le compte par défaut "
+                "quand il est absent."
+            ),
+        },
+    },
+    "required": ["event_id", "confirm"],
+}
 
 # -- Instruction de plugin ----------------------------------------------------
 
@@ -445,6 +604,32 @@ _DELIVERY_FORBIDDEN = "l'accès à ce compte est refusé."
 _DELIVERY_RATE = "trop de requêtes ont été envoyées. Réessaie dans un instant."
 _DELIVERY_VALIDATION = "la requête a été refusée."
 _DELIVERY_NOT_FOUND = "le message demandé est introuvable."
+
+# Phrases propres aux écritures : chacune nomme l'action tentée.
+_CALENDAR_CREATE_PREFIX = (
+    "La création de l'événement d'agenda n'a pas abouti : "
+)
+_CALENDAR_UPDATE_PREFIX = (
+    "La modification de l'événement d'agenda n'a pas abouti : "
+)
+_CALENDAR_DELETE_PREFIX = (
+    "La suppression de l'événement d'agenda n'a pas abouti : "
+)
+
+_CALENDAR_CREATE_VALIDATION_MESSAGE = (
+    _CALENDAR_CREATE_PREFIX
+    + "le titre, le début et la fin sont requis."
+)
+_CALENDAR_UPDATE_VALIDATION_MESSAGE = (
+    _CALENDAR_UPDATE_PREFIX + "l'identifiant de l'événement est requis."
+)
+_CALENDAR_DELETE_VALIDATION_MESSAGE = (
+    _CALENDAR_DELETE_PREFIX + "l'identifiant de l'événement est requis."
+)
+_CALENDAR_DELETE_CONFIRM_MESSAGE = (
+    _CALENDAR_DELETE_PREFIX
+    + "une confirmation explicite est requise (confirm=true)."
+)
 
 
 class _TokenError(Exception):
@@ -981,6 +1166,9 @@ def _tool_bindings(
         _gmail_send_tool(settings, trace),
         _gmail_reply_tool(settings, trace),
         _calendar_list_events_tool(settings, trace),
+        _calendar_create_event_tool(settings, trace),
+        _calendar_update_event_tool(settings, trace),
+        _calendar_delete_event_tool(settings, trace),
     )
 
 
@@ -2027,6 +2215,601 @@ def _calendar_status_error(status: int) -> str:
         _CALENDAR_PREFIX
         + f"le service Agenda a renvoyé une erreur (réponse {status})."
     )
+
+
+# -- Tools ``calendar_create_event``, ``calendar_update_event`` et
+# ``calendar_delete_event`` ---------------------------------------------------
+
+
+def _calendar_create_event_tool(
+    settings: _Settings, trace: Trace
+) -> ToolBinding:
+    """Déclare ``calendar_create_event`` : un appel ne lève jamais."""
+
+    async def handle(arguments: Mapping[str, object]) -> Mapping[str, object]:
+        return await _calendar_create_event(settings, arguments, trace)
+
+    return ToolBinding(
+        spec=ToolSpec(
+            name="calendar_create_event",
+            description=CALENDAR_CREATE_EVENT_DESCRIPTION,
+            parameters=CALENDAR_CREATE_EVENT_PARAMETERS,
+        ),
+        handler=handle,
+    )
+
+
+def _calendar_update_event_tool(
+    settings: _Settings, trace: Trace
+) -> ToolBinding:
+    """Déclare ``calendar_update_event`` : un appel ne lève jamais."""
+
+    async def handle(arguments: Mapping[str, object]) -> Mapping[str, object]:
+        return await _calendar_update_event(settings, arguments, trace)
+
+    return ToolBinding(
+        spec=ToolSpec(
+            name="calendar_update_event",
+            description=CALENDAR_UPDATE_EVENT_DESCRIPTION,
+            parameters=CALENDAR_UPDATE_EVENT_PARAMETERS,
+        ),
+        handler=handle,
+    )
+
+
+def _calendar_delete_event_tool(
+    settings: _Settings, trace: Trace
+) -> ToolBinding:
+    """Déclare ``calendar_delete_event`` : un appel ne lève jamais."""
+
+    async def handle(arguments: Mapping[str, object]) -> Mapping[str, object]:
+        return await _calendar_delete_event(settings, arguments, trace)
+
+    return ToolBinding(
+        spec=ToolSpec(
+            name="calendar_delete_event",
+            description=CALENDAR_DELETE_EVENT_DESCRIPTION,
+            parameters=CALENDAR_DELETE_EVENT_PARAMETERS,
+        ),
+        handler=handle,
+    )
+
+
+async def _calendar_create_event(
+    settings: _Settings,
+    arguments: Mapping[str, object],
+    trace: Trace,
+) -> Mapping[str, object]:
+    """Crée un événement, sans jamais lever : une panne est une phrase."""
+    tool = "calendar_create_event"
+    started = asyncio.get_running_loop().time()
+
+    account = _resolve_account(settings, arguments.get("account"))
+    if account is None:
+        raw = arguments.get("account")
+        shown = raw.strip() if isinstance(raw, str) and raw.strip() else ""
+        key = _account_key(shown) if shown else ""
+        message = (
+            f"Le compte « {shown} » est inconnu. "
+            f"Comptes disponibles : {_account_names(settings)}."
+        )
+        return _fail(trace, tool, key, started, "invalid_account", message)
+
+    summary = _optional_text(arguments.get("summary"))
+    start = _optional_text(arguments.get("start"))
+    end = _optional_text(arguments.get("end"))
+    if summary is None or start is None or end is None:
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            "invalid_event",
+            _CALENDAR_CREATE_VALIDATION_MESSAGE,
+        )
+
+    calendar_id = _optional_text(arguments.get("calendar_id")) or "primary"
+    try:
+        event_id, html_link = await _create_calendar_event(
+            settings,
+            account,
+            trace,
+            calendar_id=calendar_id,
+            arguments=arguments,
+            summary=summary,
+            start=start,
+            end=end,
+        )
+    except asyncio.CancelledError:
+        raise
+    except _AccountUnavailable as exc:
+        return _fail(trace, tool, account.key, started, "unavailable", exc.message)
+    except _RequestFailure as exc:
+        return _fail(trace, tool, account.key, started, exc.status, exc.message)
+    except Exception as exc:  # défense : le handler ne lève jamais
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            type(exc).__name__,
+            _CALENDAR_CREATE_PREFIX
+            + "le service Agenda a renvoyé une réponse illisible. "
+            "Réessaie dans un instant.",
+        )
+
+    _trace_tool(trace, tool, account.key, started, "ok")
+    return {
+        "status": "ok",
+        "event_id": event_id,
+        "html_link": html_link,
+    }
+
+
+async def _create_calendar_event(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    *,
+    calendar_id: str,
+    arguments: Mapping[str, object],
+    summary: str,
+    start: str,
+    end: str,
+) -> tuple[str, str]:
+    """``POST /calendar/v3/calendars/{id}/events`` puis identifiant et lien."""
+    params = {"sendUpdates": _send_updates(arguments)}
+    body = _create_event_body(arguments, summary=summary, start=start, end=end)
+    response = await _calendar_authorized_send(
+        settings,
+        account,
+        trace,
+        "POST",
+        _calendar_events_url(settings, calendar_id),
+        params=params,
+        body=body,
+        prefix=_CALENDAR_CREATE_PREFIX,
+    )
+    if response.status_code >= 400:
+        raise _RequestFailure(
+            _calendar_write_status_error(
+                response.status_code, _CALENDAR_CREATE_PREFIX
+            ),
+            f"HTTP {response.status_code}",
+        )
+    rendered = _calendar_write_json_body(response, _CALENDAR_CREATE_PREFIX)
+    return _text(rendered.get("id")), _text(rendered.get("htmlLink"))
+
+
+async def _calendar_update_event(
+    settings: _Settings,
+    arguments: Mapping[str, object],
+    trace: Trace,
+) -> Mapping[str, object]:
+    """Modifie partiellement un événement, sans jamais lever."""
+    tool = "calendar_update_event"
+    started = asyncio.get_running_loop().time()
+
+    account = _resolve_account(settings, arguments.get("account"))
+    if account is None:
+        raw = arguments.get("account")
+        shown = raw.strip() if isinstance(raw, str) and raw.strip() else ""
+        key = _account_key(shown) if shown else ""
+        message = (
+            f"Le compte « {shown} » est inconnu. "
+            f"Comptes disponibles : {_account_names(settings)}."
+        )
+        return _fail(trace, tool, key, started, "invalid_account", message)
+
+    event_id = _optional_text(arguments.get("event_id"))
+    if event_id is None:
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            "invalid_event",
+            _CALENDAR_UPDATE_VALIDATION_MESSAGE,
+        )
+
+    calendar_id = _optional_text(arguments.get("calendar_id")) or "primary"
+    try:
+        event_id, html_link = await _patch_calendar_event(
+            settings,
+            account,
+            trace,
+            calendar_id=calendar_id,
+            event_id=event_id,
+            arguments=arguments,
+        )
+    except asyncio.CancelledError:
+        raise
+    except _AccountUnavailable as exc:
+        return _fail(trace, tool, account.key, started, "unavailable", exc.message)
+    except _RequestFailure as exc:
+        return _fail(trace, tool, account.key, started, exc.status, exc.message)
+    except Exception as exc:  # défense : le handler ne lève jamais
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            type(exc).__name__,
+            _CALENDAR_UPDATE_PREFIX
+            + "le service Agenda a renvoyé une réponse illisible. "
+            "Réessaie dans un instant.",
+        )
+
+    _trace_tool(trace, tool, account.key, started, "ok")
+    return {
+        "status": "ok",
+        "event_id": event_id,
+        "html_link": html_link,
+    }
+
+
+async def _patch_calendar_event(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    *,
+    calendar_id: str,
+    event_id: str,
+    arguments: Mapping[str, object],
+) -> tuple[str, str]:
+    """``PATCH`` avec les seuls champs fournis, puis identifiant et lien."""
+    params = {"sendUpdates": _send_updates(arguments)}
+    body = _update_event_body(arguments)
+    response = await _calendar_authorized_send(
+        settings,
+        account,
+        trace,
+        "PATCH",
+        _calendar_events_url(settings, calendar_id, event_id),
+        params=params,
+        body=body,
+        prefix=_CALENDAR_UPDATE_PREFIX,
+    )
+    if response.status_code >= 400:
+        raise _RequestFailure(
+            _calendar_write_status_error(
+                response.status_code, _CALENDAR_UPDATE_PREFIX
+            ),
+            f"HTTP {response.status_code}",
+        )
+    rendered = _calendar_write_json_body(response, _CALENDAR_UPDATE_PREFIX)
+    return _text(rendered.get("id")) or event_id, _text(
+        rendered.get("htmlLink")
+    )
+
+
+async def _calendar_delete_event(
+    settings: _Settings,
+    arguments: Mapping[str, object],
+    trace: Trace,
+) -> Mapping[str, object]:
+    """Supprime un événement confirmé ; un 404/410 est un succès idempotent."""
+    tool = "calendar_delete_event"
+    started = asyncio.get_running_loop().time()
+
+    account = _resolve_account(settings, arguments.get("account"))
+    if account is None:
+        raw = arguments.get("account")
+        shown = raw.strip() if isinstance(raw, str) and raw.strip() else ""
+        key = _account_key(shown) if shown else ""
+        message = (
+            f"Le compte « {shown} » est inconnu. "
+            f"Comptes disponibles : {_account_names(settings)}."
+        )
+        return _fail(trace, tool, key, started, "invalid_account", message)
+
+    event_id = _optional_text(arguments.get("event_id"))
+    if event_id is None:
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            "invalid_event",
+            _CALENDAR_DELETE_VALIDATION_MESSAGE,
+        )
+    if arguments.get("confirm") is not True:
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            "confirmation_required",
+            _CALENDAR_DELETE_CONFIRM_MESSAGE,
+        )
+
+    calendar_id = _optional_text(arguments.get("calendar_id")) or "primary"
+    try:
+        await _delete_calendar_event(
+            settings,
+            account,
+            trace,
+            calendar_id=calendar_id,
+            event_id=event_id,
+            arguments=arguments,
+        )
+    except asyncio.CancelledError:
+        raise
+    except _AccountUnavailable as exc:
+        return _fail(trace, tool, account.key, started, "unavailable", exc.message)
+    except _RequestFailure as exc:
+        return _fail(trace, tool, account.key, started, exc.status, exc.message)
+    except Exception as exc:  # défense : le handler ne lève jamais
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            type(exc).__name__,
+            _CALENDAR_DELETE_PREFIX
+            + "le service Agenda a renvoyé une réponse illisible. "
+            "Réessaie dans un instant.",
+        )
+
+    _trace_tool(trace, tool, account.key, started, "ok")
+    return {"status": "ok", "event_id": event_id}
+
+
+async def _delete_calendar_event(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    *,
+    calendar_id: str,
+    event_id: str,
+    arguments: Mapping[str, object],
+) -> None:
+    """``DELETE`` ; un événement déjà absent (404/410) est un succès."""
+    response = await _calendar_authorized_send(
+        settings,
+        account,
+        trace,
+        "DELETE",
+        _calendar_events_url(settings, calendar_id, event_id),
+        params={"sendUpdates": _send_updates(arguments)},
+        body=None,
+        prefix=_CALENDAR_DELETE_PREFIX,
+    )
+    if response.status_code in (404, 410):
+        return
+    if response.status_code >= 400:
+        raise _RequestFailure(
+            _calendar_write_status_error(
+                response.status_code, _CALENDAR_DELETE_PREFIX
+            ),
+            f"HTTP {response.status_code}",
+        )
+
+
+def _calendar_events_url(
+    settings: _Settings, calendar_id: str, event_id: str | None = None
+) -> str:
+    """URL Calendar ; l'agenda et l'événement sont encodés séparément."""
+    url = (
+        settings.api_base_url
+        + CALENDAR_EVENTS_BASE_PATH
+        + "/"
+        + quote(calendar_id, safe="")
+        + "/events"
+    )
+    if event_id is not None:
+        url += "/" + quote(event_id, safe="")
+    return url
+
+
+def _send_updates(arguments: Mapping[str, object]) -> str:
+    """``all`` seulement si l'utilisateur demande de prévenir les participants."""
+    return "all" if arguments.get("notify_attendees") is True else "none"
+
+
+def _create_event_body(
+    arguments: Mapping[str, object],
+    *,
+    summary: str,
+    start: str,
+    end: str,
+) -> dict[str, object]:
+    """Corps d'une création ; une journée entière porte une fin exclusive."""
+    all_day = arguments.get("all_day") is True
+    body: dict[str, object] = {
+        "summary": summary,
+        "start": _event_bound(start, all_day, _CALENDAR_CREATE_PREFIX),
+        "end": _event_bound(
+            end, all_day, _CALENDAR_CREATE_PREFIX, exclusive=True
+        ),
+    }
+    description = arguments.get("description")
+    if isinstance(description, str):
+        body["description"] = description
+    location = arguments.get("location")
+    if isinstance(location, str):
+        body["location"] = location
+    attendees = _attendees_body(arguments.get("attendees"))
+    if attendees is not None:
+        body["attendees"] = attendees
+    return body
+
+
+def _update_event_body(arguments: Mapping[str, object]) -> dict[str, object]:
+    """Corps d'un PATCH : seuls les champs fournis, une chaîne vide efface."""
+    all_day = arguments.get("all_day") is True
+    body: dict[str, object] = {}
+    for key in ("summary", "description", "location"):
+        value = arguments.get(key)
+        if isinstance(value, str):
+            body[key] = value
+    start = _optional_text(arguments.get("start"))
+    if start is not None:
+        body["start"] = _event_bound(
+            start, all_day, _CALENDAR_UPDATE_PREFIX
+        )
+    end = _optional_text(arguments.get("end"))
+    if end is not None:
+        body["end"] = _event_bound(
+            end, all_day, _CALENDAR_UPDATE_PREFIX, exclusive=True
+        )
+    attendees = _attendees_body(arguments.get("attendees"))
+    if attendees is not None:
+        body["attendees"] = attendees
+    return body
+
+
+def _event_bound(
+    value: str,
+    all_day: bool,
+    prefix: str,
+    *,
+    exclusive: bool = False,
+) -> dict[str, str]:
+    """Borne ``date`` ou ``dateTime`` ; une fin de journée entière est exclue."""
+    if not all_day:
+        return {"dateTime": value}
+    try:
+        moment = date.fromisoformat(value.strip())
+    except ValueError as exc:
+        raise _RequestFailure(
+            prefix
+            + "la date de journée entière est invalide "
+            "(AAAA-MM-JJ attendu).",
+            "invalid_date",
+        ) from exc
+    if exclusive:
+        moment += timedelta(days=1)
+    return {"date": moment.isoformat()}
+
+
+def _attendees_body(value: object) -> list[dict[str, str]] | None:
+    """Participants au format Calendar ; une liste fournie remplace l'ancienne."""
+    if not isinstance(value, list):
+        return None
+    attendees: list[dict[str, str]] = []
+    for entry in value:
+        if isinstance(entry, str) and entry.strip():
+            attendees.append({"email": entry.strip()})
+    return attendees
+
+
+def _calendar_write_json_body(
+    response: httpx2.Response, prefix: str
+) -> Mapping[str, Any]:
+    """Corps JSON objet d'une écriture ; tout le reste est illisible."""
+    try:
+        body = response.json()
+    except (TypeError, ValueError) as exc:
+        raise _RequestFailure(
+            prefix
+            + "le service Agenda a renvoyé une réponse illisible. "
+            "Réessaie dans un instant.",
+            "unreadable",
+        ) from exc
+    if not isinstance(body, dict):
+        raise _RequestFailure(
+            prefix
+            + "le service Agenda a renvoyé une réponse illisible. "
+            "Réessaie dans un instant.",
+            "unreadable",
+        )
+    return body
+
+
+def _calendar_write_status_error(status: int, prefix: str) -> str:
+    """Phrase française d'un statut d'écriture Calendar."""
+    if status == 400:
+        return (
+            prefix
+            + "les données de l'événement ont été refusées. "
+            "Vérifie les dates et le titre."
+        )
+    if status == 401:
+        return prefix + "l'accès au compte a été refusé. Réessaie dans un instant."
+    if status == 403:
+        return prefix + "l'accès à cet agenda est refusé."
+    if status == 404:
+        return prefix + "l'événement ou l'agenda est introuvable."
+    if status in (429, 529):
+        return (
+            prefix
+            + "trop de requêtes ont été envoyées. Réessaie dans un instant."
+        )
+    if status >= 500:
+        return prefix + f"le service Agenda est indisponible (réponse {status})."
+    return prefix + f"le service Agenda a renvoyé une erreur (réponse {status})."
+
+
+async def _calendar_authorized_send(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    method: str,
+    url: str,
+    *,
+    params: Mapping[str, object],
+    body: Mapping[str, object] | None,
+    prefix: str,
+) -> httpx2.Response:
+    """Écriture portée par le Bearer ; un 401 rafraîchit et rejoue une fois."""
+    try:
+        token = await _access_token(settings, account, trace)
+    except _TokenError as exc:
+        raise _AccountUnavailable(account.key) from exc
+
+    response = await _calendar_send(method, url, token, params, body, prefix)
+    if response.status_code != 401:
+        return response
+
+    try:
+        token = await _access_token(settings, account, trace, force=True)
+    except _TokenError as exc:
+        raise _AccountUnavailable(account.key) from exc
+    return await _calendar_send(method, url, token, params, body, prefix)
+
+
+async def _calendar_send(
+    method: str,
+    url: str,
+    token: str,
+    params: Mapping[str, object],
+    body: Mapping[str, object] | None,
+    prefix: str,
+) -> httpx2.Response:
+    """Une écriture Calendar, ou une ``_RequestFailure`` déjà en français."""
+    request: dict[str, object] = {"params": dict(params)}
+    if body is not None:
+        request["json"] = dict(body)
+    try:
+        async with httpx2.AsyncClient(
+            timeout=httpx2.Timeout(REQUEST_TIMEOUT),
+            headers={"Authorization": f"Bearer {token}"},
+        ) as client:
+            return await client.request(method, url, **request)
+    except asyncio.CancelledError:
+        raise
+    except httpx2.TimeoutException as exc:
+        raise _RequestFailure(
+            prefix
+            + "le service Agenda n'a pas répondu à temps. "
+            "Réessaie dans un instant.",
+            "timeout",
+        ) from exc
+    except httpx2.RequestError as exc:
+        raise _RequestFailure(
+            prefix
+            + "le service Agenda est injoignable. "
+            "Réessaie dans un instant.",
+            type(exc).__name__,
+        ) from exc
+    except Exception as exc:  # défense : le handler ne lève jamais
+        raise _RequestFailure(
+            prefix
+            + "le service Agenda est injoignable. "
+            "Réessaie dans un instant.",
+            type(exc).__name__,
+        ) from exc
 
 
 def _resolve_account(settings: _Settings, raw: object) -> _Account | None:

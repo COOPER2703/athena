@@ -9,8 +9,8 @@ touché.
 Le fichier est organisé par section : manifeste et secrets, validation de la
 configuration, démarrage et échange OAuth, sélection du compte, contrat de
 ``gmail_search``, cache et rafraîchissement du jeton, pannes HTTP, contrat de
-``calendar_list_events``, puis vérification transverse (instruction, Console,
-Traces sans fuite).
+``calendar_list_events``, contrat des écritures d'agenda, puis vérification
+transverse (instruction, Console, Traces sans fuite).
 
 Les tickets #137 à #141 étendent ce fichier ; les sections existantes laissent
 la place aux Tools Gmail puis Calendar sans réorganiser le socle.
@@ -186,6 +186,166 @@ CALENDAR_LIST_EVENTS_PARAMETERS: dict[str, Any] = {
             "description": "Recherche plein texte dans les événements.",
         },
     },
+}
+
+CALENDAR_CREATE_EVENT_DESCRIPTION = "Crée un événement d'agenda."
+
+CALENDAR_CREATE_EVENT_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "summary": {
+            "type": "string",
+            "description": "Titre de l'événement.",
+        },
+        "start": {
+            "type": "string",
+            "description": (
+                "Début, RFC 3339 avec décalage, ou AAAA-MM-JJ pour une "
+                "journée entière."
+            ),
+        },
+        "end": {
+            "type": "string",
+            "description": (
+                "Fin, RFC 3339 avec décalage, ou AAAA-MM-JJ pour une journée "
+                "entière (fin exclusive, un jour est ajouté)."
+            ),
+        },
+        "all_day": {
+            "type": "boolean",
+            "description": "Journée entière. Défaut : faux.",
+        },
+        "description": {
+            "type": "string",
+            "description": "Description de l'événement.",
+        },
+        "location": {
+            "type": "string",
+            "description": "Lieu de l'événement.",
+        },
+        "attendees": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Adresses e-mail des participants.",
+        },
+        "calendar_id": {
+            "type": "string",
+            "description": "Identifiant de l'agenda. Défaut : « primary ».",
+        },
+        "notify_attendees": {
+            "type": "boolean",
+            "description": "Prévient les participants. Défaut : faux.",
+        },
+        "account": {
+            "type": "string",
+            "description": (
+                "Clé du compte Google à utiliser ; le compte par défaut "
+                "quand il est absent."
+            ),
+        },
+    },
+    "required": ["summary", "start", "end"],
+}
+
+CALENDAR_UPDATE_EVENT_DESCRIPTION = "Modifie un événement d'agenda existant."
+
+CALENDAR_UPDATE_EVENT_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "event_id": {
+            "type": "string",
+            "description": (
+                "Identifiant de l'événement rendu par `calendar_list_events`."
+            ),
+        },
+        "calendar_id": {
+            "type": "string",
+            "description": "Identifiant de l'agenda. Défaut : « primary ».",
+        },
+        "summary": {
+            "type": "string",
+            "description": "Nouveau titre ; une chaîne vide l'efface.",
+        },
+        "start": {
+            "type": "string",
+            "description": (
+                "Nouveau début, RFC 3339 avec décalage, ou AAAA-MM-JJ pour "
+                "une journée entière."
+            ),
+        },
+        "end": {
+            "type": "string",
+            "description": (
+                "Nouvelle fin, RFC 3339 avec décalage, ou AAAA-MM-JJ pour une "
+                "journée entière (fin exclusive, un jour est ajouté)."
+            ),
+        },
+        "all_day": {
+            "type": "boolean",
+            "description": "Journée entière. Défaut : faux.",
+        },
+        "description": {
+            "type": "string",
+            "description": "Nouvelle description ; une chaîne vide l'efface.",
+        },
+        "location": {
+            "type": "string",
+            "description": "Nouveau lieu ; une chaîne vide l'efface.",
+        },
+        "attendees": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Participants ; la liste remplace la précédente.",
+        },
+        "notify_attendees": {
+            "type": "boolean",
+            "description": "Prévient les participants. Défaut : faux.",
+        },
+        "account": {
+            "type": "string",
+            "description": (
+                "Clé du compte Google à utiliser ; le compte par défaut "
+                "quand il est absent."
+            ),
+        },
+    },
+    "required": ["event_id"],
+}
+
+CALENDAR_DELETE_EVENT_DESCRIPTION = (
+    "Supprime un événement d'agenda après confirmation."
+)
+
+CALENDAR_DELETE_EVENT_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "event_id": {
+            "type": "string",
+            "description": (
+                "Identifiant de l'événement rendu par `calendar_list_events`."
+            ),
+        },
+        "calendar_id": {
+            "type": "string",
+            "description": "Identifiant de l'agenda. Défaut : « primary ».",
+        },
+        "confirm": {
+            "type": "boolean",
+            "description": "Doit valoir vrai après confirmation explicite.",
+        },
+        "notify_attendees": {
+            "type": "boolean",
+            "description": "Prévient les participants. Défaut : faux.",
+        },
+        "account": {
+            "type": "string",
+            "description": (
+                "Clé du compte Google à utiliser ; le compte par défaut "
+                "quand il est absent."
+            ),
+        },
+    },
+    "required": ["event_id", "confirm"],
 }
 
 INSTRUCTION_TEMPLATE = (
@@ -426,7 +586,10 @@ def test_each_account_refresh_token_is_exchanged_at_startup(
                     "name": "google-workspace",
                     "state": "activated",
                     "tools": [
+                        "calendar_create_event",
+                        "calendar_delete_event",
                         "calendar_list_events",
+                        "calendar_update_event",
                         "gmail_read",
                         "gmail_reply",
                         "gmail_search",
@@ -585,7 +748,10 @@ def test_all_accounts_unavailable_degrades_the_start_then_repairs(
                     )
                     assert payload["status"] == "ok"
                     assert set(declared(live)) == {
+                        "calendar_create_event",
+                        "calendar_delete_event",
                         "calendar_list_events",
+                        "calendar_update_event",
                         "gmail_read",
                         "gmail_reply",
                         "gmail_search",
@@ -1118,7 +1284,10 @@ def test_the_tool_instruction_and_console_row_are_exact(
             ):
                 tools = declared(live)
                 assert set(tools) == {
+                    "calendar_create_event",
+                    "calendar_delete_event",
                     "calendar_list_events",
+                    "calendar_update_event",
                     "gmail_read",
                     "gmail_reply",
                     "gmail_search",
@@ -1145,7 +1314,10 @@ def test_the_tool_instruction_and_console_row_are_exact(
 
                 [row] = app.snapshot()["plugins"]
                 assert row["tools"] == [
+                    "calendar_create_event",
+                    "calendar_delete_event",
                     "calendar_list_events",
+                    "calendar_update_event",
                     "gmail_read",
                     "gmail_reply",
                     "gmail_search",
@@ -2187,6 +2359,640 @@ def test_calendar_traces_never_carry_query_address_summary_or_url(
 
 
 # ---------------------------------------------------------------------------
+# Contrat de ``calendar_create_event``, ``calendar_update_event`` et
+# ``calendar_delete_event`` (#140)
+# ---------------------------------------------------------------------------
+
+
+CALENDAR_WRITE_TOOLS = {
+    "calendar_create_event": (
+        CALENDAR_CREATE_EVENT_DESCRIPTION,
+        CALENDAR_CREATE_EVENT_PARAMETERS,
+    ),
+    "calendar_update_event": (
+        CALENDAR_UPDATE_EVENT_DESCRIPTION,
+        CALENDAR_UPDATE_EVENT_PARAMETERS,
+    ),
+    "calendar_delete_event": (
+        CALENDAR_DELETE_EVENT_DESCRIPTION,
+        CALENDAR_DELETE_EVENT_PARAMETERS,
+    ),
+}
+
+
+def test_calendar_write_tools_are_declared_with_their_schemas(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                live,
+                _,
+                _,
+                _,
+            ):
+                tools = declared(live)
+                for name, (description, parameters) in (
+                    CALENDAR_WRITE_TOOLS.items()
+                ):
+                    assert (
+                        dict(tools[name].parameters_json_schema)
+                        == parameters
+                    )
+                    assert tools[name].description == description
+
+    asyncio.run(scenario())
+
+
+def test_calendar_create_event_posts_the_event_without_notifying(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            html_link = "https://calendar.google.com/calendar/event?eid=e9"
+            stub.route(
+                "POST",
+                CALENDAR_PRIMARY_PATH,
+                body={"id": "e9", "htmlLink": html_link},
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "calendar_create_event",
+                    {
+                        "summary": "Réunion budget",
+                        "start": "2026-11-12T09:00:00+01:00",
+                        "end": "2026-11-12T10:00:00+01:00",
+                        "description": "Préparer le budget 2027",
+                        "location": "Salle 2",
+                        "attendees": [
+                            "camille@example.test",
+                            "bureau@example.test",
+                        ],
+                    },
+                )
+
+                assert payload == {
+                    "status": "ok",
+                    "event_id": "e9",
+                    "html_link": html_link,
+                }
+
+                [created] = stub.requests_for(
+                    "POST", CALENDAR_PRIMARY_PATH
+                )
+                assert created["authorization"] == (
+                    f"Bearer {ACCESS_TOKEN_PERSO}"
+                )
+                assert created["query"] == {"sendUpdates": ["none"]}
+                assert created["body"] == {
+                    "summary": "Réunion budget",
+                    "start": {"dateTime": "2026-11-12T09:00:00+01:00"},
+                    "end": {"dateTime": "2026-11-12T10:00:00+01:00"},
+                    "description": "Préparer le budget 2027",
+                    "location": "Salle 2",
+                    "attendees": [
+                        {"email": "camille@example.test"},
+                        {"email": "bureau@example.test"},
+                    ],
+                }
+
+    asyncio.run(scenario())
+
+
+def test_an_all_day_event_sends_dates_with_an_exclusive_end_and_notifies(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "POST",
+                CALENDAR_PRIMARY_PATH,
+                body={"id": "e10", "htmlLink": "https://example.test/e10"},
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "calendar_create_event",
+                    {
+                        "summary": "Congé",
+                        "start": "2026-11-13",
+                        "end": "2026-11-13",
+                        "all_day": True,
+                        "notify_attendees": True,
+                    },
+                )
+
+                assert payload["status"] == "ok"
+                [created] = stub.requests_for(
+                    "POST", CALENDAR_PRIMARY_PATH
+                )
+                assert created["query"] == {"sendUpdates": ["all"]}
+                assert created["body"] == {
+                    "summary": "Congé",
+                    "start": {"date": "2026-11-13"},
+                    "end": {"date": "2026-11-14"},
+                }
+
+    asyncio.run(scenario())
+
+
+def test_calendar_update_event_patches_only_the_fields_provided(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        event_path = f"{CALENDAR_PRIMARY_PATH}/e1"
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "PATCH",
+                event_path,
+                body={
+                    "id": "e1",
+                    "htmlLink": "https://example.test/e1",
+                },
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "calendar_update_event",
+                    {
+                        "event_id": "e1",
+                        "summary": "Nouveau titre",
+                        "location": "",
+                        "attendees": ["camille@example.test"],
+                    },
+                )
+
+                assert payload == {
+                    "status": "ok",
+                    "event_id": "e1",
+                    "html_link": "https://example.test/e1",
+                }
+                [patched] = stub.requests_for("PATCH", event_path)
+                assert patched["query"] == {"sendUpdates": ["none"]}
+                assert patched["body"] == {
+                    "summary": "Nouveau titre",
+                    "location": "",
+                    "attendees": [{"email": "camille@example.test"}],
+                }
+
+    asyncio.run(scenario())
+
+
+def test_calendar_update_event_moves_an_all_day_event_notifying_attendees(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        event_path = f"{CALENDAR_PRIMARY_PATH}/e2"
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route("PATCH", event_path, body={"id": "e2"})
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "calendar_update_event",
+                    {
+                        "event_id": "e2",
+                        "start": "2026-11-20",
+                        "end": "2026-11-21",
+                        "all_day": True,
+                        "notify_attendees": True,
+                    },
+                )
+
+                assert payload == {
+                    "status": "ok",
+                    "event_id": "e2",
+                    "html_link": "",
+                }
+                [patched] = stub.requests_for("PATCH", event_path)
+                assert patched["query"] == {"sendUpdates": ["all"]}
+                assert patched["body"] == {
+                    "start": {"date": "2026-11-20"},
+                    "end": {"date": "2026-11-22"},
+                }
+
+    asyncio.run(scenario())
+
+
+def test_calendar_delete_event_refuses_without_confirmation_and_calls_nothing(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                for arguments in (
+                    {"event_id": "e1"},
+                    {"event_id": "e1", "confirm": False},
+                ):
+                    payload = await call_tool(
+                        session, "calendar_delete_event", arguments
+                    )
+                    assert payload["status"] == "error"
+                    assert payload["message"].startswith(
+                        "La suppression de l'événement d'agenda n'a pas "
+                        "abouti"
+                    )
+                    assert "confirmation" in payload["message"]
+
+                assert stub.calendar_requests == []
+
+    asyncio.run(scenario())
+
+
+def test_calendar_delete_event_sends_a_delete_after_confirmation(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        event_path = f"{CALENDAR_PRIMARY_PATH}/e1"
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route("DELETE", event_path, status=204)
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "calendar_delete_event",
+                    {
+                        "event_id": "e1",
+                        "confirm": True,
+                        "notify_attendees": True,
+                    },
+                )
+
+                assert payload == {"status": "ok", "event_id": "e1"}
+                [deleted] = stub.requests_for("DELETE", event_path)
+                assert deleted["query"] == {"sendUpdates": ["all"]}
+                assert deleted["authorization"] == (
+                    f"Bearer {ACCESS_TOKEN_PERSO}"
+                )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("status", [404, 410])
+def test_a_missing_event_on_delete_is_an_idempotent_success(
+    tmp_path: Path, status: int
+) -> None:
+    async def scenario() -> None:
+        event_path = f"{CALENDAR_PRIMARY_PATH}/e1"
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "DELETE",
+                event_path,
+                status=status,
+                body={"error": {"code": status}},
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "calendar_delete_event",
+                    {"event_id": "e1", "confirm": True},
+                )
+
+                assert payload == {"status": "ok", "event_id": "e1"}
+                [deleted] = stub.requests_for("DELETE", event_path)
+                assert deleted["query"] == {"sendUpdates": ["none"]}
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("tool", "method", "path", "arguments", "prefix"),
+    [
+        (
+            "calendar_create_event",
+            "POST",
+            CALENDAR_PRIMARY_PATH,
+            {
+                "summary": "Réunion",
+                "start": "2026-11-12T09:00:00+01:00",
+                "end": "2026-11-12T10:00:00+01:00",
+            },
+            "La création de l'événement d'agenda n'a pas abouti",
+        ),
+        (
+            "calendar_update_event",
+            "PATCH",
+            f"{CALENDAR_PRIMARY_PATH}/e1",
+            {"event_id": "e1", "summary": "Réunion"},
+            "La modification de l'événement d'agenda n'a pas abouti",
+        ),
+        (
+            "calendar_delete_event",
+            "DELETE",
+            f"{CALENDAR_PRIMARY_PATH}/e1",
+            {"event_id": "e1", "confirm": True},
+            "La suppression de l'événement d'agenda n'a pas abouti",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("status", "fragment"),
+    [
+        (400, "refusée"),
+        (403, "refusé"),
+        (429, "trop de requêtes"),
+        (500, "indisponible"),
+        (503, "réponse 503"),
+    ],
+)
+def test_a_failing_calendar_write_is_a_french_sentence_without_retry(
+    tmp_path: Path,
+    tool: str,
+    method: str,
+    path: str,
+    arguments: dict[str, Any],
+    prefix: str,
+    status: int,
+    fragment: str,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                method,
+                path,
+                status=status,
+                body={"error": {"code": status}},
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                sink,
+                app_sink,
+            ):
+                payload = await call_tool(session, tool, arguments)
+
+                assert payload["status"] == "error"
+                assert payload["message"].startswith(prefix)
+                assert fragment in payload["message"]
+                # Un seul appel, pas de rejeu ni de rafraîchissement ajouté.
+                assert len(stub.requests_for(method, path)) == 1
+                assert len(stub.token_requests) == 2
+                assert sink.of_kind("ToolFailed")[-1].payload["status"] == (
+                    f"HTTP {status}"
+                )
+                assert not app_sink.of_kind("SessionClosed")
+
+    asyncio.run(scenario())
+
+
+def test_a_calendar_write_401_refreshes_once_and_replays_once(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            stub.route_token(REFRESH_TOKEN_PRO, access_token=ACCESS_TOKEN_PRO)
+            stub.route_token_sequence(
+                REFRESH_TOKEN_PERSO,
+                [
+                    {"access_token": ACCESS_TOKEN_PERSO},
+                    {"access_token": "access-token-perso-2"},
+                ],
+            )
+            stub.route_sequence(
+                "POST",
+                CALENDAR_PRIMARY_PATH,
+                [
+                    {"status": 401, "body": {"error": {"code": 401}}},
+                    {
+                        "body": {
+                            "id": "e11",
+                            "htmlLink": "https://example.test/e11",
+                        }
+                    },
+                ],
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "calendar_create_event",
+                    {
+                        "summary": "Réunion",
+                        "start": "2026-11-12T09:00:00+01:00",
+                        "end": "2026-11-12T10:00:00+01:00",
+                    },
+                )
+
+                assert payload == {
+                    "status": "ok",
+                    "event_id": "e11",
+                    "html_link": "https://example.test/e11",
+                }
+                created = stub.requests_for("POST", CALENDAR_PRIMARY_PATH)
+                assert [request["authorization"] for request in created] == [
+                    f"Bearer {ACCESS_TOKEN_PERSO}",
+                    "Bearer access-token-perso-2",
+                ]
+                perso_refreshes = [
+                    request
+                    for request in stub.token_requests
+                    if request["form"]["refresh_token"]
+                    == [REFRESH_TOKEN_PERSO]
+                ]
+                # Démarrage + le seul rafraîchissement du 401.
+                assert len(perso_refreshes) == 2
+
+    asyncio.run(scenario())
+
+
+def test_calendar_and_event_ids_are_percent_encoded_in_write_paths(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        calendar_id = "famille#holiday@group.calendar.google.com"
+        event_id = "evt#1@google.com"
+        decoded_path = (
+            f"{CALENDAR_EVENTS_BASE}/{calendar_id}/events/{event_id}"
+        )
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route("PATCH", decoded_path, body={"id": event_id})
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "calendar_update_event",
+                    {
+                        "event_id": event_id,
+                        "calendar_id": calendar_id,
+                        "summary": "Nouveau titre",
+                    },
+                )
+
+                assert payload["status"] == "ok"
+                assert payload["event_id"] == event_id
+                [patched] = stub.calendar_requests
+                assert patched["raw_path"] == (
+                    f"{CALENDAR_EVENTS_BASE}/"
+                    "famille%23holiday%40group.calendar.google.com/events/"
+                    "evt%231%40google.com"
+                )
+                assert patched["path"] == decoded_path
+
+    asyncio.run(scenario())
+
+
+def test_calendar_write_traces_never_carry_id_summary_address_or_url(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "POST",
+                CALENDAR_PRIMARY_PATH,
+                body={
+                    "id": "e-confidentiel",
+                    "htmlLink": "https://example.test/e-confidentiel",
+                },
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                sink,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "calendar_create_event",
+                    {
+                        "summary": "Réunion confidentielle",
+                        "start": "2026-11-12T09:00:00+01:00",
+                        "end": "2026-11-12T10:00:00+01:00",
+                        "description": "Sujet confidentiel",
+                        "location": "Salle secrète",
+                        "attendees": ["camille@example.test"],
+                    },
+                )
+                assert payload["status"] == "ok"
+
+                [called] = sink.of_kind("ToolCalled")
+                assert called.payload["tool"] == "calendar_create_event"
+                assert called.payload["account"] == "perso"
+                assert called.payload["status"] == "ok"
+                assert "result_count" not in called.payload
+                assert set(called.payload) == {
+                    "plugin",
+                    "tool",
+                    "account",
+                    "duration_ms",
+                    "status",
+                }
+
+                rendered = _traces_json(sink)
+                for forbidden in (
+                    *TOKEN_SECRETS,
+                    ACCESS_TOKEN_PERSO,
+                    "e-confidentiel",
+                    "camille@example.test",
+                    "Réunion confidentielle",
+                    "Sujet confidentiel",
+                    "Salle secrète",
+                    CALENDAR_EVENTS_BASE,
+                ):
+                    assert forbidden not in rendered
+
+    asyncio.run(scenario())
+
+
+def test_a_create_without_title_or_dates_is_refused_before_any_call(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                for arguments in (
+                    {"start": "2026-11-12T09:00:00+01:00",
+                     "end": "2026-11-12T10:00:00+01:00"},
+                    {"summary": "Réunion",
+                     "end": "2026-11-12T10:00:00+01:00"},
+                    {"summary": "Réunion",
+                     "start": "2026-11-12T09:00:00+01:00"},
+                ):
+                    payload = await call_tool(
+                        session, "calendar_create_event", arguments
+                    )
+                    assert payload["status"] == "error"
+                    assert payload["message"].startswith(
+                        "La création de l'événement d'agenda n'a pas abouti"
+                    )
+
+                assert stub.calendar_requests == []
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
 # Dégradation multi-comptes, Console et smoke test (#141)
 #
 # Ces tests complètent le socle : plusieurs appels sur un compte cassé, la
@@ -2403,7 +3209,10 @@ def test_the_console_snapshot_shows_the_activated_plugin_and_its_tools(
                         "name": "google-workspace",
                         "state": "activated",
                         "tools": [
+                            "calendar_create_event",
+                            "calendar_delete_event",
                             "calendar_list_events",
+                            "calendar_update_event",
                             "gmail_read",
                             "gmail_reply",
                             "gmail_search",
@@ -2416,7 +3225,10 @@ def test_the_console_snapshot_shows_the_activated_plugin_and_its_tools(
                 )
                 async with live_session(transport, live) as _session:
                     assert set(declared(live)) == {
+                        "calendar_create_event",
+                        "calendar_delete_event",
                         "calendar_list_events",
+                        "calendar_update_event",
                         "gmail_read",
                         "gmail_reply",
                         "gmail_search",
@@ -2428,7 +3240,7 @@ def test_the_console_snapshot_shows_the_activated_plugin_and_its_tools(
                     for entry in sink.of_kind("PluginState")
                     if entry.payload["state"] == "activated"
                 ]
-                assert activated.payload["tools"] == 5
+                assert activated.payload["tools"] == 8
                 assert states(sink) == ["activated"]
 
     asyncio.run(scenario())
@@ -2487,7 +3299,10 @@ def test_all_accounts_failing_degrades_the_start_and_retries_globally(
                         "name": "google-workspace",
                         "state": "activated",
                         "tools": [
+                            "calendar_create_event",
+                            "calendar_delete_event",
                             "calendar_list_events",
+                            "calendar_update_event",
                             "gmail_read",
                             "gmail_reply",
                             "gmail_search",
@@ -2501,7 +3316,7 @@ def test_all_accounts_failing_degrades_the_start_and_retries_globally(
                     if entry.payload.get("retry") is True
                     and entry.payload["state"] == "activated"
                 ]
-                assert last.payload["tools"] == 5
+                assert last.payload["tools"] == 8
 
                 unavailable = sink.of_kind("AccountUnavailable")
                 assert {entry.payload["account"] for entry in unavailable} == {
