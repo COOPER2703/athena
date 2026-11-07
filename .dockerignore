@@ -1,0 +1,34 @@
+# Le contexte de build ne doit contenir que des sources. En particulier :
+# `.env` (secrets), `*.db` (mémoire et comptes réels), `logs/` (journal d'un
+# autre hôte) et les artefacts locaux déjà dérivés du dépôt.
+
+.git
+.github
+.gitignore
+.venv
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Secrets et état local
+.env
+*.db
+*.db-wal
+*.db-shm
+logs/
+plugins.json
+legacy/
+
+# Artefacts régénérés dans l'image (build front, protoc)
+web/node_modules/
+web/dist
+protocol/generated/
+node_modules/
+
+# Rien du Client desktop n'entre dans l'image du Serveur.
+client/
+
+# Documentation : inutile à l'exécution
+docs/
+*.md

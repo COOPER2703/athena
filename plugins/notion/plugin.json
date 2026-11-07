@@ -1,0 +1,13 @@
+{
+  "api_version": 1,
+  "name": "notion",
+  "version": "0.1.0",
+  "description": "Pages Notion : recherche, lecture Markdown, création, modification, corbeille",
+  "platform": "server",
+  "entrypoint": "plugin.py",
+  "config": [
+    { "key": "parent_page_id", "type": "string", "required": true },
+    { "key": "base_url", "type": "url" }
+  ],
+  "secrets": [{ "key": "token", "required": true }]
+}

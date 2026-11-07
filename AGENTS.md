@@ -85,6 +85,73 @@ Le contrat public est `plugin_api` (jamais `server`) ; les décisions sont ADR-0
 ADR-0018 ; les deux exemples sont `plugins/websearch` (HTTP) et `plugins/homeassistant` (MCP).
 Les skills tiers sont installés par `npx skills add` et épinglés dans `skills-lock.json`.
 
+### Recherche web
+
+Le plugin `plugins/websearch/` (ADR-0018) expose à Gemini un seul Tool, `web_search`,
+adossé à Tavily : il rend des **Extraits de recherche** (titre, URL, extrait, date de
+publication quand elle existe) et Gemini reste le seul rédacteur de la réponse. Le dossier
+est versionné, mais **rien ne s'exécute tant qu'il n'est pas listé**.
+
+Pour l'activer, ajoutez `websearch` à la liste `enabled` du fichier d'état local
+`plugins.json` (non versionné) :
+
+```json
+{ "enabled": ["websearch"], "config": { "websearch": {} } }
+```
+
+Le manifeste déclare un secret **requis** : `ATHENA_PLUGIN_WEBSEARCH_API_KEY`, lu comme les
+autres secrets de plugin (environnement ou `.env`). Absent, le démarrage échoue
+explicitement en nommant la variable (code de sortie 2). Cinq options, toutes
+**optionnelles**, se placent sous `config.websearch` ; le plugin applique lui-même les
+défauts :
+
+- `base_url` : `https://api.tavily.com` (proxy ou moteur compatible) ;
+- `search_depth` : `basic` (`fast`, `basic` ou `advanced` ; `advanced` coûte deux crédits) ;
+- `language` : `fr` ;
+- `country` : `france` (envoyé seulement pour `topic: general`) ;
+- `strict_language` : `0` (`1` filtre strictement la langue au lieu de la biaiser).
+
+Au démarrage, `create()` sonde `GET /usage` : la clé est validée sans consommer de crédit,
+les crédits restants sont tracés (`CreditsRemaining`) et un quota épuisé avertit
+(`CreditsExhausted`). Une clé refusée ou un moteur injoignable n'est pas fatal : le plugin
+démarre **dégradé**, la Console le montre en `failed`, et le serveur retente toutes les 5 s ;
+il s'active seul quand le moteur revient. Une panne en cours de Session reste une phrase
+rendue au modèle, jamais un arrêt. La clé n'apparaît ni dans une Trace, ni dans le journal,
+ni dans l'instantané de la Console.
+
+### Image et déploiement
+
+L'Image Docker est le seul artefact déployable : **un** process qui porte les trois Surfaces,
+l'état vivant hors de l'image. Le `Dockerfile` multi-stage construit le build de la SPA, le
+code protobuf généré, et fige le modèle d'embedding ; les chemins d'état (`/data`, `/logs`)
+et le bind `0.0.0.0` des Surfaces sont des `ENV` de l'image, pas des variables
+d'orchestration. Le contrat avec l'orchestrateur (variables à fournir, UID `1000`, labels
+Traefik, pièges de routage) est `docs/deploiement.md` — à lire avant de toucher au
+`Dockerfile` ou à la configuration de déploiement.
+
+### Pages Notion
+
+Le plugin `plugins/notion/` (ADR-0019) expose six Tools de page adossés à la REST Notion :
+`search_pages`, `read_page`, `create_page`, `update_page`, `trash_page`, `restore_page`. Il
+épingle `Notion-Version: 2026-03-11` et demande `markdown_version: "v2"` explicitement. Il ne
+voit que ce qui est partagé avec la connexion : aucune configuration n'élargit ce périmètre,
+et la recherche de contenu se limite à une page à la fois.
+
+Pour l'activer, ajoutez `notion` à la liste `enabled` de `plugins.json` avec
+`parent_page_id` sous `config.notion`, et fournissez le secret requis
+`ATHENA_PLUGIN_NOTION_TOKEN` (environnement ou `.env`) :
+
+```json
+{
+  "enabled": ["notion"],
+  "config": { "notion": { "parent_page_id": "…" } }
+}
+```
+
+La page parente doit être partagée avec la connexion, sinon le démarrage échoue en nommant
+`parent_page_id`. La recette complète (partage, capacités, parcours vocal, dépannage) est
+`docs/smoke-test-notion.md`.
+
 ### Front (`web/`)
 
 Le front est une SPA Vite + React + TypeScript strict, servie en statique par la Console.

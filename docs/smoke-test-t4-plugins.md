@@ -4,7 +4,8 @@ Vérification manuelle de bout en bout du **système de plugins serveur** et de 
 plugin, `homeassistant` (spec #47, ADR-0014 et ADR-0015) : au démarrage, Athena découvre les
 **Tools Assist** exposés par Home Assistant, compose l'**Instruction de plugin** dans ses
 Sessions, puis pilote et interroge la maison à la voix — sans que Gemini ne voie jamais Home
-Assistant. Voir `docs/smoke-test-t3-evenements.md` pour les Événements,
+Assistant. Le scénario 13 ajoute l'activation du plugin de recherche web. Voir
+`docs/smoke-test-t3-evenements.md` pour les Événements,
 `docs/smoke-test-t2-memoire.md` pour la mémoire et `docs/smoke-test-t1-composition.md` pour la
 boucle serveur/client d'origine.
 
@@ -424,6 +425,25 @@ script__cinema
 Si le plugin a échoué au démarrage, seuls `save_memory` et `forget_memory` apparaissent. La
 trame est régénérée à chaque `Register` : après une retente réussie, une nouvelle connexion
 annonce les Tools du plugin sans redémarrage d'Athena.
+
+## 13. Recherche web (optionnel)
+
+Le plugin `websearch` (ADR-0018) s'active comme les autres : ajoutez `websearch` à
+`enabled` dans `plugins.json`, posez `ATHENA_PLUGIN_WEBSEARCH_API_KEY` dans `.env` (ou
+l'environnement) et redémarrez. Sans la clé, le démarrage refuse en nommant la variable ;
+avec une clé refusée ou un Tavily injoignable, le serveur démarre **dégradé** : la Console
+affiche `failed` et la retente de fond réessaie toutes les 5 s.
+
+Attendu au démarrage, en plus de `PluginState ... "state": "activated"` :
+
+```
+INFO [plugins] CreditsRemaining {"limit": N, "plugin": "websearch", "remaining": N, "usage": N}
+```
+
+Posez ensuite une question d'actualité : une ligne `Search` apparaît avec la requête, les
+paramètres, `"cache": "miss"`, le nombre de résultats et les crédits. Répétez la même
+question : `"cache": "hit"` et zéro crédit, sans second appel au moteur. La clé n'apparaît
+dans aucune ligne.
 
 ## Limites connues
 
