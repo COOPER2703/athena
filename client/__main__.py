@@ -28,16 +28,7 @@ def _build_detector(cfg: AppConfig) -> WakeWordDetector | None:
     if not cfg.wake_word.enabled:
         log.info("Veille désactivée (ATHENA_WAKE_WORD=0)")
         return None
-    wake_word = cfg.wake_word
-    detector = OpenWakeWordDetector(
-        wake_word.model_path,
-        threshold=wake_word.threshold,
-        pre_roll_ms=wake_word.pre_roll_ms,
-        vad=wake_word.vad,
-        vad_model_path=wake_word.vad_model_path,
-    )
-    log.info("Veille active (pré-roll=%d ms)", wake_word.pre_roll_ms)
-    return detector
+    return OpenWakeWordDetector.from_config(cfg.wake_word)
 
 
 def _build_app(cfg: AppConfig) -> ClientApp:

@@ -7,17 +7,24 @@ from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 
-from client.config import DEFAULT_WAKE_WORD_MODEL, DEFAULT_WAKE_WORD_VAD_MODEL
+from client.config import (
+    DEFAULT_WAKE_WORD_EMBEDDING_MODEL,
+    DEFAULT_WAKE_WORD_MELSPEC_MODEL,
+    DEFAULT_WAKE_WORD_MODEL,
+    DEFAULT_WAKE_WORD_VAD_MODEL,
+    WakeWordConfig,
+)
 
 log = logging.getLogger("athena.client")
 
-_MODEL_DIR = Path(__file__).resolve().parent / "models"
-DEFAULT_MELSPEC_MODEL = _MODEL_DIR / "melspectrogram.onnx"
-DEFAULT_EMBEDDING_MODEL = _MODEL_DIR / "embedding_model.onnx"
+# Les chemins par défaut viennent de ``client.config`` : une seule source de
+# vérité. Ces alias restent importables pour les tests d'intégration.
+DEFAULT_MELSPEC_MODEL = DEFAULT_WAKE_WORD_MELSPEC_MODEL
+DEFAULT_EMBEDDING_MODEL = DEFAULT_WAKE_WORD_EMBEDDING_MODEL
 DEFAULT_VAD_MODEL = DEFAULT_WAKE_WORD_VAD_MODEL
 
 # Seuil de parole du gate VAD : en dessous, un score de Wake word est ignoré.
@@ -72,6 +79,11 @@ class _PreRollBuffer:
     def snapshot(self) -> bytes:
         return b"".join(self._chunks)
 
+    def clear(self) -> None:
+        """Oublie l'audio accumulé, par exemple après une détection réussie."""
+        self._chunks.clear()
+        self._size = 0
+
 
 class Scorer(Protocol):
     """Interface minimale du classifieur openWakeWord, injectable en test."""
@@ -117,7 +129,13 @@ class SileroVad:
                 "(openwakeword, onnxruntime)."
             ) from exc
 
-        self._model = VAD(model_path=str(path))
+        try:
+            self._model = VAD(model_path=str(path))
+        except Exception as exc:
+            raise WakeWordUnavailableError(
+                f"Impossible de charger le modèle VAD {path} : {exc}. "
+                "Vérifiez ATHENA_WAKE_WORD_VAD_MODEL et la dépendance onnxruntime."
+            ) from exc
         self._frame_size = frame_size
         self._pending = np.empty(0, dtype=np.int16)
         self._closed = False
@@ -162,7 +180,15 @@ class WakeWordDetector(Protocol):
 
     def process(self, chunk: bytes) -> Detection | None: ...
 
+    def reset(self) -> None: ...
+
     def close(self) -> None: ...
+
+
+def _invalid_threshold(sidecar: Path) -> WakeWordUnavailableError:
+    return WakeWordUnavailableError(
+        f"Seuil invalide dans les métadonnées du modèle : {sidecar}."
+    )
 
 
 def _read_model_threshold(model_path: Path) -> float | None:
@@ -186,13 +212,9 @@ def _read_model_threshold(model_path: Path) -> float | None:
     try:
         threshold = float(raw_threshold)
     except (TypeError, ValueError) as exc:
-        raise WakeWordUnavailableError(
-            f"Seuil invalide dans les métadonnées du modèle : {sidecar}."
-        ) from exc
+        raise _invalid_threshold(sidecar) from exc
     if not math.isfinite(threshold):
-        raise WakeWordUnavailableError(
-            f"Seuil invalide dans les métadonnées du modèle : {sidecar}."
-        )
+        raise _invalid_threshold(sidecar)
     return threshold
 
 
@@ -231,8 +253,9 @@ class OpenWakeWordDetector:
         )
         self._closed = False
         self._scorer: Scorer | None = None
+        self._pre_roll_ms = max(0, pre_roll_ms)
         self._pre_roll = _PreRollBuffer(
-            sample_rate * 2 * max(0, pre_roll_ms) // 1000
+            sample_rate * 2 * self._pre_roll_ms // 1000
         )
         self._vad_threshold = vad_threshold
         self._vad: SpeechDetector | None = None
@@ -242,45 +265,72 @@ class OpenWakeWordDetector:
             self._vad = (
                 SileroVad(vad_model_path) if vad_model is None else vad_model
             )
-            log.info(
-                "Gate VAD activé (modèle=%s, seuil=%.2f)",
-                vad_model_path if vad_model is None else "injecté",
-                vad_threshold,
-            )
 
         if scorer is not None:
             self._scorer = scorer
-            return
+        else:
+            melspec = Path(melspec_model_path)
+            embedding = Path(embedding_model_path)
+            missing = [
+                path for path in (model, melspec, embedding) if not path.is_file()
+            ]
+            if missing:
+                raise WakeWordUnavailableError(
+                    "Modèle de Wake word ou modèles de features introuvables : "
+                    + ", ".join(str(path) for path in missing)
+                    + ". Vérifiez ATHENA_WAKE_WORD_MODEL et l'installation du paquet."
+                )
 
-        melspec = Path(melspec_model_path)
-        embedding = Path(embedding_model_path)
-        missing = [path for path in (model, melspec, embedding) if not path.is_file()]
-        if missing:
-            raise WakeWordUnavailableError(
-                "Modèle de Wake word ou modèles de features introuvables : "
-                + ", ".join(str(path) for path in missing)
-                + ". Vérifiez ATHENA_WAKE_WORD_MODEL et l'installation du paquet."
-            )
+            try:
+                from openwakeword.model import Model
+            except ImportError as exc:
+                raise WakeWordUnavailableError(
+                    "openWakeWord est introuvable : réinstallez le Client avec ses "
+                    "dépendances (openwakeword, onnxruntime)."
+                ) from exc
 
-        try:
-            from openwakeword.model import Model
-        except ImportError as exc:
-            raise WakeWordUnavailableError(
-                "openWakeWord est introuvable : réinstallez le Client avec ses "
-                "dépendances (openwakeword, onnxruntime)."
-            ) from exc
+            try:
+                self._scorer = Model(
+                    wakeword_models=[str(model)],
+                    inference_framework="onnx",
+                    melspec_model_path=str(melspec),
+                    embedding_model_path=str(embedding),
+                )
+            except Exception as exc:
+                raise WakeWordUnavailableError(
+                    f"Impossible de charger le modèle de Wake word {model} : {exc}. "
+                    "Vérifiez ATHENA_WAKE_WORD_MODEL, l'intégrité du fichier et la "
+                    "dépendance onnxruntime."
+                ) from exc
 
-        self._scorer = Model(
-            wakeword_models=[str(model)],
-            inference_framework="onnx",
-            melspec_model_path=str(melspec),
-            embedding_model_path=str(embedding),
-        )
         log.info(
-            "Modèle de Wake word chargé (modèle=%s, seuil=%.2f)",
+            "Modèle de Wake word chargé (modèle=%s, seuil=%.2f, VAD=%s, "
+            "pré-roll=%d ms)",
             model,
             self._threshold,
+            "activé" if self._vad is not None else "désactivé",
+            self._pre_roll_ms,
         )
+
+    @classmethod
+    def from_config(
+        cls, cfg: WakeWordConfig, **overrides: Any
+    ) -> OpenWakeWordDetector:
+        """Construit le détecteur depuis la configuration de la Veille."""
+        return cls(
+            cfg.model_path,
+            threshold=cfg.threshold,
+            pre_roll_ms=cfg.pre_roll_ms,
+            vad=cfg.vad,
+            vad_model_path=cfg.vad_model_path,
+            **overrides,
+        )
+
+    def reset(self) -> None:
+        """Oublie le pré-roll accumulé, au retour en écoute après une Session."""
+        if self._closed:
+            return
+        self._pre_roll.clear()
 
     def process(self, chunk: bytes) -> Detection | None:
         if self._closed or self._scorer is None or not chunk:
@@ -303,7 +353,12 @@ class OpenWakeWordDetector:
             and self._vad.predict(samples) < self._vad_threshold
         ):
             return None
-        return Detection(score=score, pre_roll=self._pre_roll.snapshot())
+        detection = Detection(score=score, pre_roll=self._pre_roll.snapshot())
+        # Le pré-roll déjà rendu garde sa copie, mais le tampon repart vide :
+        # sans cela, une détection après réarmement rejouerait l'audio d'avant
+        # la Session précédente.
+        self._pre_roll.clear()
+        return detection
 
     def close(self) -> None:
         """Libère le classifieur et le VAD ; appelable plusieurs fois."""

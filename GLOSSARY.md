@@ -56,15 +56,18 @@ _Avoid_: Trigger word, hotword, activation word
 État d'un Client dont le micro est actif hors Session pour détecter le Wake word, sans
 transmettre d'audio avant le déclenchement ; le pré-roll des 300 ms précédentes part
 seulement après. **Active par défaut** : `ATHENA_WAKE_WORD=0` la désactive et laisse le
-push-to-talk. Suspendue en Session, pendant le Playback et hors connexion ; distincte de
-`LISTENING`, qui décrit l'absence de Session et non l'état du micro.
+push-to-talk. Suspendue en Session et pendant le Playback (y compris le dernier chunk en
+cours d'écriture) ; le détecteur infère aussi hors connexion, mais une détection y est
+seulement loguée, jamais déclenchée ni mise en file. Distincte de `LISTENING`, qui décrit
+l'absence de Session et non l'état du micro.
 _Avoid_: Always-on, mode hotword, écoute permanente
 
 **Détecteur de Wake word**:
 Le composant local du Client qui passe le flux micro au classifieur openWakeWord et rend un
-déclenchement avec son score et le pré-roll. Il ne tourne que lorsque la Veille est armée —
-hors Session, playback vide, transport connecté, cooldown écoulé — et ne transmet aucun
-audio de lui-même. Une erreur d'inférence le désactive pour le reste du processus.
+déclenchement avec son score et le pré-roll. Il infère hors Session, playback terminé et
+cooldown écoulé, même hors connexion — pour pouvoir loguer une détection ignorée — mais ne
+déclenche une Session que si le transport est connecté. Il ne transmet aucun audio de
+lui-même. Une erreur d'inférence le désactive pour le reste du processus.
 _Avoid_: Hotword engine, écouteur, listener, moteur de réveil
 
 **Push-to-talk**:
@@ -75,13 +78,14 @@ _Avoid_: Hold-to-talk, bouton d'écoute
 **Client state**:
 État local d'un Client : `LISTENING` (hors Session, aucun audio transmis) ou `ACTIVE`
 (Session en cours, audio transmis en continu). Les transitions sont pilotées par le
-client ; la fin de Session vient du serveur.
+client ; la fin vient du serveur (`SessionEnded`, déconnexion) ou, localement, du timeout
+de Session fantôme.
 _Avoid_: AgentState, mode, status
 
 **Playback**:
 La lecture audio d'un Vocal Matrix sur le speaker du client. La Veille est suspendue tant
-qu'il reste de l'audio à jouer : un Wake word ne l'interrompt pas ; seul un tap déclenche
-un barge-in.
+qu'il reste de l'audio à jouer ou qu'un chunk est encore en cours d'écriture : un Wake word
+ne l'interrompt pas ; seul un tap déclenche un barge-in.
 _Avoid_: Lecture, diffusion
 
 ### Événements

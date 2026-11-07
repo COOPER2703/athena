@@ -4,6 +4,10 @@
 
 accepted
 
+Numéro 0021 : les ADR-0018 (recherche web par plugin) et 0019 (Notion en REST) sont déjà
+attribués, et le numéro 0020 est réservé par la branche `integration/end-session`, encore
+ouverte au moment de la rédaction. La Veille prend donc le numéro suivant disponible.
+
 Précise l'ADR-0001 : la Veille est un comportement de l'adaptateur Client desktop, pas une
 décision du noyau. Le Protocole partagé et le serveur ne changent pas. Ne modifie aucun
 autre ADR.
@@ -43,12 +47,13 @@ du code openWakeWord.
 base, pas un extra optionnel : un Client sans elles ne peut pas démarrer quand la Veille est
 active.
 
-**Port.** `WakeWordDetector` expose `process(chunk: bytes) -> Detection | None` et `close()`.
-`Detection` porte le score et le pré-roll PCM16. `OpenWakeWordDetector` encapsule le
-classifieur, le seuil effectif, le VAD optionnel et les erreurs ; il est injecté dans
-`ClientApp` comme `Audio` et `Transport`. Le modèle est chargé **une seule fois au
-démarrage**, après validation du Jeton et avant l'ouverture du micro. Une erreur de
-chargement quand la Veille est active fait sortir le Client avec le code 2.
+**Port.** `WakeWordDetector` expose `process(chunk: bytes) -> Detection | None`,
+`reset()` — vide le pré-roll au retour en écoute — et `close()`. `Detection` porte le score
+et le pré-roll PCM16. `OpenWakeWordDetector` encapsule le classifieur, le seuil effectif, le
+VAD optionnel et les erreurs ; il est injecté dans `ClientApp` comme `Audio` et `Transport`.
+Le modèle est chargé **une seule fois au démarrage**, après validation du Jeton et avant
+l'ouverture du micro. Une erreur de chargement quand la Veille est active fait sortir le
+Client avec le code 2.
 
 **Déclenchement optimiste.** En `LISTENING`, chaque chunk micro est passé au détecteur. Sur
 une détection, le Client envoie `SessionStart`, passe immédiatement en `ACTIVE`, puis envoie
@@ -56,16 +61,20 @@ le **pré-roll** (les 300 ms précédentes, chunk déclencheur inclus) avant l'a
 pré-roll peut contenir la fin de « Athena » ; Gemini l'ignore. Aucun audio n'est transmis
 avant le Wake word.
 
-**Armement.** La Veille n'est armée que si `enabled`, état `LISTENING`, transport connecté,
-file de playback vide et cooldown écoulé. Elle ne voit donc pas l'audio d'une Session
-active, ni celui qu'Athena est en train de jouer, ni une détection pendant une reconnexion.
-Une détection hors connexion est ignorée et loguée, jamais mise en file.
+**Armement.** Le détecteur infère dès que la Veille est active, en `LISTENING`, avec le
+playback vide et terminé (dernier chunk compris) et le cooldown écoulé. L'inférence est
+locale et ne dépend pas du réseau : **elle tourne aussi hors connexion**, pour pouvoir
+loguer une détection ignorée. Le **déclenchement**, lui, exige `Transport.connected` ; une
+détection hors connexion est ignorée et loguée, jamais mise en file. La Veille ne voit donc
+pas l'audio d'une Session active ni celui qu'Athena est en train de jouer.
 
-**Fin et réarmement.** Tous les motifs de fin de Session (`SessionEnded`, erreur,
-déconnexion, timeout) ramènent en `LISTENING`, vident le playback, puis imposent un
-**cooldown de 2 s** avant de réarmer. Un déclenchement sans `SessionStarted` ni audio serveur
-pendant **10 s** est considéré comme une Session fantôme et annulé ; ce garde-fou vaut aussi
-pour le push-to-talk.
+**Fin et réarmement.** Les motifs de fin décidés par le serveur — arrêt demandé,
+remplacement par une autre Session, erreur de Session — arrivent tous par le message
+`SessionEnded` ; le message `Error` du protocole n'est pas une fin de Session et ne réarme
+rien. `SessionEnded`, la déconnexion et le timeout local de Session fantôme ramènent en
+`LISTENING`, vident le playback, puis imposent un **cooldown de 2 s** avant de réarmer. Un
+déclenchement sans `SessionStarted` ni audio serveur pendant **10 s** est considéré comme
+une Session fantôme et annulé ; ce garde-fou vaut aussi pour le push-to-talk.
 
 **Dégradation.** Une exception d'inférence est loguée en `ERROR`, condamne la Veille pour le
 reste du processus et laisse le **push-to-talk** intact. Le push-to-talk reste disponible en
