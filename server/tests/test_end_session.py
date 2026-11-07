@@ -13,6 +13,7 @@ from protocol import SessionEndReason
 from server.core import (
     AnnounceSessionEnded,
     CancelIdleTimer,
+    ClientInterrupt,
     CloseLiveConnection,
     Coordinator,
     LlmAudio,
@@ -20,6 +21,10 @@ from server.core import (
     LlmFailureCause,
     LlmOpened,
     LlmToolCall,
+    LlmTranscription,
+    MemoryHit,
+    Role,
+    SendMemoryToLlm,
     SendToolResultToLlm,
     SessionRequested,
     SessionState,
@@ -37,10 +42,32 @@ from server.core.coordinator import (
 from server.core.session_tools import END_SESSION, register_session_tools
 
 
-def _coordinator() -> Coordinator:
+def _coordinator(memory=None) -> Coordinator:
     registry = ToolRegistry()
     register_session_tools(registry)
-    return Coordinator(tools=registry)
+    return Coordinator(tools=registry, memory=memory, user_id="alice")
+
+
+class FakeMemory:
+    """Double pur de ``MemoryStore`` : Journal et Rappel observables."""
+
+    def __init__(self, hits: list[MemoryHit] | None = None) -> None:
+        self._hits = list(hits or [])
+        self.turns: list[tuple[str, str, str]] = []
+        self.queries: list[tuple[str, str]] = []
+
+    async def session_context(self, user_id: str) -> str:
+        return ""
+
+    async def pinned_facts(self, user_id: str) -> list[str]:
+        return []
+
+    async def append_turn(self, user_id: str, role: str, text: str) -> None:
+        self.turns.append((user_id, role, text))
+
+    async def recall(self, user_id: str, query: str) -> list[MemoryHit]:
+        self.queries.append((user_id, query))
+        return list(self._hits)
 
 
 def _call(coordinator: Coordinator, tool_id: str = "t1") -> list:
@@ -141,6 +168,133 @@ def test_ceiling_expiry_cancels_the_close_and_rearms_the_idle_timeout():
     assert canceled[0].payload["cause"] == "audio_overrun"
     assert canceled[0].payload["connection_id"] == "s1"
     assert canceled[0].payload["session_id"] == "s1"
+
+
+def test_barge_in_during_pending_cancels_the_close_and_keeps_the_session():
+    """Un tap annule la clôture, réarme 30 s et suit le barge-in ordinaire."""
+    coordinator = _coordinator()
+    drive(coordinator, visible_session())
+    _call(coordinator)
+    ceiling = end_session_ceiling_timer_id("s1")
+
+    commands = handle(coordinator, ClientInterrupt(client_id="c1"))
+
+    assert effects(commands) == [
+        CancelIdleTimer(connection_id=ceiling),
+        StartIdleTimer(connection_id="s1", timeout=IDLE_TIMEOUT),
+    ]
+    assert coordinator.state is SessionState.SESSION_VISIBLE
+    assert not [c for c in commands if isinstance(c, CloseLiveConnection)]
+    assert not [c for c in commands if isinstance(c, AnnounceSessionEnded)]
+    assert [trace.kind for trace in traces(commands)] == [
+        "SessionEndCanceled",
+        "barge_in",
+    ]
+    canceled = traces(commands)[0]
+    assert canceled.payload["cause"] == "barge_in"
+    assert canceled.payload["reason"] == "COMPLETED"
+    assert canceled.payload["connection_id"] == "s1"
+    assert canceled.payload["session_id"] == "s1"
+
+
+def test_barge_in_during_pending_in_live_active_also_cancels_the_close():
+    """La clôture peut être annulée avant même que la Session ne soit visible."""
+    coordinator = _coordinator()
+    drive(coordinator, [SessionRequested(client_id="c1"), LlmOpened()])
+    _call(coordinator)
+    assert coordinator.state is SessionState.LIVE_ACTIVE
+
+    commands = handle(coordinator, ClientInterrupt(client_id="c1"))
+
+    assert effects(commands) == [
+        CancelIdleTimer(connection_id=end_session_ceiling_timer_id("s1")),
+        StartIdleTimer(connection_id="s1", timeout=IDLE_TIMEOUT),
+    ]
+    assert coordinator.state is SessionState.LIVE_ACTIVE
+    assert not [c for c in commands if isinstance(c, CloseLiveConnection)]
+    assert not [c for c in commands if isinstance(c, AnnounceSessionEnded)]
+    assert [trace.kind for trace in traces(commands)] == [
+        "SessionEndCanceled",
+        "ClientInterrupt",
+    ]
+
+
+def test_end_session_after_barge_in_cancellation_reopens_the_pending_close():
+    """Après un barge-in, un nouvel ``end_session`` rouvre grâce et plafond."""
+    coordinator = _coordinator()
+    drive(coordinator, visible_session())
+    _call(coordinator, tool_id="t1")
+    handle(coordinator, ClientInterrupt(client_id="c1"))
+
+    commands = _call(coordinator, tool_id="t2")
+
+    assert _start_timers(commands) == [
+        StartIdleTimer(
+            connection_id="s1", timeout=END_SESSION_GRACE_TIMEOUT
+        ),
+        StartIdleTimer(
+            connection_id=end_session_ceiling_timer_id("s1"),
+            timeout=END_SESSION_CEILING_TIMEOUT,
+        ),
+    ]
+    assert coordinator.state is SessionState.SESSION_VISIBLE
+    handle(coordinator, TimerFired(connection_id="s1"))
+    assert coordinator.state is SessionState.IDLE
+
+
+def test_user_transcription_during_pending_is_journaled_without_rearming_or_canceling():
+    """Une interjection orale ne sauve pas la Session, mais reste journalisée."""
+    memory = FakeMemory(
+        hits=[MemoryHit(text="bleu", distance=0.1, source="journal")]
+    )
+    coordinator = _coordinator(memory=memory)
+    drive(coordinator, visible_session())
+    _call(coordinator)
+
+    commands = handle(
+        coordinator,
+        LlmTranscription(text="encore une question", role=Role.USER),
+    )
+
+    assert _start_timers(commands) == []
+    assert not [c for c in commands if isinstance(c, CloseLiveConnection)]
+    assert not [c for c in commands if isinstance(c, AnnounceSessionEnded)]
+    assert not [
+        trace for trace in traces(commands) if trace.kind == "SessionEndCanceled"
+    ]
+    assert memory.turns == [("alice", "user", "encore une question")]
+    assert memory.queries == [("alice", "encore une question")]
+    recalled = [c for c in commands if isinstance(c, SendMemoryToLlm)]
+    assert len(recalled) == 1
+    assert "bleu" in recalled[0].text
+    assert coordinator.state is SessionState.SESSION_VISIBLE
+    # La clôture reste en attente : la grâce armée referme toujours la Session.
+    handle(coordinator, TimerFired(connection_id="s1"))
+    assert coordinator.state is SessionState.IDLE
+
+
+def test_background_transcription_does_not_extend_the_pending_close():
+    """Plusieurs tours de fond n'arment aucun timer : la grâce n'est pas relancée."""
+    coordinator = _coordinator()
+    drive(coordinator, visible_session())
+    _call(coordinator)
+
+    for text in ("bruit", "conversation", "de fond"):
+        commands = handle(
+            coordinator, LlmTranscription(text=text, role=Role.USER)
+        )
+        assert _start_timers(commands) == []
+
+    commands = handle(coordinator, TimerFired(connection_id="s1"))
+    assert effects(commands) == [
+        CancelIdleTimer(connection_id="s1"),
+        CancelIdleTimer(connection_id=end_session_ceiling_timer_id("s1")),
+        CloseLiveConnection(connection_id="s1"),
+        AnnounceSessionEnded(
+            client_id="c1", reason=SessionEndReason.COMPLETED
+        ),
+    ]
+    assert coordinator.state is SessionState.IDLE
 
 
 def test_end_session_after_ceiling_cancellation_reopens_the_pending_close():
