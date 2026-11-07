@@ -724,11 +724,20 @@ class Coordinator:
 
     def _on_client_interrupt(self, event: ClientInterrupt) -> list[Command]:
         client_id = event.client_id or self._client_id
+        commands: list[Command] = []
+        # Un barge-in explicite renonce à une Clôture en attente (#132). La
+        # vérification précède la branche de visibilité : elle vaut aussi en
+        # ``LIVE_ACTIVE``. Puis le barge-in est traité comme toujours, sans
+        # aucun teardown.
+        if self._end_session_pending:
+            commands.extend(self._cancel_end_session("barge_in"))
         if self._state is SessionState.SESSION_VISIBLE:
             # Barge-in: the client flushes its own playback; the Session stays
             # visible. No command is emitted for the desktop to stop audio.
-            return self._decision("barge_in", client_id=client_id)
-        return self._decision("ClientInterrupt", client_id=client_id)
+            commands.extend(self._decision("barge_in", client_id=client_id))
+        else:
+            commands.extend(self._decision("ClientInterrupt", client_id=client_id))
+        return commands
 
     def _on_client_tool_result(self, event: ClientToolResult) -> list[Command]:
         # Reserved seam: T1 has no Tool routing, so the result is trace-only.
@@ -786,7 +795,14 @@ class Coordinator:
         # Le premier tour utilisateur referme le tour d'annonce : la parole
         # suivante d'Athena est une réponse ordinaire, journalisée ``assistant``.
         self._announcing = False
-        commands: list[Command] = [self._rearm_timer()]
+        # Pendant une Clôture en attente, une transcription utilisateur ne
+        # relance pas le timeout de 30 s et n'annule pas la clôture (#132) :
+        # une interjection purement orale ne sauve pas la Session, et une
+        # conversation de fond ne prolonge pas la fermeture. Journal et Rappel
+        # restent inchangés.
+        commands: list[Command] = []
+        if not self._end_session_pending:
+            commands.append(self._rearm_timer())
         if self._memory is not None:
             await self._journal("user", event.text)
             text, trace = await self._recall(event.text)
