@@ -50,7 +50,14 @@ jobs:
         with:
           python-version: "3.12"
       - name: Exporter les versions verrouillées
-        run: uv export --frozen --no-emit-project --no-hashes --all-extras -o requirements-audit.txt
+        # `ai-edge-litert` (tiré par openWakeWord) déclare `backports.strenum`
+        # sans marqueur, alors que ce paquet n'a pas de distribution pour
+        # Python >= 3.11 ; il n'est jamais installé sur la cible 3.12. On
+        # l'omet de l'audit au lieu de faire échouer pip-audit sur une
+        # dépendance qui n'existe pas dans l'environnement audité.
+        run: >-
+          uv export --frozen --no-emit-project --no-hashes --all-extras
+          --no-emit-package backports-strenum -o requirements-audit.txt
       - run: python -m pip install --upgrade pip pip-audit
       # Le code de sortie de pip-audit est déjà 1 dès qu'une vuln est trouvée.
       # Faux positif : ajouter `--ignore-vuln <ID>` ici, avec un commentaire.
