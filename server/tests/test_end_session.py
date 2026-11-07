@@ -8,7 +8,17 @@ que fera l'horloge. Le Tool est exercé à travers un vrai ``ToolRegistry``.
 
 from __future__ import annotations
 
-from conftest import drive, effects, handle, opened, traces, visible_session
+from conftest import (
+    FakeJudge,
+    announcement,
+    close_window,
+    drive,
+    effects,
+    handle,
+    opened,
+    traces,
+    visible_session,
+)
 from protocol import SessionEndReason
 from server.core import (
     AnnounceSessionEnded,
@@ -16,6 +26,7 @@ from server.core import (
     ClientInterrupt,
     CloseLiveConnection,
     Coordinator,
+    EventReceived,
     LlmAudio,
     LlmFailed,
     LlmFailureCause,
@@ -79,6 +90,28 @@ def _call(coordinator: Coordinator, tool_id: str = "t1") -> list:
 
 def _start_timers(commands) -> list[StartIdleTimer]:
     return [c for c in effects(commands) if isinstance(c, StartIdleTimer)]
+
+
+def _announcement_coordinator() -> Coordinator:
+    """Coordinator entrant en Annonce : juge fixe, prompt d'Annonce."""
+    registry = ToolRegistry()
+    register_session_tools(registry)
+    return Coordinator(
+        tools=registry,
+        memory=None,
+        user_id="alice",
+        announce_prompt="JUGE",
+        judge=FakeJudge(message="Porte ouverte"),
+    )
+
+
+def _judging_connection(coordinator: Coordinator) -> None:
+    """Ouvre la Connexion de jugement, active mais pas encore visible."""
+    drive(coordinator, [EventReceived(source="matrix", content="porte ouverte")])
+    commands = close_window(coordinator)
+    assert announcement(commands).text == "Porte ouverte"
+    handle(coordinator, LlmOpened())
+    assert coordinator.state is SessionState.LIVE_ACTIVE
 
 
 def test_ordinary_session_declares_end_session_before_visibility():
@@ -400,6 +433,38 @@ def test_end_session_while_connecting_is_an_error_and_arms_no_timer():
     assert results[0].result["status"] == "error"
     assert _start_timers(commands) == []
     assert not [c for c in commands if isinstance(c, CloseLiveConnection)]
+
+
+def test_end_session_on_a_judging_connection_is_refused_and_arms_no_timer():
+    """La Connexion de jugement n'est pas une Session ordinaire : le Tool est refusé."""
+    coordinator = _announcement_coordinator()
+    _judging_connection(coordinator)
+
+    commands = _call(coordinator)
+
+    results = [c for c in commands if isinstance(c, SendToolResultToLlm)]
+    assert results[0].result["status"] == "error"
+    assert _start_timers(commands) == []
+    assert not [c for c in commands if isinstance(c, CloseLiveConnection)]
+    assert not [c for c in commands if isinstance(c, AnnounceSessionEnded)]
+    assert coordinator.state is SessionState.LIVE_ACTIVE
+
+
+def test_end_session_on_a_visible_announcement_is_refused_without_closing():
+    """Une Annonce visible reste sans Tools : ``end_session`` n'y ouvre aucune clôture."""
+    coordinator = _announcement_coordinator()
+    _judging_connection(coordinator)
+    drive(coordinator, [LlmAudio(data=b"parle")])
+    assert coordinator.state is SessionState.SESSION_VISIBLE
+
+    commands = _call(coordinator)
+
+    results = [c for c in commands if isinstance(c, SendToolResultToLlm)]
+    assert results[0].result["status"] == "error"
+    assert _start_timers(commands) == []
+    assert not [c for c in commands if isinstance(c, CloseLiveConnection)]
+    assert not [c for c in commands if isinstance(c, AnnounceSessionEnded)]
+    assert coordinator.state is SessionState.SESSION_VISIBLE
 
 
 def test_second_end_session_while_pending_succeeds_without_extending_the_grace():

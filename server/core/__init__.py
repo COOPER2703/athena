@@ -23,6 +23,7 @@ from server.core.consolidation import (
 from server.core.coordinator import (
     ANNOUNCE_TIMEOUT,
     END_SESSION_CEILING_TIMEOUT,
+    END_SESSION_GRACE_TIMEOUT,
     EVENT_MAX_CHARS,
     EVENT_QUEUE_MAX,
     EVENT_WINDOW_TIMER_ID,
@@ -104,6 +105,7 @@ __all__ = [
     "Embedder",
     "END_SESSION",
     "END_SESSION_CEILING_TIMEOUT",
+    "END_SESSION_GRACE_TIMEOUT",
     "Event",
     "EventJudge",
     "EventReceived",
