@@ -54,9 +54,18 @@ _Avoid_: Trigger word, hotword, activation word
 
 **Veille**:
 État d'un Client dont le micro est actif hors Session pour détecter le Wake word, sans
-transmettre d'audio. Activée explicitement par l'utilisateur ; distincte de `LISTENING`,
-qui décrit l'absence de Session et non l'état du micro.
+transmettre d'audio avant le déclenchement ; le pré-roll des 300 ms précédentes part
+seulement après. **Active par défaut** : `ATHENA_WAKE_WORD=0` la désactive et laisse le
+push-to-talk. Suspendue en Session, pendant le Playback et hors connexion ; distincte de
+`LISTENING`, qui décrit l'absence de Session et non l'état du micro.
 _Avoid_: Always-on, mode hotword, écoute permanente
+
+**Détecteur de Wake word**:
+Le composant local du Client qui passe le flux micro au classifieur openWakeWord et rend un
+déclenchement avec son score et le pré-roll. Il ne tourne que lorsque la Veille est armée —
+hors Session, playback vide, transport connecté, cooldown écoulé — et ne transmet aucun
+audio de lui-même. Une erreur d'inférence le désactive pour le reste du processus.
+_Avoid_: Hotword engine, écouteur, listener, moteur de réveil
 
 **Push-to-talk**:
 Mode de démarrage de Session de secours, pour un Client dont la Veille est désactivée :
@@ -70,8 +79,9 @@ client ; la fin de Session vient du serveur.
 _Avoid_: AgentState, mode, status
 
 **Playback**:
-La lecture audio d'un Vocal Matrix sur le speaker du client. Peut être interrompue par un
-Wake word.
+La lecture audio d'un Vocal Matrix sur le speaker du client. La Veille est suspendue tant
+qu'il reste de l'audio à jouer : un Wake word ne l'interrompt pas ; seul un tap déclenche
+un barge-in.
 _Avoid_: Lecture, diffusion
 
 ### Événements
