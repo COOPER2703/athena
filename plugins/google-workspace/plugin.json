@@ -2,7 +2,7 @@
   "api_version": 1,
   "name": "google-workspace",
   "version": "0.1.0",
-  "description": "Mails Gmail et agenda Google : lecture, envoi, événements",
+  "description": "Mails Gmail et agenda Google : lecture, envoi, événements d'agenda",
   "platform": "server",
   "entrypoint": "plugin.py",
   "config": [

@@ -175,7 +175,13 @@ CALENDAR_LIST_EVENTS_PARAMETERS: dict[str, Any] = {
             "type": "integer",
             "minimum": 1,
             "maximum": 50,
-            "description": "Nombre d'événements rendus, de 1 à 50. Défaut 10.",
+            "description": (
+                "Nombre d'Événements d'agenda rendus, de 1 à 50. Défaut 10."
+            ),
+        },
+        "page_token": {
+            "type": "string",
+            "description": "Jeton de page rendu par l'appel précédent.",
         },
         "calendar_id": {
             "type": "string",
@@ -183,7 +189,7 @@ CALENDAR_LIST_EVENTS_PARAMETERS: dict[str, Any] = {
         },
         "query": {
             "type": "string",
-            "description": "Recherche plein texte dans les événements.",
+            "description": "Recherche plein texte dans les Événements d'agenda.",
         },
     },
 }
@@ -195,7 +201,7 @@ CALENDAR_CREATE_EVENT_PARAMETERS: dict[str, Any] = {
     "properties": {
         "summary": {
             "type": "string",
-            "description": "Titre de l'événement.",
+            "description": "Titre de l'Événement d'agenda.",
         },
         "start": {
             "type": "string",
@@ -217,11 +223,11 @@ CALENDAR_CREATE_EVENT_PARAMETERS: dict[str, Any] = {
         },
         "description": {
             "type": "string",
-            "description": "Description de l'événement.",
+            "description": "Description de l'Événement d'agenda.",
         },
         "location": {
             "type": "string",
-            "description": "Lieu de l'événement.",
+            "description": "Lieu de l'Événement d'agenda.",
         },
         "attendees": {
             "type": "array",
@@ -255,7 +261,8 @@ CALENDAR_UPDATE_EVENT_PARAMETERS: dict[str, Any] = {
         "event_id": {
             "type": "string",
             "description": (
-                "Identifiant de l'événement rendu par `calendar_list_events`."
+                "Identifiant de l'Événement d'agenda rendu par "
+                "`calendar_list_events`."
             ),
         },
         "calendar_id": {
@@ -322,7 +329,8 @@ CALENDAR_DELETE_EVENT_PARAMETERS: dict[str, Any] = {
         "event_id": {
             "type": "string",
             "description": (
-                "Identifiant de l'événement rendu par `calendar_list_events`."
+                "Identifiant de l'Événement d'agenda rendu par "
+                "`calendar_list_events`."
             ),
         },
         "calendar_id": {
@@ -347,6 +355,13 @@ CALENDAR_DELETE_EVENT_PARAMETERS: dict[str, Any] = {
     },
     "required": ["event_id", "confirm"],
 }
+
+# En-têtes RFC 2047 : la valeur décodée est la seule rendue au modèle.
+ENCODED_SUBJECT = "=?utf-8?B?RMOpamV1bmVyIGpldWRp?="  # « Déjeuner jeudi »
+ENCODED_SENDER = (
+    "=?utf-8?Q?Camille_=C3=A9?= <camille@example.test>"  # « Camille é »
+)
+MALFORMED_SUBJECT = "=?utf-8?Q?=FF?="
 
 INSTRUCTION_TEMPLATE = (
     "Tu disposes des Tools Google Workspace pour les mails Gmail et l'agenda "
@@ -433,7 +448,9 @@ def test_manifest_declares_the_google_identity_and_static_requirements() -> None
         "api_version": 1,
         "name": "google-workspace",
         "version": "0.1.0",
-        "description": "Mails Gmail et agenda Google : lecture, envoi, événements",
+        "description": (
+            "Mails Gmail et agenda Google : lecture, envoi, événements d'agenda"
+        ),
         "platform": "server",
         "entrypoint": "plugin.py",
         "config": [
@@ -932,6 +949,49 @@ def test_an_unknown_account_is_a_french_error_without_any_call(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "gmail_search",
+        "gmail_read",
+        "gmail_send",
+        "gmail_reply",
+        "calendar_list_events",
+        "calendar_create_event",
+        "calendar_update_event",
+        "calendar_delete_event",
+    ],
+)
+def test_every_tool_refuses_an_unknown_account_with_the_same_message(
+    tmp_path: Path, tool: str
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session, tool, {"account": "inconnu"}
+                )
+
+                assert payload == {
+                    "status": "error",
+                    "message": (
+                        "Le compte « inconnu » est inconnu. "
+                        "Comptes disponibles : pro, perso."
+                    ),
+                }
+                assert stub.gmail_requests == []
+                assert stub.calendar_requests == []
+
+    asyncio.run(scenario())
+
+
 # ---------------------------------------------------------------------------
 # Contrat de ``gmail_search``
 # ---------------------------------------------------------------------------
@@ -1033,6 +1093,47 @@ def test_gmail_search_sends_the_gmail_query_and_returns_metadata(
                         "Subject",
                         "Date",
                     ]
+
+    asyncio.run(scenario())
+
+
+def test_gmail_search_decodes_rfc2047_headers_and_survives_a_malformed_one(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            encoded = gmail_metadata(
+                "m1",
+                sender=ENCODED_SENDER,
+                subject=ENCODED_SUBJECT,
+            )
+            malformed = gmail_metadata("m2", subject=MALFORMED_SUBJECT)
+            stub.route(
+                "GET",
+                MESSAGES_PATH,
+                body=gmail_message_list(encoded, malformed),
+            )
+            stub.route("GET", f"{MESSAGES_PATH}/m1", body=encoded)
+            stub.route("GET", f"{MESSAGES_PATH}/m2", body=malformed)
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session, "gmail_search", {"query": "déjeuner"}
+                )
+
+                assert payload["status"] == "ok"
+                assert payload["messages"][0]["from"] == (
+                    "Camille é <camille@example.test>"
+                )
+                assert payload["messages"][0]["subject"] == "Déjeuner jeudi"
+                # Un en-tête indécodable est rendu tel quel, sans lever.
+                assert payload["messages"][1]["subject"] == MALFORMED_SUBJECT
 
     asyncio.run(scenario())
 
@@ -1495,6 +1596,55 @@ def test_gmail_read_fetches_a_message_and_returns_its_text(
     asyncio.run(scenario())
 
 
+def test_gmail_read_decodes_rfc2047_headers_on_a_message_and_a_thread(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            message = gmail_read_message(
+                "m1",
+                thread_id="t1",
+                sender=ENCODED_SENDER,
+                subject=ENCODED_SUBJECT,
+            )
+            threaded = gmail_read_message(
+                "m2",
+                thread_id="t2",
+                sender=ENCODED_SENDER,
+                subject=ENCODED_SUBJECT,
+            )
+            stub.route("GET", f"{MESSAGES_PATH}/m1", body=message)
+            stub.route(
+                "GET",
+                f"{THREADS_PATH}/t2",
+                body=gmail_read_thread("t2", threaded),
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                single = await call_tool(
+                    session, "gmail_read", {"message_id": "m1"}
+                )
+                thread = await call_tool(
+                    session, "gmail_read", {"thread_id": "t2"}
+                )
+
+                for payload in (single, thread):
+                    assert payload["status"] == "ok"
+                    [rendered] = payload["messages"]
+                    assert rendered["from"] == (
+                        "Camille é <camille@example.test>"
+                    )
+                    assert rendered["subject"] == "Déjeuner jeudi"
+
+    asyncio.run(scenario())
+
+
 def test_gmail_read_reads_a_thread_bounded_by_max_messages(
     tmp_path: Path,
 ) -> None:
@@ -1862,6 +2012,12 @@ def test_calendar_list_events_is_declared_with_its_schema(
                     dict(declaration.parameters_json_schema)
                     == CALENDAR_LIST_EVENTS_PARAMETERS
                 )
+                assert declaration.parameters_json_schema["properties"][
+                    "page_token"
+                ] == {
+                    "type": "string",
+                    "description": "Jeton de page rendu par l'appel précédent.",
+                }
                 assert (
                     declaration.description
                     == CALENDAR_LIST_EVENTS_DESCRIPTION
@@ -2509,6 +2665,114 @@ def test_an_all_day_event_sends_dates_with_an_exclusive_end_and_notifies(
                     "start": {"date": "2026-11-13"},
                     "end": {"date": "2026-11-14"},
                 }
+
+    asyncio.run(scenario())
+
+
+def test_a_date_only_bound_is_all_day_even_without_the_flag(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "POST",
+                CALENDAR_PRIMARY_PATH,
+                body={"id": "e11", "htmlLink": "https://example.test/e11"},
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "calendar_create_event",
+                    {
+                        "summary": "Congé",
+                        "start": "2026-11-13",
+                        "end": "2026-11-13",
+                    },
+                )
+
+                assert payload["status"] == "ok"
+                [created] = stub.requests_for(
+                    "POST", CALENDAR_PRIMARY_PATH
+                )
+                assert created["body"] == {
+                    "summary": "Congé",
+                    "start": {"date": "2026-11-13"},
+                    "end": {"date": "2026-11-14"},
+                }
+
+    asyncio.run(scenario())
+
+
+def test_a_date_only_update_is_all_day_even_without_the_flag(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        event_path = f"{CALENDAR_PRIMARY_PATH}/e2"
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route("PATCH", event_path, body={"id": "e2"})
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "calendar_update_event",
+                    {
+                        "event_id": "e2",
+                        "start": "2026-11-20",
+                        "end": "2026-11-21",
+                    },
+                )
+
+                assert payload["status"] == "ok"
+                [patched] = stub.requests_for("PATCH", event_path)
+                assert patched["body"] == {
+                    "start": {"date": "2026-11-20"},
+                    "end": {"date": "2026-11-22"},
+                }
+
+    asyncio.run(scenario())
+
+
+def test_an_all_day_event_still_requires_date_only_bounds(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "calendar_create_event",
+                    {
+                        "summary": "Congé",
+                        "start": "2026-11-13T09:00:00+01:00",
+                        "end": "2026-11-13T10:00:00+01:00",
+                        "all_day": True,
+                    },
+                )
+
+                assert payload["status"] == "error"
+                assert "journée entière est invalide" in payload["message"]
+                assert "AAAA-MM-JJ" in payload["message"]
+                assert stub.calendar_requests == []
 
     asyncio.run(scenario())
 
@@ -3746,6 +4010,50 @@ def test_gmail_reply_reuses_the_thread_recipient_and_reply_headers(
                 )
                 assert message.get_content() == "Oui, à midi.\n"
                 assert stub.requests_for("GET", "/gmail/v1/users/me/profile") == []
+
+    asyncio.run(scenario())
+
+
+def test_gmail_reply_decodes_an_encoded_subject_and_sender(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "GET",
+                f"{MESSAGES_PATH}/m1",
+                body=gmail_reply_source(
+                    "m1",
+                    sender=ENCODED_SENDER,
+                    subject=ENCODED_SUBJECT,
+                ),
+            )
+            stub.route(
+                "POST",
+                MESSAGES_PATH,
+                body={"id": "reponse-encoded", "threadId": "t1"},
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "gmail_reply",
+                    {"message_id": "m1", "body": "Oui."},
+                )
+
+                assert payload["status"] == "ok"
+                [posted] = stub.requests_for("POST", MESSAGES_PATH)
+                message = gmail_sent_message(posted)
+                assert message["Subject"] == "Re: Déjeuner jeudi"
+                assert message["To"] == (
+                    "Camille é <camille@example.test>"
+                )
 
     asyncio.run(scenario())
 

@@ -299,7 +299,7 @@ secret différent) ou l'application est repassée en mode Test.
 | Le serveur refuse de démarrer avec « même longueur » | Listes de secrets désalignées | Compter les entrées : une par compte, même ordre que `accounts`. |
 | `default_account` inconnu | Libellé absent ou mal orthographié | Utiliser une clé de la liste `accounts` (ou retirer la clé pour prendre le premier compte). |
 | `invalid_grant` sur un compte | Token révoqué, mot de passe changé, application en Test | Réautoriser (étape 6) et remplacer le refresh token. |
-| `invalid_client` | ID ou secret faux, ou token d'un autre client | Reprendre l'étape 1 et vérifier les deux listes au même index. |
+| `invalid_client` | ID ou secret faux, ou token d'un autre client | Reprendre l'étape 1 et vérifier les deux listes au même index. C'est un défaut de configuration **du compte** : il reste `AccountUnavailable` ; si tous les comptes échouent, le plugin reste `failed` et retente toutes les 5 s, sans refuser le démarrage. |
 | `invalid_scope` ou `access_denied` | Scope manquant ou consentement refusé | Refaire l'étape 2 avec les trois scopes exacts. |
 | Le compte meurt au bout de 7 jours | Application **Externe + Test** | Publier l'écran de consentement **En production**. |
 | Phrase 403 « l'accès à ce compte est refusé » | API Gmail ou Calendar désactivée, ou scope absent | Activer les APIs et réautoriser avec les trois scopes. |
