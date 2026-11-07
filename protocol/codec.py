@@ -19,6 +19,9 @@ class SessionEndReason(IntEnum):
     SHUTDOWN = 4
     ERROR = 5
     CLIENT_GONE = 6
+    # Fin demandée par le modèle (Tool du noyau ``end_session``) : additive,
+    # ajoutée en fin d'énumération pour ne jamais déplacer une valeur.
+    COMPLETED = 7
 
     # Preserve unknown wire values as explicit sentinels, never coercing them to NORMAL.
     @classmethod
