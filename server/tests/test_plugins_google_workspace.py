@@ -8,8 +8,9 @@ touché.
 
 Le fichier est organisé par section : manifeste et secrets, validation de la
 configuration, démarrage et échange OAuth, sélection du compte, contrat de
-``gmail_search``, cache et rafraîchissement du jeton, pannes HTTP, puis
-vérification transverse (instruction, Console, Traces sans fuite).
+``gmail_search``, cache et rafraîchissement du jeton, pannes HTTP, contrat de
+``calendar_list_events``, puis vérification transverse (instruction, Console,
+Traces sans fuite).
 
 Les tickets #137 à #141 étendent ce fichier ; les sections existantes laissent
 la place aux Tools Gmail puis Calendar sans réorganiser le socle.
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +46,8 @@ from google_workspace_harness import (
     REFRESH_TOKENS,
     build_plugins,
     call_tool,
+    calendar_event,
+    calendar_event_list,
     declared,
     gmail_message_list,
     gmail_metadata,
@@ -99,6 +103,51 @@ GMAIL_SEARCH_PARAMETERS: dict[str, Any] = {
     "required": ["query"],
 }
 
+CALENDAR_LIST_EVENTS_DESCRIPTION = (
+    "Liste les événements d'agenda d'une période."
+)
+
+CALENDAR_LIST_EVENTS_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "account": {
+            "type": "string",
+            "description": (
+                "Clé du compte Google à utiliser ; le compte par défaut "
+                "quand il est absent."
+            ),
+        },
+        "time_min": {
+            "type": "string",
+            "description": (
+                "Début de la période, RFC 3339 avec décalage. Défaut : "
+                "maintenant."
+            ),
+        },
+        "time_max": {
+            "type": "string",
+            "description": (
+                "Fin de la période, RFC 3339 avec décalage. Défaut : "
+                "maintenant + sept jours."
+            ),
+        },
+        "max_results": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "description": "Nombre d'événements rendus, de 1 à 50. Défaut 10.",
+        },
+        "calendar_id": {
+            "type": "string",
+            "description": "Identifiant de l'agenda. Défaut : « primary ».",
+        },
+        "query": {
+            "type": "string",
+            "description": "Recherche plein texte dans les événements.",
+        },
+    },
+}
+
 INSTRUCTION_TEMPLATE = (
     "Tu disposes des Tools Google Workspace pour les mails Gmail et l'agenda "
     "Google.\n"
@@ -146,6 +195,8 @@ INSTRUCTION = INSTRUCTION_TEMPLATE.replace("{accounts}", "pro, perso").replace(
 )
 
 MESSAGES_PATH = "/gmail/v1/users/me/messages"
+CALENDAR_EVENTS_BASE = "/calendar/v3/calendars"
+CALENDAR_PRIMARY_PATH = f"{CALENDAR_EVENTS_BASE}/primary/events"
 TOKEN_SECRETS = (
     CLIENT_ID_PRO,
     CLIENT_ID_PERSO,
@@ -333,7 +384,7 @@ def test_each_account_refresh_token_is_exchanged_at_startup(
                 assert row == {
                     "name": "google-workspace",
                     "state": "activated",
-                    "tools": ["gmail_search"],
+                    "tools": ["calendar_list_events", "gmail_search"],
                 }
 
                 # Un échange par compte, avec le formulaire OAuth exact.
@@ -486,7 +537,10 @@ def test_all_accounts_unavailable_degrades_the_start_then_repairs(
                         session, "gmail_search", {"query": "après réparation"}
                     )
                     assert payload["status"] == "ok"
-                    assert declared(live).keys() == {"gmail_search"}
+                    assert set(declared(live)) == {
+                        "gmail_search",
+                        "calendar_list_events",
+                    }
 
     asyncio.run(scenario())
 
@@ -1013,7 +1067,10 @@ def test_the_tool_instruction_and_console_row_are_exact(
                 _,
             ):
                 tools = declared(live)
-                assert set(tools) == {"gmail_search"}
+                assert set(tools) == {
+                    "gmail_search",
+                    "calendar_list_events",
+                }
                 assert (
                     dict(tools["gmail_search"].parameters_json_schema)
                     == GMAIL_SEARCH_PARAMETERS
@@ -1027,7 +1084,10 @@ def test_the_tool_instruction_and_console_row_are_exact(
                 assert INSTRUCTION in live.instruction()
 
                 [row] = app.snapshot()["plugins"]
-                assert row["tools"] == ["gmail_search"]
+                assert row["tools"] == [
+                    "calendar_list_events",
+                    "gmail_search",
+                ]
 
     asyncio.run(scenario())
 
@@ -1134,5 +1194,525 @@ def test_an_error_traces_tool_called_and_tool_failed_without_content(
                 assert failed.payload["account"] == "perso"
                 assert failed.payload["status"] == "HTTP 403"
                 assert "requête secrète" not in _traces_json(sink)
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Contrat de ``calendar_list_events``
+# ---------------------------------------------------------------------------
+
+
+def test_calendar_list_events_is_declared_with_its_schema(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                live,
+                _,
+                _,
+                _,
+            ):
+                tools = declared(live)
+                declaration = tools["calendar_list_events"]
+                assert (
+                    dict(declaration.parameters_json_schema)
+                    == CALENDAR_LIST_EVENTS_PARAMETERS
+                )
+                assert (
+                    declaration.description
+                    == CALENDAR_LIST_EVENTS_DESCRIPTION
+                )
+
+    asyncio.run(scenario())
+
+
+def test_calendar_list_events_sends_the_window_and_renders_events(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            timed = calendar_event(
+                "e1",
+                summary="Déjeuner jeudi",
+                start="2026-11-12T12:00:00+01:00",
+                end="2026-11-12T13:30:00+01:00",
+                location="Cantine",
+                attendees=[
+                    ("camille@example.test", "accepted"),
+                    ("bureau@example.test", "declined"),
+                ],
+                status="confirmed",
+                html_link="https://calendar.google.com/calendar/event?eid=e1",
+            )
+            whole_day = calendar_event(
+                "e2",
+                summary="Congé",
+                start="2026-11-13",
+                end="2026-11-14",
+                all_day=True,
+                location="",
+                status="tentative",
+                html_link="https://calendar.google.com/calendar/event?eid=e2",
+            )
+            stub.route(
+                "GET",
+                CALENDAR_PRIMARY_PATH,
+                body=calendar_event_list(
+                    timed, whole_day, next_page_token="page-2"
+                ),
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "calendar_list_events",
+                    {
+                        "time_min": "2026-11-12T00:00:00+01:00",
+                        "time_max": "2026-11-19T00:00:00+01:00",
+                        "max_results": 2,
+                        "page_token": "page-1",
+                        "query": "déjeuner",
+                    },
+                )
+
+                assert payload == {
+                    "status": "ok",
+                    "account": "perso",
+                    "calendar_id": "primary",
+                    "events": [
+                        {
+                            "id": "e1",
+                            "summary": "Déjeuner jeudi",
+                            "start": "2026-11-12T12:00:00+01:00",
+                            "end": "2026-11-12T13:30:00+01:00",
+                            "all_day": False,
+                            "location": "Cantine",
+                            "attendees": [
+                                {
+                                    "email": "camille@example.test",
+                                    "response_status": "accepted",
+                                },
+                                {
+                                    "email": "bureau@example.test",
+                                    "response_status": "declined",
+                                },
+                            ],
+                            "status": "confirmed",
+                            "html_link": (
+                                "https://calendar.google.com/calendar/event?eid=e1"
+                            ),
+                        },
+                        {
+                            "id": "e2",
+                            "summary": "Congé",
+                            "start": "2026-11-13",
+                            "end": "2026-11-14",
+                            "all_day": True,
+                            "location": "",
+                            "attendees": [],
+                            "status": "tentative",
+                            "html_link": (
+                                "https://calendar.google.com/calendar/event?eid=e2"
+                            ),
+                        },
+                    ],
+                    "next_page_token": "page-2",
+                }
+
+                [listed] = stub.requests_for("GET", CALENDAR_PRIMARY_PATH)
+                assert listed["query"] == {
+                    "timeMin": ["2026-11-12T00:00:00+01:00"],
+                    "timeMax": ["2026-11-19T00:00:00+01:00"],
+                    "maxResults": ["2"],
+                    "pageToken": ["page-1"],
+                    "singleEvents": ["true"],
+                    "orderBy": ["startTime"],
+                    "q": ["déjeuner"],
+                }
+                assert listed["authorization"] == f"Bearer {ACCESS_TOKEN_PERSO}"
+
+    asyncio.run(scenario())
+
+
+def test_calendar_list_events_defaults_to_now_and_seven_days(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "GET", CALENDAR_PRIMARY_PATH, body=calendar_event_list()
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session, "calendar_list_events", {}
+                )
+
+                assert payload == {
+                    "status": "ok",
+                    "account": "perso",
+                    "calendar_id": "primary",
+                    "events": [],
+                }
+
+                [listed] = stub.requests_for("GET", CALENDAR_PRIMARY_PATH)
+                query = listed["query"]
+                assert set(query) == {
+                    "timeMin",
+                    "timeMax",
+                    "maxResults",
+                    "singleEvents",
+                    "orderBy",
+                }
+                assert query["maxResults"] == ["10"]
+                assert query["singleEvents"] == ["true"]
+                assert query["orderBy"] == ["startTime"]
+
+                time_min = datetime.fromisoformat(query["timeMin"][0])
+                time_max = datetime.fromisoformat(query["timeMax"][0])
+                assert time_min.tzinfo is not None
+                assert time_max.tzinfo is not None
+                assert time_max - time_min == timedelta(days=7)
+                now = datetime.now().astimezone()
+                assert abs((now - time_min).total_seconds()) < 60
+
+                # Les bornes de ``max_results`` sont 1 et 50.
+                await call_tool(
+                    session,
+                    "calendar_list_events",
+                    {"max_results": 99},
+                )
+                await call_tool(
+                    session,
+                    "calendar_list_events",
+                    {"max_results": 0},
+                )
+                values = [
+                    request["query"]["maxResults"][0]
+                    for request in stub.requests_for(
+                        "GET", CALENDAR_PRIMARY_PATH
+                    )
+                ]
+                assert values == ["10", "50", "1"]
+
+    asyncio.run(scenario())
+
+
+def test_the_calendar_id_is_percent_encoded_in_the_path(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        calendar_id = "famille#holiday@group.calendar.google.com"
+        decoded_path = f"{CALENDAR_EVENTS_BASE}/{calendar_id}/events"
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "GET", decoded_path, body=calendar_event_list()
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "calendar_list_events",
+                    {"calendar_id": calendar_id},
+                )
+
+                assert payload["status"] == "ok"
+                assert payload["calendar_id"] == calendar_id
+                [listed] = stub.calendar_requests
+                assert listed["raw_path"] == (
+                    f"{CALENDAR_EVENTS_BASE}/"
+                    "famille%23holiday%40group.calendar.google.com/events"
+                )
+                assert listed["path"] == decoded_path
+
+    asyncio.run(scenario())
+
+
+def test_a_calendar_401_refreshes_once_and_replays_once(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            stub.route_token(
+                REFRESH_TOKEN_PRO, access_token=ACCESS_TOKEN_PRO
+            )
+            stub.route_token_sequence(
+                REFRESH_TOKEN_PERSO,
+                [
+                    {"access_token": ACCESS_TOKEN_PERSO},
+                    {"access_token": "access-token-perso-2"},
+                ],
+            )
+            stub.route_sequence(
+                "GET",
+                CALENDAR_PRIMARY_PATH,
+                [
+                    {
+                        "status": 401,
+                        "body": {"error": {"code": 401}},
+                    },
+                    {"body": calendar_event_list(calendar_event("e1"))},
+                ],
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session, "calendar_list_events", {}
+                )
+
+                assert payload["status"] == "ok"
+                assert [event["id"] for event in payload["events"]] == ["e1"]
+
+                listed = stub.requests_for("GET", CALENDAR_PRIMARY_PATH)
+                assert [request["authorization"] for request in listed] == [
+                    f"Bearer {ACCESS_TOKEN_PERSO}",
+                    "Bearer access-token-perso-2",
+                ]
+                perso_refreshes = [
+                    request
+                    for request in stub.token_requests
+                    if request["form"]["refresh_token"]
+                    == [REFRESH_TOKEN_PERSO]
+                ]
+                # Démarrage + le seul rafraîchissement du 401.
+                assert len(perso_refreshes) == 2
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("status", "fragment"),
+    [
+        (400, "période"),
+        (403, "refusé"),
+        (404, "introuvable"),
+        (429, "trop de requêtes"),
+        (500, "indisponible"),
+        (503, "réponse 503"),
+    ],
+)
+def test_a_failing_calendar_call_is_a_french_sentence_without_retry(
+    tmp_path: Path, status: int, fragment: str
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "GET",
+                CALENDAR_PRIMARY_PATH,
+                status=status,
+                body={"error": {"code": status}},
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                sink,
+                app_sink,
+            ):
+                payload = await call_tool(
+                    session, "calendar_list_events", {}
+                )
+
+                assert payload["status"] == "error"
+                assert payload["message"].startswith(
+                    "La lecture de l'agenda n'a pas abouti"
+                )
+                assert fragment in payload["message"]
+                # Aucun rejeu et aucun rafraîchissement supplémentaire.
+                assert (
+                    len(stub.requests_for("GET", CALENDAR_PRIMARY_PATH)) == 1
+                )
+                assert len(stub.token_requests) == 2
+                assert sink.of_kind("ToolFailed")[-1].payload["status"] == (
+                    f"HTTP {status}"
+                )
+                assert not app_sink.of_kind("SessionClosed")
+
+    asyncio.run(scenario())
+
+
+def test_an_unreadable_calendar_body_is_a_french_sentence(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "GET",
+                CALENDAR_PRIMARY_PATH,
+                raw_body=b"pas du JSON",
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session, "calendar_list_events", {}
+                )
+
+                assert payload["status"] == "error"
+                assert payload["message"].startswith(
+                    "La lecture de l'agenda n'a pas abouti"
+                )
+                assert "illisible" in payload["message"]
+
+    asyncio.run(scenario())
+
+
+def test_a_minimal_calendar_event_renders_empty_fields_and_is_not_all_day(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "GET",
+                CALENDAR_PRIMARY_PATH,
+                body={"items": [{"id": "e3"}]},
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session, "calendar_list_events", {}
+                )
+
+                assert payload["events"] == [
+                    {
+                        "id": "e3",
+                        "summary": "",
+                        "start": "",
+                        "end": "",
+                        "all_day": False,
+                        "location": "",
+                        "attendees": [],
+                        "status": "",
+                        "html_link": "",
+                    }
+                ]
+
+    asyncio.run(scenario())
+
+
+def test_an_unknown_account_is_refused_before_any_calendar_call(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "calendar_list_events",
+                    {"account": "inconnu"},
+                )
+
+                assert payload["status"] == "error"
+                assert "inconnu" in payload["message"]
+                assert "pro" in payload["message"]
+                assert "perso" in payload["message"]
+                assert stub.calendar_requests == []
+
+    asyncio.run(scenario())
+
+
+def test_calendar_traces_never_carry_query_address_summary_or_url(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            event = calendar_event(
+                "e1",
+                summary="Réunion confidentielle",
+                location="Salle secrète",
+                attendees=[("camille@example.test", "accepted")],
+            )
+            stub.route(
+                "GET",
+                CALENDAR_PRIMARY_PATH,
+                body=calendar_event_list(event),
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                sink,
+                _,
+            ):
+                ok = await call_tool(
+                    session,
+                    "calendar_list_events",
+                    {"query": "agenda confidentiel"},
+                )
+                assert ok["status"] == "ok"
+
+                [called] = sink.of_kind("ToolCalled")
+                assert called.payload["tool"] == "calendar_list_events"
+                assert called.payload["account"] == "perso"
+                assert called.payload["status"] == "ok"
+                assert called.payload["result_count"] == 1
+                assert isinstance(called.payload["duration_ms"], (int, float))
+                assert set(called.payload) == {
+                    "plugin",
+                    "tool",
+                    "account",
+                    "duration_ms",
+                    "status",
+                    "result_count",
+                }
+
+                rendered = _traces_json(sink)
+                for forbidden in (
+                    *TOKEN_SECRETS,
+                    ACCESS_TOKEN_PERSO,
+                    "camille@example.test",
+                    "Réunion confidentielle",
+                    "Salle secrète",
+                    "agenda confidentiel",
+                    CALENDAR_EVENTS_BASE,
+                ):
+                    assert forbidden not in rendered
 
     asyncio.run(scenario())
