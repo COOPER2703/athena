@@ -619,7 +619,7 @@ def test_announcement_connection_carries_none_of_the_kernel_tools() -> None:
     Décision **provisoire** : la Connexion d'Annonce devra exposer les mêmes
     Tools qu'une Session ordinaire dès qu'un système de protection contre les
     injections existera. La garde structurelle actuelle reste volontairement
-    intacte (#123).
+    intacte — voir ADR-0020, section « Décision à réviser » (#123).
     """
 
     async def scenario() -> None:

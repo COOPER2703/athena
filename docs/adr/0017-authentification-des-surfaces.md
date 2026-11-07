@@ -13,6 +13,10 @@ noyau**. Ces trois ADR conservent leur texte d'origine et portent une note de re
 Précise l'ADR-0016 : `GET /api/session` est une route d'**identité**, pas un instantané de
 lecture du noyau — l'exception explicite à sa règle de route de lecture unique.
 
+**Note de suivi (ADR-0020)** : les Sessions d'Annonce restent sans Tools dans cette tranche.
+Elles devront exposer les Tools d'une Session ordinaire dès qu'un **système de protection
+contre les injections** existera. Voir ADR-0020, section « Décision à réviser ».
+
 ## Contexte
 
 Athena expose trois surfaces : la **Console web** (SPA, API JSON et flux de Traces), le
