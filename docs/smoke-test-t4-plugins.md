@@ -372,10 +372,10 @@ injoignable (scénario 9), avec démarrage dégradé et retente.
 ## 12. `Registered.server_tools`
 
 À chaque enregistrement, le serveur envoie d'abord une trame `Registered` dont le champ
-`server_tools` liste **tous** les Tools serveur : les deux Tools du noyau (`save_memory`,
-`forget_memory`) puis les Tools Assist du plugin. Le schéma du protocole client est
-**inchangé** : le champ `repeated string server_tools = 2` existait déjà, et le client
-desktop l'ignore volontairement (il ne lit que `client_id`).
+`server_tools` liste **tous** les Tools serveur : les Tools du noyau (`save_memory`,
+`forget_memory`, `end_session`) puis les Tools Assist du plugin. Le schéma du protocole
+client est **inchangé** : le champ `repeated string server_tools = 2` existait déjà, et le
+client desktop l'ignore volontairement (il ne lit que `client_id`).
 
 Pour l'observer, lancez ceci **avant** `python -m client` (un seul client à la fois, pour ne
 pas déplacer la cible des Annonces) :
@@ -417,14 +417,15 @@ exposition) :
 client_id: …
 save_memory
 forget_memory
+end_session
 intent__HassTurnOn
 homeassistant__GetLiveContext
 script__cinema
 ```
 
-Si le plugin a échoué au démarrage, seuls `save_memory` et `forget_memory` apparaissent. La
-trame est régénérée à chaque `Register` : après une retente réussie, une nouvelle connexion
-annonce les Tools du plugin sans redémarrage d'Athena.
+Si le plugin a échoué au démarrage, seuls les Tools du noyau (`save_memory`, `forget_memory`,
+`end_session`) apparaissent. La trame est régénérée à chaque `Register` : après une retente
+réussie, une nouvelle connexion annonce les Tools du plugin sans redémarrage d'Athena.
 
 ## 13. Recherche web (optionnel)
 
