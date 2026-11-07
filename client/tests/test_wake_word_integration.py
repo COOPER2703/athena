@@ -21,6 +21,9 @@ _MODEL_FILES = (
     Path(DEFAULT_EMBEDDING_MODEL),
 )
 
+# « Athéna » synthétisé par Piper (fr_FR-siwis-medium) : voir data/ATTRIBUTION.md.
+_POSITIVE_WAV = Path(__file__).resolve().parent / "data" / "athena.wav"
+
 pytestmark = pytest.mark.skipif(
     not all(path.is_file() for path in _MODEL_FILES),
     reason="modèles ONNX absents (assets non installés)",
@@ -66,6 +69,42 @@ def test_the_real_model_does_not_trigger_on_silence(tmp_path: Path) -> None:
         detector.close()
 
     assert detection is None
+
+
+requires_positive_wav = pytest.mark.skipif(
+    not _POSITIVE_WAV.is_file(),
+    reason="fixture athena.wav absente (assets de test non installés)",
+)
+
+
+@requires_positive_wav
+def test_the_real_model_detects_the_athena_fixture() -> None:
+    """Vrai classifieur, vrais modèles de features, chunks réels du WAV.
+
+    Le micro n'est jamais sollicité : l'audio vient de la fixture versionnée.
+    C'est un test d'intégration du chargement et de l'inférence, pas une
+    validation de prononciation humaine.
+    """
+    with wave.open(str(_POSITIVE_WAV), "rb") as handle:
+        assert handle.getnchannels() == 1
+        assert handle.getsampwidth() == 2
+        assert handle.getframerate() == 16000
+        frames = handle.readframes(handle.getnframes())
+
+    detector = OpenWakeWordDetector(DEFAULT_WAKE_WORD_MODEL, threshold=0.5)
+    chunk_bytes = 1280 * 2
+    detection = None
+    try:
+        for offset in range(0, len(frames), chunk_bytes):
+            detection = detector.process(frames[offset : offset + chunk_bytes])
+            if detection is not None:
+                break
+    finally:
+        detector.close()
+
+    assert detection is not None, "le vrai modèle n'a pas détecté « Athéna »"
+    assert detection.score >= 0.5
+    assert 0 < len(detection.pre_roll) <= 9600  # 300 ms de PCM16 à 16 kHz
 
 
 requires_vad = pytest.mark.skipif(
