@@ -228,6 +228,62 @@ def test_empty_chunk_is_ignored() -> None:
     asyncio.run(scenario())
 
 
+class FailingOnceAudio(FakeAudio):
+    """Le premier ``read`` échoue comme le fait PortAudio/ALSA, puis se bloque."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+        self._gate = asyncio.Event()
+
+    async def read_chunk(self) -> bytes:
+        self.reads += 1
+        if self.reads == 1:
+            raise OSError("PaAlsaStream_SetUpBuffers failed")
+        await self._gate.wait()
+        return b""
+
+
+def test_transient_capture_failure_does_not_stop_the_client() -> None:
+    """Une erreur ALSA de lecture micro ne doit pas tuer la Session suivante."""
+
+    async def scenario() -> None:
+        audio = FailingOnceAudio()
+        transport = FakeTransport()
+        app = make_app(audio=audio, transport=transport)
+
+        run_task = asyncio.create_task(app.run())
+        await wait_until(lambda: audio.reads >= 1)
+        await asyncio.sleep(0.05)
+
+        assert not run_task.done()
+        assert not audio.closed
+        assert not transport.disconnected
+        assert app.state is ClientState.LISTENING
+
+        app.stop()
+        await asyncio.wait_for(run_task, timeout=1)
+
+    asyncio.run(scenario())
+
+
+def test_session_end_does_not_restart_the_output_stream() -> None:
+    """La fin de Session ne coupe plus le playback : elle vide seulement la file."""
+
+    async def scenario() -> None:
+        audio = FakeAudio()
+        app = make_app(audio=audio)
+        await app.on_session_started(SessionStarted())
+        await app.on_audio(b"\x01")
+
+        await app.on_session_ended(SessionEnded())
+
+        assert app._playback.empty()
+        assert not audio.flushed
+
+    asyncio.run(scenario())
+
+
 def test_server_audio_is_written_to_output() -> None:
     async def scenario() -> None:
         audio = BlockingFakeAudio()
