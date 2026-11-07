@@ -22,8 +22,16 @@ _Avoid_: Core, kernel, moteur, backend
 **Session**:
 Conversation active et visible par le Client : l'utilisateur et Athena échangent de
 l'audio. Commence par un Wake word, un tap ou une Annonce proactive ; se termine par un
-signal de fin ou un timeout. La gestion des Sessions est une responsabilité du noyau.
+signal de fin, un timeout, ou une **Clôture en attente** demandée par le Tool du noyau
+`end_session`. La gestion des Sessions est une responsabilité du noyau.
 _Avoid_: Conversation, call, chat
+
+**Clôture en attente**:
+État d'une Session dont la fin a été demandée par le Tool du noyau `end_session`, mais qui
+reste ouverte le temps d'une grâce de 3 s après le dernier audio du modèle. Un barge-in
+explicite (`ClientInterrupt`) ou un plafond de 10 s l'annule ; à l'échéance de la grâce, la
+Session se termine avec le motif de fin `COMPLETED`.
+_Avoid_: fermeture différée, arrêt programmé, pending close
 
 **Connexion Live**:
 Le lien serveur ↔ Gemini Live, ouvert par le noyau pour tenir une Session ou faire prononcer
@@ -43,9 +51,10 @@ noyau.
 _Avoid_: Function, capability, skill
 
 **Tool du noyau**:
-Un Tool exécuté par le serveur lui-même, indépendant de tout plugin (ex. mémoire, fin de
-Session). Gemini l'appelle comme un autre Tool, mais son exécution ne sort jamais du
-serveur et ne touche pas le protocole client.
+Un Tool exécuté par le serveur lui-même, indépendant de tout plugin (mémoire :
+`save_memory`, `forget_memory` ; fin de Session : `end_session`). Gemini l'appelle comme un
+autre Tool, mais son exécution ne sort jamais du serveur et ne touche pas le protocole
+client.
 _Avoid_: tool interne, tool intégré, tool système
 
 **Wake word**:
@@ -412,8 +421,10 @@ résultat.
 _Avoid_: Owner, cible, target
 
 **Motif de fin**:
-Le champ `reason` de la fin de Session, qui dit pourquoi une Session se termine. Les valeurs
-numériques sont stables : jamais réordonnées ni réutilisées.
+Le champ `reason` de la fin de Session, qui dit pourquoi une Session se termine. `COMPLETED`
+distingue une fin décidée par le modèle (`end_session`) de `NORMAL` (fermeture Gemini) et de
+`TIMEOUT` (inactivité). Les valeurs numériques sont stables : jamais réordonnées ni
+réutilisées.
 _Avoid_: Raison, cause, status
 
 ## Relationships

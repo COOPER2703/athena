@@ -88,7 +88,16 @@ class ClientApp:
 
     async def _capture_loop(self) -> None:
         while True:
-            data = await self._audio.read_chunk()
+            try:
+                data = await self._audio.read_chunk()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Une erreur ALSA transitoire ne doit pas arrêter le Client :
+                # le micro est rouvert par l'adaptateur, puis la capture reprend.
+                log.warning("Lecture micro échouée, reprise: %s", exc)
+                await asyncio.sleep(0.1)
+                continue
             await self.forward_audio(data)
 
     async def forward_audio(self, data: bytes) -> None:
@@ -104,12 +113,18 @@ class ClientApp:
 
     async def _reset_to_listening(self) -> None:
         self._state = ClientState.LISTENING
-        await self._flush_playback()
+        # La fin d'une Session ne coupe pas le flux de sortie : l'audio déjà
+        # joué ou en cours de lecture s'achève, on jette seulement la file.
+        self._drop_playback()
 
     async def _flush_playback(self) -> None:
+        """Barge-in : jette la file et coupe ce qui est en train de jouer."""
+        self._drop_playback()
+        await self._audio.flush()
+
+    def _drop_playback(self) -> None:
         while not self._playback.empty():
             self._playback.get_nowait()
-        await self._audio.flush()
 
     async def on_audio(self, data: bytes) -> None:
         await self._playback.put(data)

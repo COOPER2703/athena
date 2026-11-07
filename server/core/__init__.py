@@ -22,6 +22,8 @@ from server.core.consolidation import (
 )
 from server.core.coordinator import (
     ANNOUNCE_TIMEOUT,
+    END_SESSION_CEILING_TIMEOUT,
+    END_SESSION_GRACE_TIMEOUT,
     EVENT_MAX_CHARS,
     EVENT_QUEUE_MAX,
     EVENT_WINDOW_TIMER_ID,
@@ -29,6 +31,7 @@ from server.core.coordinator import (
     IDLE_TIMEOUT,
     Coordinator,
     EventDropReason,
+    end_session_ceiling_timer_id,
 )
 from server.core.events import (
     ClientAudio,
@@ -76,6 +79,7 @@ from server.core.ports import (
     TraceEntry,
     TraceSink,
 )
+from server.core.session_tools import END_SESSION, register_session_tools
 from server.core.state import SessionState
 from server.core.tools import ToolHandler, ToolNameConflict, ToolRegistry
 
@@ -99,6 +103,9 @@ __all__ = [
     "ConsolidationScheduler",
     "Coordinator",
     "Embedder",
+    "END_SESSION",
+    "END_SESSION_CEILING_TIMEOUT",
+    "END_SESSION_GRACE_TIMEOUT",
     "Event",
     "EventJudge",
     "EventReceived",
@@ -148,6 +155,8 @@ __all__ = [
     "Trace",
     "TraceEntry",
     "TraceSink",
+    "end_session_ceiling_timer_id",
     "local_now",
     "register_memory_tools",
+    "register_session_tools",
 ]

@@ -43,12 +43,31 @@ from server.core.events import (
 )
 from server.core.plugins import PluginRegistry
 from server.core.ports import EventJudge, Judgment, MemoryStore, ToolSpec
+from server.core.session_tools import END_SESSION
 from server.core.state import SessionState
 from server.core.tools import ToolRegistry
 from server.core.untrusted import flatten_untrusted, sanitize_untrusted
 
 _TRACE_SOURCE = "core"
 IDLE_TIMEOUT = 30.0
+# Grâce d'une **Clôture en attente** (#130) : quand le modèle appelle
+# ``end_session``, la Session ne se ferme pas brutalement. Le résultat du Tool
+# part au modèle, puis la Connexion est refermée 3 s après le dernier audio du
+# modèle — le temps de finir la phrase d'adieu. Chaque ``LlmAudio`` relance
+# cette grâce sur la même clé de timer que l'inactivité.
+END_SESSION_GRACE_TIMEOUT = 3.0
+# Plafond d'une **Clôture en attente** (#131) : si le modèle parle encore à
+# T+10 s, le noyau renonce à fermer — un long monologue d'Athena n'est jamais
+# coupé 3 s après sa dernière phrase. Le timer vit sur une clé réservée pour ne
+# jamais se confondre avec la Connexion ni avec la fenêtre d'Événements.
+END_SESSION_CEILING_TIMEOUT = 10.0
+
+
+def end_session_ceiling_timer_id(connection_id: str) -> str:
+    """Clé réservée du plafond de clôture, dérivée de la Connexion."""
+    return f"{connection_id}:end-session"
+
+
 # Filet de sécurité de l'Annonce (ADR-0007, amendé) : une Connexion Live n'est
 # ouverte que si le jugement **texte** a décidé d'annoncer, mais si le modèle ne
 # produit aucun son, elle est refermée vite — plus court que l'inactivité d'une
@@ -139,6 +158,10 @@ class Coordinator:
         self._visible = False
         self._auto = False
         self._judging = False
+        # Clôture en attente (#130) : le modèle a demandé la fin de la Session,
+        # la Connexion reste ouverte pendant la grâce. La politique de fermeture
+        # vit ici, pas dans le handler du Tool (ADR-0008).
+        self._end_session_pending = False
         self._session_counter = 0
         self._audio_buffer: list[bytes] = []
         self._recent_utterances: list[str] = []
@@ -461,8 +484,8 @@ class Coordinator:
         et l'instruction d'Annonce s'y ajoute pour qu'Athena sache qu'un
         Événement a ouvert la Session. Elle s'en distingue sur un point, qui
         est **structurel** : la Connexion est ouverte sans aucun outil, pour
-        qu'un Événement piégé ne puisse jamais déclencher une action (#81,
-        amendement d'ADR-0013 à venir). Le message du juge est la phrase à
+        qu'un Événement piégé ne puisse jamais déclencher une action (#81 ;
+        ADR-0020). Le message du juge est la phrase à
         prononcer ; les faits assainis du lot sont transmis au Live comme
         contexte (``facts``), sans être prononcés, pour qu'Athena puisse
         détailler l'Événement à la demande. La Connexion est marquée ``auto`` :
@@ -477,6 +500,7 @@ class Coordinator:
         self._client_id = self._registered_client_id
         self._auto = True
         self._judging = True
+        self._end_session_pending = False
         self._state = SessionState.LIVE_CONNECTING
         self._recent_utterances = []
 
@@ -506,7 +530,10 @@ class Coordinator:
                 connection_id=self._connection_id,
                 instruction=instruction,
                 # Aucun outil : le contenu externe qui a déclenché l'Annonce
-                # ne peut jamais se traduire par une action (#81).
+                # ne peut jamais se traduire par une action (#81). Décision
+                # **provisoire** : les Sessions d'Annonce exposeront les Tools
+                # ordinaires dès qu'un système anti-injection existera
+                # (ADR-0020, « Décision à réviser »).
                 tools=(),
             ),
             StartIdleTimer(
@@ -598,6 +625,7 @@ class Coordinator:
         self._client_id = event.client_id
         self._auto = event.auto
         self._state = SessionState.LIVE_CONNECTING
+        self._end_session_pending = False
         self._recent_utterances = []
         self._injected_memories = set()
 
@@ -677,8 +705,15 @@ class Coordinator:
         """
         return "\n\n".join(section for section in sections if section).strip()
 
+    def _in_live_session(self) -> bool:
+        """Vrai pendant une Session Live active ou visible (jamais au Repos)."""
+        return self._state in (
+            SessionState.LIVE_ACTIVE,
+            SessionState.SESSION_VISIBLE,
+        )
+
     def _on_client_audio(self, event: ClientAudio) -> list[Command]:
-        if self._state in (SessionState.LIVE_ACTIVE, SessionState.SESSION_VISIBLE):
+        if self._in_live_session():
             # Raw mic bytes are not voice activity: never re-arm the idle timer.
             return [
                 SendAudioToLlm(connection_id=self._connection_id, data=event.data),
@@ -699,11 +734,20 @@ class Coordinator:
 
     def _on_client_interrupt(self, event: ClientInterrupt) -> list[Command]:
         client_id = event.client_id or self._client_id
+        commands: list[Command] = []
+        # Un barge-in explicite renonce à une Clôture en attente (#132). La
+        # vérification précède la branche de visibilité : elle vaut aussi en
+        # ``LIVE_ACTIVE``. Puis le barge-in est traité comme toujours, sans
+        # aucun teardown.
+        if self._end_session_pending:
+            commands.extend(self._cancel_end_session("barge_in"))
         if self._state is SessionState.SESSION_VISIBLE:
             # Barge-in: the client flushes its own playback; the Session stays
             # visible. No command is emitted for the desktop to stop audio.
-            return self._decision("barge_in", client_id=client_id)
-        return self._decision("ClientInterrupt", client_id=client_id)
+            commands.extend(self._decision("barge_in", client_id=client_id))
+        else:
+            commands.extend(self._decision("ClientInterrupt", client_id=client_id))
+        return commands
 
     def _on_client_tool_result(self, event: ClientToolResult) -> list[Command]:
         # Reserved seam: T1 has no Tool routing, so the result is trace-only.
@@ -726,12 +770,12 @@ class Coordinator:
         if self._state is SessionState.LIVE_ACTIVE:
             self._audio_buffer.append(event.data)
             return [
-                self._rearm_timer(),
+                self._rearm_grace_timer(),
                 *(await self._become_visible("LlmAudio")),
             ]
         if self._state is SessionState.SESSION_VISIBLE:
             return [
-                self._rearm_timer(),
+                self._rearm_grace_timer(),
                 SendAudioToClient(client_id=self._client_id, data=event.data),
                 *self._decision("LlmAudio"),
             ]
@@ -761,7 +805,14 @@ class Coordinator:
         # Le premier tour utilisateur referme le tour d'annonce : la parole
         # suivante d'Athena est une réponse ordinaire, journalisée ``assistant``.
         self._announcing = False
-        commands: list[Command] = [self._rearm_timer()]
+        # Pendant une Clôture en attente, une transcription utilisateur ne
+        # relance pas le timeout de 30 s et n'annule pas la clôture (#132) :
+        # une interjection purement orale ne sauve pas la Session, et une
+        # conversation de fond ne prolonge pas la fermeture. Journal et Rappel
+        # restent inchangés.
+        commands: list[Command] = []
+        if not self._end_session_pending:
+            commands.append(self._rearm_timer())
         if self._memory is not None:
             await self._journal("user", event.text)
             text, trace = await self._recall(event.text)
@@ -839,8 +890,22 @@ class Coordinator:
         trace porte le plugin propriétaire (``core`` pour un Tool du noyau,
         ``null`` pour un nom inconnu), pour attribuer appels et erreurs dans le
         flux de trace (ADR-0014).
+
+        ``end_session`` relève de la politique du noyau (#130) : il n'est
+        accepté que dans une Session **ordinaire** active et ouvre alors une
+        **Clôture en attente** — le résultat part au modèle d'abord, puis la
+        grâce de 3 s remplace le timeout d'inactivité. Une Connexion de
+        jugement ou une Session d'Annonce n'est pas ordinaire (``tools=()``,
+        ADR-0020) : le modèle reçoit une erreur et aucun timer n'est armé.
         """
         plugin = self._tool_owner(event.name)
+        is_end_session = event.name == END_SESSION
+        # Le Tool de clôture n'a de sens que dans une Session ordinaire active :
+        # ni la Connexion de jugement (``_judging``) ni la Session automatique
+        # d'Annonce (``_auto``) ne peuvent ouvrir une clôture (#130, ADR-0020).
+        ordinary = (
+            self._in_live_session() and not self._judging and not self._auto
+        )
         commands: list[Command] = [
             self._trace(
                 "ToolCall",
@@ -855,8 +920,13 @@ class Coordinator:
                 },
             )
         ]
-        if self._tools is None:
+        if is_end_session and not ordinary:
             result: Mapping[str, object] = {
+                "status": "error",
+                "message": "end_session outside an ordinary active session",
+            }
+        elif self._tools is None:
+            result = {
                 "status": "error",
                 "message": f"unknown tool: {event.name}",
             }
@@ -885,6 +955,31 @@ class Coordinator:
                 },
             )
         )
+        # Première clôture acceptée : grâce de 3 s sur la clé de la Connexion
+        # (elle remplace le timeout d'inactivité). Un second appel pendant la
+        # clôture rend un succès sans réarmer : on ne prolonge pas la Session en
+        # rappelant le Tool. Hors Session active, aucun timer.
+        if (
+            is_end_session
+            and ordinary
+            and result.get("status") == "ok"
+            and not self._end_session_pending
+        ):
+            self._end_session_pending = True
+            commands.append(
+                StartIdleTimer(
+                    connection_id=self._connection_id,
+                    timeout=END_SESSION_GRACE_TIMEOUT,
+                )
+            )
+            commands.append(
+                StartIdleTimer(
+                    connection_id=end_session_ceiling_timer_id(
+                        self._connection_id
+                    ),
+                    timeout=END_SESSION_CEILING_TIMEOUT,
+                )
+            )
         return commands
 
     def _tool_owner(self, name: str) -> str | None:
@@ -935,6 +1030,22 @@ class Coordinator:
     async def _on_timer_fired(self, event: TimerFired) -> list[Command]:
         if event.connection_id == EVENT_WINDOW_TIMER_ID:
             return await self._on_event_window_fired()
+        # Plafond d'une Clôture en attente (#131) : vérifié **avant** la
+        # propriété de la Connexion, car sa clé n'est jamais celle de la
+        # Connexion. Si la clôture est encore en attente, le modèle parle
+        # encore : on renonce à fermer. Sinon le plafond est périmé et ne doit
+        # jamais toucher une Session en cours.
+        if event.connection_id == end_session_ceiling_timer_id(
+            self._connection_id
+        ):
+            if self._end_session_pending:
+                return self._cancel_end_session("audio_overrun")
+            return self._decision("TimerFired")
+        # Échéance de la grâce d'une Clôture en attente : la Session se termine
+        # avec le motif décidé par le modèle, et le Client revient à LISTENING
+        # par le chemin de fin existant (``AnnounceSessionEnded``).
+        if self._end_session_pending and self._owns(event.connection_id):
+            return self._teardown(SessionEndReason.COMPLETED, "EndSession")
         if self._owns(event.connection_id) and self._state is not SessionState.IDLE:
             return self._teardown(SessionEndReason.TIMEOUT, "Timeout")
         return self._decision("TimerFired")
@@ -953,8 +1064,48 @@ class Coordinator:
             return self._decision("EventWindowFired")
         return await self._judge_batch()
 
+    def _cancel_end_session(self, cause: str) -> list[Command]:
+        """Annule une **Clôture en attente** et rend la Session à son régime normal.
+
+        Le plafond (ou, plus tard, un barge-in) renonce à fermer : la clôture
+        est oubliée, son timer réservé est annulé, la Trace ``SessionEndCanceled``
+        porte le motif et la cause, puis le timeout d'inactivité de 30 s est
+        réarmé sur la clé de la Connexion. Aucune fermeture, aucun ``SessionEnded``.
+        """
+        from_state = self._state
+        self._end_session_pending = False
+        return [
+            CancelIdleTimer(
+                connection_id=end_session_ceiling_timer_id(
+                    self._connection_id
+                )
+            ),
+            self._trace(
+                "SessionEndCanceled",
+                from_state=from_state,
+                to_state=from_state,
+                client_id=self._client_id,
+                reason=SessionEndReason.COMPLETED.name,
+                cause=cause,
+            ),
+            self._rearm_timer(),
+        ]
+
     def _rearm_timer(self) -> StartIdleTimer:
         return StartIdleTimer(connection_id=self._connection_id, timeout=IDLE_TIMEOUT)
+
+    def _rearm_grace_timer(self) -> StartIdleTimer:
+        """Réarmement d'audio : la grâce pendant une Clôture en attente.
+
+        Hors clôture, c'est le timeout d'inactivité ordinaire. Les deux partagent
+        la clé de timer de la Connexion : armer l'un remplace l'autre.
+        """
+        timeout = (
+            END_SESSION_GRACE_TIMEOUT
+            if self._end_session_pending
+            else IDLE_TIMEOUT
+        )
+        return StartIdleTimer(connection_id=self._connection_id, timeout=timeout)
 
     def _owns(self, connection_id: str) -> bool:
         """Une identité vide n'est pas un joker : seul l'id courant compte."""
@@ -1014,8 +1165,19 @@ class Coordinator:
         self._state = SessionState.CLOSING
         commands: list[Command] = [
             CancelIdleTimer(connection_id=old_connection_id),
-            CloseLiveConnection(connection_id=old_connection_id),
         ]
+        # Une Clôture en attente laisse un timer de plafond derrière elle : on
+        # l'annule avant de perdre l'identité de la Connexion, sinon une
+        # échéance périmée pourrait toucher une Session ultérieure (#131).
+        if self._end_session_pending:
+            commands.append(
+                CancelIdleTimer(
+                    connection_id=end_session_ceiling_timer_id(
+                        old_connection_id
+                    )
+                )
+            )
+        commands.append(CloseLiveConnection(connection_id=old_connection_id))
         if was_visible:
             commands.append(
                 AnnounceSessionEnded(client_id=old_client_id, reason=reason)
@@ -1063,6 +1225,7 @@ class Coordinator:
         self._auto = False
         self._judging = False
         self._announcing = False
+        self._end_session_pending = False
         self._judged_batch = []
         self._audio_buffer.clear()
         self._recent_utterances = []

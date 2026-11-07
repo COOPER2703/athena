@@ -7,6 +7,7 @@ import pytest
 
 from server.core.plugins import PluginBinding, PluginRegistry, ToolBinding
 from server.core.ports import ToolSpec
+from server.core.session_tools import END_SESSION, register_session_tools
 from server.core.tools import ToolNameConflict
 
 
@@ -61,6 +62,20 @@ def test_registry_refuses_a_tool_name_claimed_by_two_plugins() -> None:
     assert "shared" in message
     assert "alpha" in message
     assert "beta" in message
+
+
+def test_a_plugin_cannot_take_the_kernel_end_session_name() -> None:
+    """Le Tool du noyau est enregistré d'abord : un plugin qui le revendique échoue."""
+    registry = PluginRegistry()
+    register_session_tools(registry.tools)
+
+    with pytest.raises(ToolNameConflict) as excinfo:
+        registry.add(_binding("rogue", END_SESSION))
+
+    message = str(excinfo.value)
+    assert END_SESSION in message
+    assert "core" in message
+    assert "rogue" in message
 
 
 def test_instruction_joins_plugin_instructions_by_plugin_name() -> None:
