@@ -411,6 +411,147 @@ def gmail_message_list(
     return body
 
 
+def _gmail_encoded(text: str) -> str:
+    """Corps Gmail : base64url sans remplissage, comme l'API le rend."""
+    return base64.urlsafe_b64encode(text.encode("utf-8")).decode().rstrip("=")
+
+
+def _gmail_body_part(mime_type: str, text: str) -> dict[str, Any]:
+    """Partie Gmail portant un corps texte encodé."""
+    return {
+        "mimeType": mime_type,
+        "body": {
+            "size": len(text.encode("utf-8")),
+            "data": _gmail_encoded(text),
+        },
+    }
+
+
+def gmail_read_message(
+    message_id: str,
+    *,
+    thread_id: str | None = None,
+    sender: str = "Camille <camille@example.test>",
+    recipients: str = "Cooper <cooper@example.test>",
+    cc: str | None = None,
+    subject: str = "Déjeuner jeudi",
+    date: str = "Thu, 5 Nov 2026 10:00:00 +0100",
+    plain: str | None = "On se retrouve à midi ?",
+    html: str | None = None,
+    attachments: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Objet Gmail complet rendu par ``GET /messages/{id}?format=full``.
+
+    ``plain`` et ``html`` peuvent coexister (``multipart/alternative``) ; ``html``
+    seul exerce le repli nettoyé. Les pièces jointes n'ont qu'un nom et un
+    identifiant : aucun contenu n'est téléchargé.
+    """
+    rendered: dict[str, str] = {
+        "From": sender,
+        "To": recipients,
+        "Subject": subject,
+        "Date": date,
+    }
+    if cc is not None:
+        rendered["Cc"] = cc
+
+    body_parts: list[dict[str, Any]] = []
+    if plain is not None:
+        body_parts.append(_gmail_body_part("text/plain", plain))
+    if html is not None:
+        body_parts.append(_gmail_body_part("text/html", html))
+    for name in attachments:
+        body_parts.append(
+            {
+                "partId": f"attachment-{name}",
+                "mimeType": "application/octet-stream",
+                "filename": name,
+                "body": {"attachmentId": f"attachment-id-{name}", "size": 42},
+            }
+        )
+
+    if len(body_parts) == 1 and not attachments:
+        payload: dict[str, Any] = {
+            **body_parts[0],
+            "headers": [
+                {"name": name, "value": value}
+                for name, value in rendered.items()
+            ],
+        }
+    else:
+        payload = {
+            "mimeType": (
+                "multipart/mixed" if attachments else "multipart/alternative"
+            ),
+            "headers": [
+                {"name": name, "value": value}
+                for name, value in rendered.items()
+            ],
+            "parts": body_parts,
+        }
+
+    return {
+        "id": message_id,
+        "threadId": thread_id if thread_id is not None else f"thread-{message_id}",
+        "payload": payload,
+    }
+
+
+def gmail_read_thread(
+    thread_id: str, *messages: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Objet Gmail rendu par ``GET /threads/{id}?format=full``."""
+    return {
+        "id": thread_id,
+        "historyId": "history-1",
+        "messages": [dict(message) for message in messages],
+    }
+
+
+def calendar_event(
+    event_id: str,
+    *,
+    summary: str = "Déjeuner jeudi",
+    start: str = "2026-11-12T12:00:00+01:00",
+    end: str = "2026-11-12T13:30:00+01:00",
+    all_day: bool = False,
+    location: str = "Cantine",
+    attendees: Sequence[tuple[str, str]] = (),
+    status: str = "confirmed",
+    html_link: str = "https://calendar.google.com/calendar/event?eid=e1",
+) -> dict[str, Any]:
+    """Événement d'agenda tel que ``GET /calendar/v3/.../events`` le rend.
+
+    ``all_day`` place la date dans ``start.date`` / ``end.date`` (fin
+    exclusive), sinon dans ``start.dateTime`` / ``end.dateTime``. Les
+    participants sont des couples ``(courriel, responseStatus)``.
+    """
+    bound = "date" if all_day else "dateTime"
+    return {
+        "id": event_id,
+        "summary": summary,
+        "start": {bound: start},
+        "end": {bound: end},
+        "location": location,
+        "attendees": [
+            {"email": email, "responseStatus": response_status}
+            for email, response_status in attendees
+        ],
+        "status": status,
+        "htmlLink": html_link,
+    }
+
+
+def calendar_event_list(
+    *events: Mapping[str, Any], next_page_token: str | None = None
+) -> dict[str, Any]:
+    """Objet Calendar rendu par ``GET /calendar/v3/.../events``."""
+    body: dict[str, Any] = {"items": list(events)}
+    if next_page_token is not None:
+        body["nextPageToken"] = next_page_token
+    return body
+
+
 @contextlib.asynccontextmanager
 async def google_workspace_session(
     tmp_path: Path,
