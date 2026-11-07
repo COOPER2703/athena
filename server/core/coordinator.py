@@ -56,6 +56,18 @@ IDLE_TIMEOUT = 30.0
 # modèle — le temps de finir la phrase d'adieu. Chaque ``LlmAudio`` relance
 # cette grâce sur la même clé de timer que l'inactivité.
 END_SESSION_GRACE_TIMEOUT = 3.0
+# Plafond d'une **Clôture en attente** (#131) : si le modèle parle encore à
+# T+10 s, le noyau renonce à fermer — un long monologue d'Athena n'est jamais
+# coupé 3 s après sa dernière phrase. Le timer vit sur une clé réservée pour ne
+# jamais se confondre avec la Connexion ni avec la fenêtre d'Événements.
+END_SESSION_CEILING_TIMEOUT = 10.0
+
+
+def end_session_ceiling_timer_id(connection_id: str) -> str:
+    """Clé réservée du plafond de clôture, dérivée de la Connexion."""
+    return f"{connection_id}:end-session"
+
+
 # Filet de sécurité de l'Annonce (ADR-0007, amendé) : une Connexion Live n'est
 # ouverte que si le jugement **texte** a décidé d'annoncer, mais si le modèle ne
 # produit aucun son, elle est refermée vite — plus court que l'inactivité d'une
@@ -933,6 +945,14 @@ class Coordinator:
                     timeout=END_SESSION_GRACE_TIMEOUT,
                 )
             )
+            commands.append(
+                StartIdleTimer(
+                    connection_id=end_session_ceiling_timer_id(
+                        self._connection_id
+                    ),
+                    timeout=END_SESSION_CEILING_TIMEOUT,
+                )
+            )
         return commands
 
     def _tool_owner(self, name: str) -> str | None:
@@ -983,6 +1003,17 @@ class Coordinator:
     async def _on_timer_fired(self, event: TimerFired) -> list[Command]:
         if event.connection_id == EVENT_WINDOW_TIMER_ID:
             return await self._on_event_window_fired()
+        # Plafond d'une Clôture en attente (#131) : vérifié **avant** la
+        # propriété de la Connexion, car sa clé n'est jamais celle de la
+        # Connexion. Si la clôture est encore en attente, le modèle parle
+        # encore : on renonce à fermer. Sinon le plafond est périmé et ne doit
+        # jamais toucher une Session en cours.
+        if event.connection_id == end_session_ceiling_timer_id(
+            self._connection_id
+        ):
+            if self._end_session_pending:
+                return self._cancel_end_session("audio_overrun")
+            return self._decision("TimerFired")
         # Échéance de la grâce d'une Clôture en attente : la Session se termine
         # avec le motif décidé par le modèle, et le Client revient à LISTENING
         # par le chemin de fin existant (``AnnounceSessionEnded``).
@@ -1005,6 +1036,33 @@ class Coordinator:
         if self._state is not SessionState.IDLE:
             return self._decision("EventWindowFired")
         return await self._judge_batch()
+
+    def _cancel_end_session(self, cause: str) -> list[Command]:
+        """Annule une **Clôture en attente** et rend la Session à son régime normal.
+
+        Le plafond (ou, plus tard, un barge-in) renonce à fermer : la clôture
+        est oubliée, son timer réservé est annulé, la Trace ``SessionEndCanceled``
+        porte le motif et la cause, puis le timeout d'inactivité de 30 s est
+        réarmé sur la clé de la Connexion. Aucune fermeture, aucun ``SessionEnded``.
+        """
+        from_state = self._state
+        self._end_session_pending = False
+        return [
+            CancelIdleTimer(
+                connection_id=end_session_ceiling_timer_id(
+                    self._connection_id
+                )
+            ),
+            self._trace(
+                "SessionEndCanceled",
+                from_state=from_state,
+                to_state=from_state,
+                client_id=self._client_id,
+                reason=SessionEndReason.COMPLETED.name,
+                cause=cause,
+            ),
+            self._rearm_timer(),
+        ]
 
     def _rearm_timer(self) -> StartIdleTimer:
         return StartIdleTimer(connection_id=self._connection_id, timeout=IDLE_TIMEOUT)
@@ -1080,8 +1138,19 @@ class Coordinator:
         self._state = SessionState.CLOSING
         commands: list[Command] = [
             CancelIdleTimer(connection_id=old_connection_id),
-            CloseLiveConnection(connection_id=old_connection_id),
         ]
+        # Une Clôture en attente laisse un timer de plafond derrière elle : on
+        # l'annule avant de perdre l'identité de la Connexion, sinon une
+        # échéance périmée pourrait toucher une Session ultérieure (#131).
+        if self._end_session_pending:
+            commands.append(
+                CancelIdleTimer(
+                    connection_id=end_session_ceiling_timer_id(
+                        old_connection_id
+                    )
+                )
+            )
+        commands.append(CloseLiveConnection(connection_id=old_connection_id))
         if was_visible:
             commands.append(
                 AnnounceSessionEnded(client_id=old_client_id, reason=reason)

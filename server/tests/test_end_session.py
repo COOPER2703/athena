@@ -23,11 +23,17 @@ from server.core import (
     SendToolResultToLlm,
     SessionRequested,
     SessionState,
+    ShutdownRequested,
     StartIdleTimer,
     TimerFired,
     ToolRegistry,
 )
-from server.core.coordinator import END_SESSION_GRACE_TIMEOUT, IDLE_TIMEOUT
+from server.core.coordinator import (
+    END_SESSION_CEILING_TIMEOUT,
+    END_SESSION_GRACE_TIMEOUT,
+    IDLE_TIMEOUT,
+    end_session_ceiling_timer_id,
+)
 from server.core.session_tools import END_SESSION, register_session_tools
 
 
@@ -75,8 +81,16 @@ def test_end_session_replies_before_opening_the_pending_close():
         StartIdleTimer(
             connection_id="s1", timeout=END_SESSION_GRACE_TIMEOUT
         ),
+        StartIdleTimer(
+            connection_id=end_session_ceiling_timer_id("s1"),
+            timeout=END_SESSION_CEILING_TIMEOUT,
+        ),
     ]
     assert END_SESSION_GRACE_TIMEOUT == 3.0
+    assert END_SESSION_CEILING_TIMEOUT == 10.0
+    # La clé du plafond ne peut jamais se confondre avec celle de la Connexion
+    # ni avec celle de la fenêtre d'Événements.
+    assert end_session_ceiling_timer_id("s1") not in ("s1", "event-window")
     assert coordinator.state is SessionState.SESSION_VISIBLE
     assert not [c for c in commands if isinstance(c, CloseLiveConnection)]
 
@@ -91,6 +105,7 @@ def test_grace_expiry_closes_the_session_as_completed():
 
     assert effects(commands) == [
         CancelIdleTimer(connection_id="s1"),
+        CancelIdleTimer(connection_id=end_session_ceiling_timer_id("s1")),
         CloseLiveConnection(connection_id="s1"),
         AnnounceSessionEnded(
             client_id="c1", reason=SessionEndReason.COMPLETED
@@ -99,6 +114,98 @@ def test_grace_expiry_closes_the_session_as_completed():
     assert coordinator.state is SessionState.IDLE
     closed = [trace for trace in traces(commands) if trace.kind == "SessionClosed"]
     assert closed[0].payload["reason"] == "COMPLETED"
+
+
+def test_ceiling_expiry_cancels_the_close_and_rearms_the_idle_timeout():
+    """À T+10 s, le modèle parle encore : on renonce à fermer, la Session vit."""
+    coordinator = _coordinator()
+    drive(coordinator, visible_session())
+    _call(coordinator)
+    ceiling = end_session_ceiling_timer_id("s1")
+
+    commands = handle(coordinator, TimerFired(connection_id=ceiling))
+
+    assert effects(commands) == [
+        CancelIdleTimer(connection_id=ceiling),
+        StartIdleTimer(connection_id="s1", timeout=IDLE_TIMEOUT),
+    ]
+    assert coordinator.state is SessionState.SESSION_VISIBLE
+    assert not [c for c in commands if isinstance(c, CloseLiveConnection)]
+    assert not [c for c in commands if isinstance(c, AnnounceSessionEnded)]
+    canceled = [
+        trace for trace in traces(commands) if trace.kind == "SessionEndCanceled"
+    ]
+    assert len(canceled) == 1
+    assert canceled[0].level == "info"
+    assert canceled[0].payload["reason"] == "COMPLETED"
+    assert canceled[0].payload["cause"] == "audio_overrun"
+    assert canceled[0].payload["connection_id"] == "s1"
+    assert canceled[0].payload["session_id"] == "s1"
+
+
+def test_end_session_after_ceiling_cancellation_reopens_the_pending_close():
+    """Après annulation, la Session est normale : un nouvel appel rouvre la clôture."""
+    coordinator = _coordinator()
+    drive(coordinator, visible_session())
+    _call(coordinator, tool_id="t1")
+    handle(coordinator, TimerFired(connection_id=end_session_ceiling_timer_id("s1")))
+
+    commands = _call(coordinator, tool_id="t2")
+
+    assert _start_timers(commands) == [
+        StartIdleTimer(
+            connection_id="s1", timeout=END_SESSION_GRACE_TIMEOUT
+        ),
+        StartIdleTimer(
+            connection_id=end_session_ceiling_timer_id("s1"),
+            timeout=END_SESSION_CEILING_TIMEOUT,
+        ),
+    ]
+    assert coordinator.state is SessionState.SESSION_VISIBLE
+    # La grâce referme de nouveau, cette fois par le chemin COMPLETED.
+    handle(coordinator, TimerFired(connection_id="s1"))
+    assert coordinator.state is SessionState.IDLE
+
+
+def test_another_teardown_cancels_the_ceiling_and_ignores_it_afterwards():
+    """Un arrêt pendant la clôture annule le plafond ; l'échéance tardive est inerte."""
+    coordinator = _coordinator()
+    drive(coordinator, visible_session())
+    _call(coordinator)
+    ceiling = end_session_ceiling_timer_id("s1")
+
+    commands = handle(coordinator, ShutdownRequested())
+
+    assert CancelIdleTimer(connection_id=ceiling) in effects(commands)
+    assert coordinator.state is SessionState.IDLE
+    stale = handle(coordinator, TimerFired(connection_id=ceiling))
+    assert coordinator.state is SessionState.IDLE
+    assert not [c for c in stale if isinstance(c, CloseLiveConnection)]
+    assert not [c for c in stale if isinstance(c, AnnounceSessionEnded)]
+    assert traces(stale)[0].level == "debug"
+
+
+def test_new_session_after_completed_close_ignores_the_stale_ceiling():
+    """Une clé de plafond périmée ne touche jamais la Session suivante."""
+    coordinator = _coordinator()
+    drive(coordinator, visible_session())
+    _call(coordinator)
+    handle(coordinator, TimerFired(connection_id=end_session_ceiling_timer_id("s1")))
+    drive(
+        coordinator,
+        [SessionRequested(client_id="c2"), LlmOpened(), LlmAudio(data=b"bonjour")],
+    )
+    assert coordinator.connection_id == "s2"
+
+    stale = handle(
+        coordinator,
+        TimerFired(connection_id=end_session_ceiling_timer_id("s1")),
+    )
+
+    assert coordinator.state is SessionState.SESSION_VISIBLE
+    assert coordinator.connection_id == "s2"
+    assert not [c for c in stale if isinstance(c, CloseLiveConnection)]
+    assert not [c for c in stale if isinstance(c, AnnounceSessionEnded)]
 
 
 def test_llm_audio_during_pending_rearms_the_grace_not_the_idle_timeout():
