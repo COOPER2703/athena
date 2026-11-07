@@ -51,6 +51,8 @@ from google_workspace_harness import (
     declared,
     gmail_message_list,
     gmail_metadata,
+    gmail_read_message,
+    gmail_read_thread,
     google_workspace_session,
     install_google_workspace,
     live_session,
@@ -102,6 +104,40 @@ GMAIL_SEARCH_PARAMETERS: dict[str, Any] = {
         },
     },
     "required": ["query"],
+}
+
+GMAIL_READ_DESCRIPTION = "Lit un message ou un fil Gmail en texte."
+
+GMAIL_READ_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "message_id": {
+            "type": "string",
+            "description": (
+                "Identifiant du message Gmail à lire ; exclusif avec thread_id."
+            ),
+        },
+        "thread_id": {
+            "type": "string",
+            "description": (
+                "Identifiant du fil Gmail à lire ; exclusif avec message_id."
+            ),
+        },
+        "account": {
+            "type": "string",
+            "description": (
+                "Clé du compte Google à utiliser ; le compte par défaut "
+                "quand il est absent."
+            ),
+        },
+        "max_messages": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20,
+            "description": "Nombre de messages lus dans un fil, de 1 à 20. Défaut 10.",
+        },
+    },
+    "required": [],
 }
 
 CALENDAR_LIST_EVENTS_DESCRIPTION = (
@@ -196,6 +232,7 @@ INSTRUCTION = INSTRUCTION_TEMPLATE.replace("{accounts}", "pro, perso").replace(
 )
 
 MESSAGES_PATH = "/gmail/v1/users/me/messages"
+THREADS_PATH = "/gmail/v1/users/me/threads"
 CALENDAR_EVENTS_BASE = "/calendar/v3/calendars"
 CALENDAR_PRIMARY_PATH = f"{CALENDAR_EVENTS_BASE}/primary/events"
 TOKEN_SECRETS = (
@@ -385,7 +422,11 @@ def test_each_account_refresh_token_is_exchanged_at_startup(
                 assert row == {
                     "name": "google-workspace",
                     "state": "activated",
-                    "tools": ["calendar_list_events", "gmail_search"],
+                    "tools": [
+                        "calendar_list_events",
+                        "gmail_read",
+                        "gmail_search",
+                    ],
                 }
 
                 # Un échange par compte, avec le formulaire OAuth exact.
@@ -539,8 +580,9 @@ def test_all_accounts_unavailable_degrades_the_start_then_repairs(
                     )
                     assert payload["status"] == "ok"
                     assert set(declared(live)) == {
-                        "gmail_search",
                         "calendar_list_events",
+                        "gmail_read",
+                        "gmail_search",
                     }
 
     asyncio.run(scenario())
@@ -1070,6 +1112,7 @@ def test_the_tool_instruction_and_console_row_are_exact(
                 tools = declared(live)
                 assert set(tools) == {
                     "gmail_search",
+                    "gmail_read",
                     "calendar_list_events",
                 }
                 assert (
@@ -1080,6 +1123,13 @@ def test_the_tool_instruction_and_console_row_are_exact(
                     tools["gmail_search"].description
                     == GMAIL_SEARCH_DESCRIPTION
                 )
+                assert (
+                    dict(tools["gmail_read"].parameters_json_schema)
+                    == GMAIL_READ_PARAMETERS
+                )
+                assert (
+                    tools["gmail_read"].description == GMAIL_READ_DESCRIPTION
+                )
 
                 # Les libellés normalisés sont les noms montrés à Gemini.
                 assert INSTRUCTION in live.instruction()
@@ -1087,6 +1137,7 @@ def test_the_tool_instruction_and_console_row_are_exact(
                 [row] = app.snapshot()["plugins"]
                 assert row["tools"] == [
                     "calendar_list_events",
+                    "gmail_read",
                     "gmail_search",
                 ]
 
@@ -1195,6 +1246,411 @@ def test_an_error_traces_tool_called_and_tool_failed_without_content(
                 assert failed.payload["account"] == "perso"
                 assert failed.payload["status"] == "HTTP 403"
                 assert "requête secrète" not in _traces_json(sink)
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Contrat de ``gmail_read`` : message, fil, corps, pièces jointes
+# ---------------------------------------------------------------------------
+
+
+def test_gmail_read_fetches_a_message_and_returns_its_text(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            message = gmail_read_message(
+                "m1",
+                thread_id="t1",
+                sender="Camille <camille@example.test>",
+                recipients="Cooper <cooper@example.test>",
+                cc="Bureau <bureau@example.test>",
+                subject="Déjeuner jeudi",
+                date="Thu, 5 Nov 2026 10:00:00 +0100",
+                plain="On se retrouve à midi ?\nÀ bientôt.",
+                attachments=("menu.pdf",),
+            )
+            stub.route("GET", f"{MESSAGES_PATH}/m1", body=message)
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session, "gmail_read", {"message_id": "m1"}
+                )
+
+                assert payload == {
+                    "status": "ok",
+                    "account": "perso",
+                    "thread_id": "t1",
+                    "messages": [
+                        {
+                            "id": "m1",
+                            "from": "Camille <camille@example.test>",
+                            "to": "Cooper <cooper@example.test>",
+                            "cc": "Bureau <bureau@example.test>",
+                            "subject": "Déjeuner jeudi",
+                            "date": "Thu, 5 Nov 2026 10:00:00 +0100",
+                            "body": "On se retrouve à midi ?\nÀ bientôt.",
+                            "truncated": False,
+                            "attachments": ["menu.pdf"],
+                        }
+                    ],
+                }
+
+                # Une seule requête : la pièce jointe n'est jamais téléchargée.
+                [request] = stub.gmail_requests
+                assert request["path"] == f"{MESSAGES_PATH}/m1"
+                assert request["query"] == {"format": ["full"]}
+                assert request["authorization"] == f"Bearer {ACCESS_TOKEN_PERSO}"
+
+    asyncio.run(scenario())
+
+
+def test_gmail_read_reads_a_thread_bounded_by_max_messages(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            thread = gmail_read_thread(
+                "t1",
+                gmail_read_message(
+                    "m1",
+                    thread_id="t1",
+                    subject="Déjeuner jeudi",
+                    plain="Premier message.",
+                ),
+                gmail_read_message(
+                    "m2",
+                    thread_id="t1",
+                    subject="Re: Déjeuner jeudi",
+                    plain="Deuxième message.",
+                ),
+                gmail_read_message(
+                    "m3",
+                    thread_id="t1",
+                    subject="Re: Déjeuner jeudi",
+                    plain="Troisième message.",
+                ),
+            )
+            stub.route("GET", f"{THREADS_PATH}/t1", body=thread)
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "gmail_read",
+                    {"thread_id": "t1", "max_messages": 2},
+                )
+
+                assert payload["status"] == "ok"
+                assert payload["account"] == "perso"
+                assert payload["thread_id"] == "t1"
+                assert [message["id"] for message in payload["messages"]] == [
+                    "m1",
+                    "m2",
+                ]
+                # Le fil contenait plus de messages que la borne : annoncé.
+                assert payload["truncated"] is True
+
+                # Un seul GET de fil : aucun message n'est relu séparément.
+                [request] = stub.gmail_requests
+                assert request["path"] == f"{THREADS_PATH}/t1"
+                assert request["query"] == {"format": ["full"]}
+
+    asyncio.run(scenario())
+
+
+def test_gmail_read_defaults_a_thread_to_ten_and_caps_at_twenty(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            thread = gmail_read_thread(
+                "t1",
+                *(
+                    gmail_read_message(
+                        f"m{index}", thread_id="t1", plain=f"Message {index}."
+                    )
+                    for index in range(1, 26)
+                ),
+            )
+            stub.route("GET", f"{THREADS_PATH}/t1", body=thread)
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                default = await call_tool(
+                    session, "gmail_read", {"thread_id": "t1"}
+                )
+                capped = await call_tool(
+                    session,
+                    "gmail_read",
+                    {"thread_id": "t1", "max_messages": 99},
+                )
+                floored = await call_tool(
+                    session,
+                    "gmail_read",
+                    {"thread_id": "t1", "max_messages": 0},
+                )
+
+                assert len(default["messages"]) == 10
+                assert [message["id"] for message in default["messages"]][0] == "m1"
+                assert len(capped["messages"]) == 20
+                assert len(floored["messages"]) == 1
+
+    asyncio.run(scenario())
+
+
+def test_gmail_read_falls_back_to_cleaned_html_and_prefers_plain_text(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "GET",
+                f"{MESSAGES_PATH}/html",
+                body=gmail_read_message(
+                    "html",
+                    plain=None,
+                    html=(
+                        "<html><body><p>Bonjour&nbsp;Camille,</p>"
+                        "<p>Voici le <b>compte rendu</b>.</p>"
+                        "<script>alert('secret')</script></body></html>"
+                    ),
+                ),
+            )
+            stub.route(
+                "GET",
+                f"{MESSAGES_PATH}/both",
+                body=gmail_read_message(
+                    "both",
+                    plain="La version texte.",
+                    html="<p>La version HTML.</p>",
+                ),
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                [html_only] = (await call_tool(
+                    session, "gmail_read", {"message_id": "html"}
+                ))["messages"]
+                [both] = (await call_tool(
+                    session, "gmail_read", {"message_id": "both"}
+                ))["messages"]
+
+                assert html_only["body"] == (
+                    "Bonjour Camille,\nVoici le compte rendu."
+                )
+                assert "secret" not in html_only["body"]
+                assert html_only["truncated"] is False
+                # Le texte brut l'emporte quand les deux existent.
+                assert both["body"] == "La version texte."
+
+    asyncio.run(scenario())
+
+
+def test_gmail_read_truncates_a_long_body_at_six_thousand_characters(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            long_body = "x" * 6500 + "FIN"
+            stub.route(
+                "GET",
+                f"{MESSAGES_PATH}/long",
+                body=gmail_read_message("long", plain=long_body),
+            )
+            stub.route(
+                "GET",
+                f"{MESSAGES_PATH}/exact",
+                body=gmail_read_message("exact", plain="y" * 6000),
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                truncated = await call_tool(
+                    session, "gmail_read", {"message_id": "long"}
+                )
+                exact = await call_tool(
+                    session, "gmail_read", {"message_id": "exact"}
+                )
+
+                [message] = truncated["messages"]
+                assert message["body"] == long_body[:6000]
+                assert len(message["body"]) == 6000
+                assert message["truncated"] is True
+                # La coupe est aussi annoncée au niveau de la réponse.
+                assert truncated["truncated"] is True
+
+                [whole] = exact["messages"]
+                assert whole["body"] == "y" * 6000
+                assert whole["truncated"] is False
+                assert "truncated" not in exact
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"message_id": "m1", "thread_id": "t1"},
+        {},
+        {"message_id": "   "},
+    ],
+    ids=["both", "neither", "blank"],
+)
+def test_gmail_read_refuses_a_missing_or_doubled_identifier_before_any_call(
+    tmp_path: Path, arguments: dict[str, Any]
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                sink,
+                _,
+            ):
+                payload = await call_tool(session, "gmail_read", arguments)
+
+                assert payload["status"] == "error"
+                assert payload["message"].startswith(
+                    "La lecture du message Gmail n'a pas abouti"
+                )
+                assert stub.gmail_requests == []
+                failed = sink.of_kind("ToolFailed")[-1]
+                assert failed.payload["tool"] == "gmail_read"
+                assert failed.payload["status"] == "invalid_identifier"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("status", "fragment"),
+    [
+        (404, "introuvable"),
+        (500, "indisponible"),
+        (403, "refusé"),
+    ],
+)
+def test_gmail_read_turns_an_http_status_into_a_french_sentence(
+    tmp_path: Path, status: int, fragment: str
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "GET",
+                f"{MESSAGES_PATH}/m1",
+                status=status,
+                body={"error": {"code": status}},
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                sink,
+                app_sink,
+            ):
+                payload = await call_tool(
+                    session, "gmail_read", {"message_id": "m1"}
+                )
+
+                assert payload["status"] == "error"
+                assert payload["message"].startswith(
+                    "La lecture du message Gmail n'a pas abouti"
+                )
+                assert fragment in payload["message"]
+                # Aucun rejeu, aucun rafraîchissement supplémentaire.
+                assert len(stub.requests_for("GET", f"{MESSAGES_PATH}/m1")) == 1
+                assert len(stub.token_requests) == 2
+                assert sink.of_kind("ToolFailed")[-1].payload["status"] == (
+                    f"HTTP {status}"
+                )
+                assert not app_sink.of_kind("SessionClosed")
+
+    asyncio.run(scenario())
+
+
+def test_gmail_read_traces_carry_no_identifier_address_subject_or_body(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            message = gmail_read_message(
+                "m-secret-1",
+                thread_id="t-secret-1",
+                sender="secret@example.test",
+                subject="Objet très confidentiel",
+                plain="Le corps secret du message.",
+                attachments=("facture-secrete.pdf",),
+            )
+            stub.route(
+                "GET", f"{MESSAGES_PATH}/m-secret-1", body=message
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                sink,
+                _,
+            ):
+                payload = await call_tool(
+                    session, "gmail_read", {"message_id": "m-secret-1"}
+                )
+                assert payload["status"] == "ok"
+
+                [called] = sink.of_kind("ToolCalled")
+                assert called.payload == {
+                    "plugin": "google-workspace",
+                    "tool": "gmail_read",
+                    "account": "perso",
+                    "duration_ms": called.payload["duration_ms"],
+                    "status": "ok",
+                    "result_count": 1,
+                }
+                assert isinstance(called.payload["duration_ms"], (int, float))
+
+                rendered = _traces_json(sink)
+                for forbidden in (
+                    *TOKEN_SECRETS,
+                    ACCESS_TOKEN_PERSO,
+                    "m-secret-1",
+                    "t-secret-1",
+                    "secret@example.test",
+                    "Objet très confidentiel",
+                    "Le corps secret du message.",
+                    "facture-secrete.pdf",
+                    MESSAGES_PATH,
+                ):
+                    assert forbidden not in rendered
 
     asyncio.run(scenario())
 
@@ -1935,7 +2391,11 @@ def test_the_console_snapshot_shows_the_activated_plugin_and_its_tools(
                     {
                         "name": "google-workspace",
                         "state": "activated",
-                        "tools": ["calendar_list_events", "gmail_search"],
+                        "tools": [
+                            "calendar_list_events",
+                            "gmail_read",
+                            "gmail_search",
+                        ],
                     }
                 ]
                 assert app.plugins.tools.owner_of("gmail_search") == (
@@ -1944,6 +2404,7 @@ def test_the_console_snapshot_shows_the_activated_plugin_and_its_tools(
                 async with live_session(transport, live) as _session:
                     assert set(declared(live)) == {
                         "calendar_list_events",
+                        "gmail_read",
                         "gmail_search",
                     }
 
@@ -1952,7 +2413,7 @@ def test_the_console_snapshot_shows_the_activated_plugin_and_its_tools(
                     for entry in sink.of_kind("PluginState")
                     if entry.payload["state"] == "activated"
                 ]
-                assert activated.payload["tools"] == 2
+                assert activated.payload["tools"] == 3
                 assert states(sink) == ["activated"]
 
     asyncio.run(scenario())
@@ -2010,7 +2471,11 @@ def test_all_accounts_failing_degrades_the_start_and_retries_globally(
                     {
                         "name": "google-workspace",
                         "state": "activated",
-                        "tools": ["calendar_list_events", "gmail_search"],
+                        "tools": [
+                            "calendar_list_events",
+                            "gmail_read",
+                            "gmail_search",
+                        ],
                     }
                 ]
                 [last] = [
@@ -2019,7 +2484,7 @@ def test_all_accounts_failing_degrades_the_start_and_retries_globally(
                     if entry.payload.get("retry") is True
                     and entry.payload["state"] == "activated"
                 ]
-                assert last.payload["tools"] == 2
+                assert last.payload["tools"] == 3
 
                 unavailable = sink.of_kind("AccountUnavailable")
                 assert {entry.payload["account"] for entry in unavailable} == {
