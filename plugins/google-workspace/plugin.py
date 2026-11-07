@@ -13,10 +13,11 @@ laisse le chargeur démarrer dégradé et retenter en tâche de fond (ADR-0014).
 Un appel de Tool, lui, ne lève jamais : une panne devient une phrase rendue au
 modèle.
 
-Le socle (comptes, jetons, HTTP, erreurs) est partagé : les Tools Gmail et
-Calendar des tickets suivants n'ajoutent qu'un schéma et une opération. Ce
-ticket apporte la recherche Gmail, la lecture de l'agenda, puis sa création,
-sa modification et sa suppression confirmée.
+Le socle (comptes, jetons, HTTP, erreurs) est partagé : le plugin expose
+huit Tools, quatre pour Gmail (``gmail_search``, ``gmail_read``,
+``gmail_send``, ``gmail_reply``) et quatre pour l'agenda
+(``calendar_list_events``, ``calendar_create_event``,
+``calendar_update_event``, ``calendar_delete_event``).
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from email.header import decode_header, make_header
 from email.message import EmailMessage
 from email.utils import formataddr, getaddresses
 from typing import Any, Iterable, Mapping
@@ -279,7 +281,13 @@ CALENDAR_LIST_EVENTS_PARAMETERS: Mapping[str, object] = {
             "type": "integer",
             "minimum": 1,
             "maximum": 50,
-            "description": "Nombre d'événements rendus, de 1 à 50. Défaut 10.",
+            "description": (
+                "Nombre d'Événements d'agenda rendus, de 1 à 50. Défaut 10."
+            ),
+        },
+        "page_token": {
+            "type": "string",
+            "description": "Jeton de page rendu par l'appel précédent.",
         },
         "calendar_id": {
             "type": "string",
@@ -287,7 +295,7 @@ CALENDAR_LIST_EVENTS_PARAMETERS: Mapping[str, object] = {
         },
         "query": {
             "type": "string",
-            "description": "Recherche plein texte dans les événements.",
+            "description": "Recherche plein texte dans les Événements d'agenda.",
         },
     },
 }
@@ -299,7 +307,7 @@ CALENDAR_CREATE_EVENT_PARAMETERS: Mapping[str, object] = {
     "properties": {
         "summary": {
             "type": "string",
-            "description": "Titre de l'événement.",
+            "description": "Titre de l'Événement d'agenda.",
         },
         "start": {
             "type": "string",
@@ -321,11 +329,11 @@ CALENDAR_CREATE_EVENT_PARAMETERS: Mapping[str, object] = {
         },
         "description": {
             "type": "string",
-            "description": "Description de l'événement.",
+            "description": "Description de l'Événement d'agenda.",
         },
         "location": {
             "type": "string",
-            "description": "Lieu de l'événement.",
+            "description": "Lieu de l'Événement d'agenda.",
         },
         "attendees": {
             "type": "array",
@@ -359,7 +367,8 @@ CALENDAR_UPDATE_EVENT_PARAMETERS: Mapping[str, object] = {
         "event_id": {
             "type": "string",
             "description": (
-                "Identifiant de l'événement rendu par `calendar_list_events`."
+                "Identifiant de l'Événement d'agenda rendu par "
+                "`calendar_list_events`."
             ),
         },
         "calendar_id": {
@@ -426,7 +435,8 @@ CALENDAR_DELETE_EVENT_PARAMETERS: Mapping[str, object] = {
         "event_id": {
             "type": "string",
             "description": (
-                "Identifiant de l'événement rendu par `calendar_list_events`."
+                "Identifiant de l'Événement d'agenda rendu par "
+                "`calendar_list_events`."
             ),
         },
         "calendar_id": {
@@ -498,6 +508,43 @@ INSTRUCTION_TEMPLATE = (
 
 # -- Phrases françaises -------------------------------------------------------
 
+
+@dataclass(frozen=True, slots=True)
+class _StatusReasons:
+    """Fragments français d'un statut HTTP, communs à tous les domaines."""
+
+    validation: str
+    forbidden: str
+    not_found: str
+    service: str
+    not_found_statuses: tuple[int, ...] = (404,)
+
+
+def _status_message(status: int, prefix: str, reasons: _StatusReasons) -> str:
+    """Phrase française d'un statut HTTP, toujours préfixée par l'action."""
+    if status == 400:
+        return prefix + reasons.validation
+    if status == 401:
+        return prefix + "l'accès au compte a été refusé. Réessaie dans un instant."
+    if status == 403:
+        return prefix + reasons.forbidden
+    if status in reasons.not_found_statuses:
+        return prefix + reasons.not_found
+    if status in (429, 529):
+        return prefix + "trop de requêtes ont été envoyées. Réessaie dans un instant."
+    if status >= 500:
+        return (
+            prefix
+            + f"le service {reasons.service} est indisponible "
+            f"(réponse {status})."
+        )
+    return (
+        prefix
+        + f"le service {reasons.service} a renvoyé une erreur "
+        f"(réponse {status})."
+    )
+
+
 _SEARCH_PREFIX = "La recherche Gmail n'a pas abouti : "
 
 _UNREACHABLE_MESSAGE = (
@@ -511,19 +558,11 @@ _UNREADABLE_MESSAGE = (
     _SEARCH_PREFIX
     + "le service Gmail a renvoyé une réponse illisible. Réessaie dans un instant."
 )
-_REFUSED_MESSAGE = (
-    _SEARCH_PREFIX + "l'accès au compte a été refusé. Réessaie dans un instant."
-)
-_FORBIDDEN_MESSAGE = _SEARCH_PREFIX + "l'accès à ce compte est refusé."
-_RATE_MESSAGE = (
-    _SEARCH_PREFIX
-    + "trop de requêtes ont été envoyées. Réessaie dans un instant."
-)
-_VALIDATION_MESSAGE = (
-    _SEARCH_PREFIX + "la requête a été refusée. Vérifie la syntaxe de recherche."
-)
-_NOT_FOUND_MESSAGE = (
-    _SEARCH_PREFIX + "le message ou la boîte demandée est introuvable."
+_SEARCH_STATUS_REASONS = _StatusReasons(
+    validation="la requête a été refusée. Vérifie la syntaxe de recherche.",
+    forbidden="l'accès à ce compte est refusé.",
+    not_found="le message ou la boîte demandée est introuvable.",
+    service="Gmail",
 )
 
 _READ_PREFIX = "La lecture du message Gmail n'a pas abouti : "
@@ -539,20 +578,13 @@ _READ_UNREADABLE_MESSAGE = (
     _READ_PREFIX
     + "le service Gmail a renvoyé une réponse illisible. Réessaie dans un instant."
 )
-_READ_REFUSED_MESSAGE = (
-    _READ_PREFIX + "l'accès au compte a été refusé. Réessaie dans un instant."
-)
-_READ_FORBIDDEN_MESSAGE = _READ_PREFIX + "l'accès à ce compte est refusé."
-_READ_RATE_MESSAGE = (
-    _READ_PREFIX
-    + "trop de requêtes ont été envoyées. Réessaie dans un instant."
-)
-_READ_VALIDATION_MESSAGE = (
-    _READ_PREFIX
-    + "la requête a été refusée. Vérifie l'identifiant du message ou du fil."
-)
-_READ_NOT_FOUND_MESSAGE = (
-    _READ_PREFIX + "le message ou le fil demandé est introuvable."
+_READ_STATUS_REASONS = _StatusReasons(
+    validation=(
+        "la requête a été refusée. Vérifie l'identifiant du message ou du fil."
+    ),
+    forbidden="l'accès à ce compte est refusé.",
+    not_found="le message ou le fil demandé est introuvable.",
+    service="Gmail",
 )
 
 # Phrases propres à l'agenda : un échec de lecture ne nomme jamais Gmail.
@@ -571,20 +603,15 @@ _CALENDAR_UNREADABLE_MESSAGE = (
     + "le service Agenda a renvoyé une réponse illisible. "
     "Réessaie dans un instant."
 )
-_CALENDAR_REFUSED_MESSAGE = (
-    _CALENDAR_PREFIX
-    + "l'accès au compte a été refusé. Réessaie dans un instant."
+_CALENDAR_STATUS_REASONS = _StatusReasons(
+    validation=(
+        "la période ou la requête a été refusée. "
+        "Vérifie les dates demandées."
+    ),
+    forbidden="l'accès à cet agenda est refusé.",
+    not_found="l'agenda demandé est introuvable.",
+    service="Agenda",
 )
-_CALENDAR_FORBIDDEN_MESSAGE = _CALENDAR_PREFIX + "l'accès à cet agenda est refusé."
-_CALENDAR_RATE_MESSAGE = (
-    _CALENDAR_PREFIX
-    + "trop de requêtes ont été envoyées. Réessaie dans un instant."
-)
-_CALENDAR_VALIDATION_MESSAGE = (
-    _CALENDAR_PREFIX
-    + "la période ou la requête a été refusée. Vérifie les dates demandées."
-)
-_CALENDAR_NOT_FOUND_MESSAGE = _CALENDAR_PREFIX + "l'agenda demandé est introuvable."
 
 # Phrases propres à l'envoi et à la réponse : le préfixe change, pas le reste.
 _SEND_PREFIX = "L'envoi du mail n'a pas abouti : "
@@ -599,11 +626,12 @@ _DELIVERY_TIMEOUT = (
 _DELIVERY_UNREADABLE = (
     "le service Gmail a renvoyé une réponse illisible. Réessaie dans un instant."
 )
-_DELIVERY_REFUSED = "l'accès au compte a été refusé. Réessaie dans un instant."
-_DELIVERY_FORBIDDEN = "l'accès à ce compte est refusé."
-_DELIVERY_RATE = "trop de requêtes ont été envoyées. Réessaie dans un instant."
-_DELIVERY_VALIDATION = "la requête a été refusée."
-_DELIVERY_NOT_FOUND = "le message demandé est introuvable."
+_DELIVERY_STATUS_REASONS = _StatusReasons(
+    validation="la requête a été refusée.",
+    forbidden="l'accès à ce compte est refusé.",
+    not_found="le message demandé est introuvable.",
+    service="Gmail",
+)
 
 # Phrases propres aux écritures : chacune nomme l'action tentée.
 _CALENDAR_CREATE_PREFIX = (
@@ -621,14 +649,23 @@ _CALENDAR_CREATE_VALIDATION_MESSAGE = (
     + "le titre, le début et la fin sont requis."
 )
 _CALENDAR_UPDATE_VALIDATION_MESSAGE = (
-    _CALENDAR_UPDATE_PREFIX + "l'identifiant de l'événement est requis."
+    _CALENDAR_UPDATE_PREFIX + "l'identifiant de l'Événement d'agenda est requis."
 )
 _CALENDAR_DELETE_VALIDATION_MESSAGE = (
-    _CALENDAR_DELETE_PREFIX + "l'identifiant de l'événement est requis."
+    _CALENDAR_DELETE_PREFIX + "l'identifiant de l'Événement d'agenda est requis."
 )
 _CALENDAR_DELETE_CONFIRM_MESSAGE = (
     _CALENDAR_DELETE_PREFIX
     + "une confirmation explicite est requise (confirm=true)."
+)
+_CALENDAR_WRITE_STATUS_REASONS = _StatusReasons(
+    validation=(
+        "les données de l'Événement d'agenda ont été refusées. "
+        "Vérifie les dates et le titre."
+    ),
+    forbidden="l'accès à cet agenda est refusé.",
+    not_found="l'Événement d'agenda ou l'agenda est introuvable.",
+    service="Agenda",
 )
 
 
@@ -666,7 +703,6 @@ class _Account:
     """Un Compte Google et son client OAuth ; aucun secret n'est jamais tracé."""
 
     key: str
-    label: str
     client_id: str
     client_secret: str
     refresh_token: str
@@ -825,7 +861,6 @@ def _settings(context: PluginContext) -> _Settings:
         accounts.append(
             _Account(
                 key=key,
-                label=label,
                 client_id=client_id,
                 client_secret=client_secret,
                 refresh_token=refresh_token,
@@ -1084,22 +1119,7 @@ def _json_body(response: httpx2.Response) -> Mapping[str, Any]:
 
 def _status_error(status: int) -> str:
     """Phrase française d'un statut Gmail, jamais une exception brute."""
-    if status == 400:
-        return _VALIDATION_MESSAGE
-    if status == 401:
-        return _REFUSED_MESSAGE
-    if status == 403:
-        return _FORBIDDEN_MESSAGE
-    if status == 404:
-        return _NOT_FOUND_MESSAGE
-    if status in (429, 529):
-        return _RATE_MESSAGE
-    if status >= 500:
-        return (
-            _SEARCH_PREFIX
-            + f"le service Gmail est indisponible (réponse {status})."
-        )
-    return _SEARCH_PREFIX + f"le service Gmail a renvoyé une erreur (réponse {status})."
+    return _status_message(status, _SEARCH_PREFIX, _SEARCH_STATUS_REASONS)
 
 
 # -- HTTP de ``gmail_read`` ---------------------------------------------------
@@ -1138,19 +1158,7 @@ def _read_json_body(response: httpx2.Response) -> Mapping[str, Any]:
 
 def _read_status_error(status: int) -> str:
     """Phrase française d'un statut Gmail rencontré en lecture."""
-    if status == 400:
-        return _READ_VALIDATION_MESSAGE
-    if status == 401:
-        return _READ_REFUSED_MESSAGE
-    if status == 403:
-        return _READ_FORBIDDEN_MESSAGE
-    if status == 404:
-        return _READ_NOT_FOUND_MESSAGE
-    if status in (429, 529):
-        return _READ_RATE_MESSAGE
-    if status >= 500:
-        return _READ_PREFIX + f"le service Gmail est indisponible (réponse {status})."
-    return _READ_PREFIX + f"le service Gmail a renvoyé une erreur (réponse {status})."
+    return _status_message(status, _READ_PREFIX, _READ_STATUS_REASONS)
 
 
 # -- Tool ``gmail_search`` ----------------------------------------------------
@@ -1159,7 +1167,7 @@ def _read_status_error(status: int) -> str:
 def _tool_bindings(
     settings: _Settings, trace: Trace
 ) -> tuple[ToolBinding, ...]:
-    """Les Tools du plugin ; le socle ajoute ici ceux des tickets suivants."""
+    """Les huit Tools du plugin : quatre Gmail et quatre Calendar."""
     return (
         _gmail_search_tool(settings, trace),
         _gmail_read_tool(settings, trace),
@@ -1199,14 +1207,9 @@ async def _gmail_search(
 
     account = _resolve_account(settings, arguments.get("account"))
     if account is None:
-        raw = arguments.get("account")
-        shown = raw.strip() if isinstance(raw, str) and raw.strip() else ""
-        key = _account_key(shown) if shown else ""
-        message = (
-            f"Le compte « {shown} » est inconnu. "
-            f"Comptes disponibles : {_account_names(settings)}."
+        return _unknown_account_failure(
+            settings, arguments, trace, tool, started
         )
-        return _fail(trace, tool, key, started, "invalid_account", message)
 
     query = arguments.get("query")
     if not isinstance(query, str) or not query.strip():
@@ -1341,8 +1344,16 @@ def _headers(message: Mapping[str, Any]) -> dict[str, str]:
                 name = header.get("name")
                 value = header.get("value")
                 if isinstance(name, str) and isinstance(value, str):
-                    values[name.lower()] = value
+                    values[name.lower()] = _decoded_header(value)
     return values
+
+
+def _decoded_header(value: str) -> str:
+    """Décode un en-tête RFC 2047 ; un encodage cassé rend la valeur d'origine."""
+    try:
+        return str(make_header(decode_header(value)))
+    except Exception:
+        return value
 
 
 def _message_id(item: object) -> str | None:
@@ -1385,16 +1396,8 @@ async def _gmail_send(
 
     account = _resolve_account(settings, arguments.get("account"))
     if account is None:
-        raw = arguments.get("account")
-        shown = raw.strip() if isinstance(raw, str) and raw.strip() else ""
-        key = _account_key(shown) if shown else ""
-        return _fail(
-            trace,
-            tool,
-            key,
-            started,
-            "invalid_account",
-            _unknown_account_message(settings, shown),
+        return _unknown_account_failure(
+            settings, arguments, trace, tool, started
         )
 
     to = _addresses(arguments.get("to"))
@@ -1508,16 +1511,8 @@ async def _gmail_reply(
 
     account = _resolve_account(settings, arguments.get("account"))
     if account is None:
-        raw = arguments.get("account")
-        shown = raw.strip() if isinstance(raw, str) and raw.strip() else ""
-        key = _account_key(shown) if shown else ""
-        return _fail(
-            trace,
-            tool,
-            key,
-            started,
-            "invalid_account",
-            _unknown_account_message(settings, shown),
+        return _unknown_account_failure(
+            settings, arguments, trace, tool, started
         )
 
     message_id = _optional_text(arguments.get("message_id"))
@@ -1895,25 +1890,34 @@ async def _delivery_request(
 
 def _delivery_status_error(prefix: str, status: int) -> str:
     """Phrase française d'un statut Gmail pour l'envoi ou la réponse."""
-    if status == 400:
-        return prefix + _DELIVERY_VALIDATION
-    if status == 401:
-        return prefix + _DELIVERY_REFUSED
-    if status == 403:
-        return prefix + _DELIVERY_FORBIDDEN
-    if status in (404, 410):
-        return prefix + _DELIVERY_NOT_FOUND
-    if status in (429, 529):
-        return prefix + _DELIVERY_RATE
-    if status >= 500:
-        return prefix + f"le service Gmail est indisponible (réponse {status})."
-    return prefix + f"le service Gmail a renvoyé une erreur (réponse {status})."
+    return _status_message(status, prefix, _DELIVERY_STATUS_REASONS)
 
 
 def _unknown_account_message(settings: _Settings, shown: str) -> str:
     return (
         f"Le compte « {shown} » est inconnu. "
         f"Comptes disponibles : {_account_names(settings)}."
+    )
+
+
+def _unknown_account_failure(
+    settings: _Settings,
+    arguments: Mapping[str, object],
+    trace: Trace,
+    tool: str,
+    started: float,
+) -> Mapping[str, object]:
+    """Refus unique d'un compte inconnu, avant tout appel réseau."""
+    raw = arguments.get("account")
+    shown = raw.strip() if isinstance(raw, str) and raw.strip() else ""
+    key = _account_key(shown) if shown else ""
+    return _fail(
+        trace,
+        tool,
+        key,
+        started,
+        "invalid_account",
+        _unknown_account_message(settings, shown),
     )
 
 
@@ -1949,14 +1953,9 @@ async def _calendar_list_events(
 
     account = _resolve_account(settings, arguments.get("account"))
     if account is None:
-        raw = arguments.get("account")
-        shown = raw.strip() if isinstance(raw, str) and raw.strip() else ""
-        key = _account_key(shown) if shown else ""
-        message = (
-            f"Le compte « {shown} » est inconnu. "
-            f"Comptes disponibles : {_account_names(settings)}."
+        return _unknown_account_failure(
+            settings, arguments, trace, tool, started
         )
-        return _fail(trace, tool, key, started, "invalid_account", message)
 
     calendar_id = _optional_text(arguments.get("calendar_id")) or "primary"
     time_min, time_max = _calendar_window(
@@ -2196,25 +2195,7 @@ def _calendar_json_body(response: httpx2.Response) -> Mapping[str, Any]:
 
 def _calendar_status_error(status: int) -> str:
     """Phrase française d'un statut Calendar, jamais une exception brute."""
-    if status == 400:
-        return _CALENDAR_VALIDATION_MESSAGE
-    if status == 401:
-        return _CALENDAR_REFUSED_MESSAGE
-    if status == 403:
-        return _CALENDAR_FORBIDDEN_MESSAGE
-    if status == 404:
-        return _CALENDAR_NOT_FOUND_MESSAGE
-    if status in (429, 529):
-        return _CALENDAR_RATE_MESSAGE
-    if status >= 500:
-        return (
-            _CALENDAR_PREFIX
-            + f"le service Agenda est indisponible (réponse {status})."
-        )
-    return (
-        _CALENDAR_PREFIX
-        + f"le service Agenda a renvoyé une erreur (réponse {status})."
-    )
+    return _status_message(status, _CALENDAR_PREFIX, _CALENDAR_STATUS_REASONS)
 
 
 # -- Tools ``calendar_create_event``, ``calendar_update_event`` et
@@ -2286,14 +2267,9 @@ async def _calendar_create_event(
 
     account = _resolve_account(settings, arguments.get("account"))
     if account is None:
-        raw = arguments.get("account")
-        shown = raw.strip() if isinstance(raw, str) and raw.strip() else ""
-        key = _account_key(shown) if shown else ""
-        message = (
-            f"Le compte « {shown} » est inconnu. "
-            f"Comptes disponibles : {_account_names(settings)}."
+        return _unknown_account_failure(
+            settings, arguments, trace, tool, started
         )
-        return _fail(trace, tool, key, started, "invalid_account", message)
 
     summary = _optional_text(arguments.get("summary"))
     start = _optional_text(arguments.get("start"))
@@ -2392,14 +2368,9 @@ async def _calendar_update_event(
 
     account = _resolve_account(settings, arguments.get("account"))
     if account is None:
-        raw = arguments.get("account")
-        shown = raw.strip() if isinstance(raw, str) and raw.strip() else ""
-        key = _account_key(shown) if shown else ""
-        message = (
-            f"Le compte « {shown} » est inconnu. "
-            f"Comptes disponibles : {_account_names(settings)}."
+        return _unknown_account_failure(
+            settings, arguments, trace, tool, started
         )
-        return _fail(trace, tool, key, started, "invalid_account", message)
 
     event_id = _optional_text(arguments.get("event_id"))
     if event_id is None:
@@ -2494,14 +2465,9 @@ async def _calendar_delete_event(
 
     account = _resolve_account(settings, arguments.get("account"))
     if account is None:
-        raw = arguments.get("account")
-        shown = raw.strip() if isinstance(raw, str) and raw.strip() else ""
-        key = _account_key(shown) if shown else ""
-        message = (
-            f"Le compte « {shown} » est inconnu. "
-            f"Comptes disponibles : {_account_names(settings)}."
+        return _unknown_account_failure(
+            settings, arguments, trace, tool, started
         )
-        return _fail(trace, tool, key, started, "invalid_account", message)
 
     event_id = _optional_text(arguments.get("event_id"))
     if event_id is None:
@@ -2666,18 +2632,23 @@ def _event_bound(
     *,
     exclusive: bool = False,
 ) -> dict[str, str]:
-    """Borne ``date`` ou ``dateTime`` ; une fin de journée entière est exclue."""
-    if not all_day:
-        return {"dateTime": value}
+    """Borne ``date`` ou ``dateTime`` ; une fin de journée entière est exclue.
+
+    Une valeur ``AAAA-MM-JJ`` suffit à faire une journée entière : le drapeau
+    ``all_day`` n'est requis que pour exiger ce format.
+    """
+    stripped = value.strip()
     try:
-        moment = date.fromisoformat(value.strip())
+        moment = date.fromisoformat(stripped)
     except ValueError as exc:
-        raise _RequestFailure(
-            prefix
-            + "la date de journée entière est invalide "
-            "(AAAA-MM-JJ attendu).",
-            "invalid_date",
-        ) from exc
+        if all_day:
+            raise _RequestFailure(
+                prefix
+                + "la date de journée entière est invalide "
+                "(AAAA-MM-JJ attendu).",
+                "invalid_date",
+            ) from exc
+        return {"dateTime": value}
     if exclusive:
         moment += timedelta(days=1)
     return {"date": moment.isoformat()}
@@ -2719,26 +2690,7 @@ def _calendar_write_json_body(
 
 def _calendar_write_status_error(status: int, prefix: str) -> str:
     """Phrase française d'un statut d'écriture Calendar."""
-    if status == 400:
-        return (
-            prefix
-            + "les données de l'événement ont été refusées. "
-            "Vérifie les dates et le titre."
-        )
-    if status == 401:
-        return prefix + "l'accès au compte a été refusé. Réessaie dans un instant."
-    if status == 403:
-        return prefix + "l'accès à cet agenda est refusé."
-    if status == 404:
-        return prefix + "l'événement ou l'agenda est introuvable."
-    if status in (429, 529):
-        return (
-            prefix
-            + "trop de requêtes ont été envoyées. Réessaie dans un instant."
-        )
-    if status >= 500:
-        return prefix + f"le service Agenda est indisponible (réponse {status})."
-    return prefix + f"le service Agenda a renvoyé une erreur (réponse {status})."
+    return _status_message(status, prefix, _CALENDAR_WRITE_STATUS_REASONS)
 
 
 async def _calendar_authorized_send(
@@ -2924,14 +2876,9 @@ async def _gmail_read(
 
     account = _resolve_account(settings, arguments.get("account"))
     if account is None:
-        raw = arguments.get("account")
-        shown = raw.strip() if isinstance(raw, str) and raw.strip() else ""
-        key = _account_key(shown) if shown else ""
-        message = (
-            f"Le compte « {shown} » est inconnu. "
-            f"Comptes disponibles : {_account_names(settings)}."
+        return _unknown_account_failure(
+            settings, arguments, trace, tool, started
         )
-        return _fail(trace, tool, key, started, "invalid_account", message)
 
     message_id = _optional_text(arguments.get("message_id"))
     thread_id = _optional_text(arguments.get("thread_id"))
