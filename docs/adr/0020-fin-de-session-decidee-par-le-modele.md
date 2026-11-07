@@ -47,7 +47,7 @@ Le noyau ne ferme pas brutalement à l'appel du Tool. Il ouvre une **Clôture en
 
 Chaque `LlmAudio` pendant la clôture relance la grâce de 3 s, jamais le timeout de 30 s :
 Athena finit sa phrase d'adieu sans être coupée. À l'échéance de la grâce, la Session se
-termine par le chemin de fin unique (`_teardown`) avec le motif `COMPLETED`.
+termine par le chemin de fin unique du Coordinator, avec le motif `COMPLETED`.
 
 Le plafond protège l'inverse : si le modèle parle encore à T+10 s, le noyau renonce à
 fermer. La clôture est annulée, une Trace `SessionEndCanceled` porte
