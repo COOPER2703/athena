@@ -58,6 +58,7 @@ WAKE_WORD_ENV = (
     "ATHENA_WAKE_WORD_THRESHOLD",
     "ATHENA_WAKE_WORD_COOLDOWN_SECONDS",
     "ATHENA_WAKE_WORD_VAD",
+    "ATHENA_WAKE_WORD_VAD_MODEL",
     "ATHENA_WAKE_WORD_SESSION_START_TIMEOUT_SECONDS",
     "ATHENA_WAKE_WORD_PRE_ROLL_MS",
 )
@@ -76,6 +77,11 @@ def test_wake_word_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.threshold == 0.5
     assert cfg.cooldown_seconds == 2.0
     assert cfg.vad is False
+    assert cfg.vad_model_path.parts[-3:] == (
+        "client",
+        "models",
+        "silero_vad.onnx",
+    )
     assert cfg.session_start_timeout_seconds == 10.0
     assert cfg.pre_roll_ms == 300
 
@@ -95,6 +101,7 @@ def test_wake_word_config_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ATHENA_WAKE_WORD_THRESHOLD", "0.7")
     monkeypatch.setenv("ATHENA_WAKE_WORD_COOLDOWN_SECONDS", "4.5")
     monkeypatch.setenv("ATHENA_WAKE_WORD_VAD", "1")
+    monkeypatch.setenv("ATHENA_WAKE_WORD_VAD_MODEL", "/tmp/custom/silero_vad.onnx")
     monkeypatch.setenv("ATHENA_WAKE_WORD_SESSION_START_TIMEOUT_SECONDS", "3.0")
     monkeypatch.setenv("ATHENA_WAKE_WORD_PRE_ROLL_MS", "500")
     cfg = WakeWordConfig()
@@ -103,6 +110,7 @@ def test_wake_word_config_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.threshold == 0.7
     assert cfg.cooldown_seconds == 4.5
     assert cfg.vad is True
+    assert cfg.vad_model_path == Path("/tmp/custom/silero_vad.onnx")
     assert cfg.session_start_timeout_seconds == 3.0
     assert cfg.pre_roll_ms == 500
 
