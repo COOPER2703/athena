@@ -20,6 +20,8 @@ Calendar des tickets suivants n'ajoutent qu'un schéma et une opération.
 from __future__ import annotations
 
 import asyncio
+import base64
+import html
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -54,8 +56,18 @@ GMAIL_SEARCH_DEFAULT = 10
 GMAIL_SEARCH_MAX = 25
 GMAIL_SEARCH_MIN = 1
 
+# Bornes de ``gmail_read`` : dix messages par défaut dans un fil, vingt au plus.
+GMAIL_READ_DEFAULT = 10
+GMAIL_READ_MAX = 20
+GMAIL_READ_MIN = 1
+
+# Un corps est rendu en texte et tronqué au-delà de six mille caractères
+# (spec #135) ; ``truncated`` annonce la coupe au modèle.
+GMAIL_READ_BODY_LIMIT = 6000
+
 # Chemins Gmail. ``me`` désigne le compte porteur du jeton.
 GMAIL_MESSAGES_PATH = "/gmail/v1/users/me/messages"
+GMAIL_THREADS_PATH = "/gmail/v1/users/me/threads"
 
 # En-têtes de métadonnées demandés à Gmail pour chaque message.
 GMAIL_METADATA_HEADERS = ("From", "Subject", "Date")
@@ -95,6 +107,40 @@ GMAIL_SEARCH_PARAMETERS: Mapping[str, object] = {
         },
     },
     "required": ["query"],
+}
+
+GMAIL_READ_DESCRIPTION = "Lit un message ou un fil Gmail en texte."
+
+GMAIL_READ_PARAMETERS: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "message_id": {
+            "type": "string",
+            "description": (
+                "Identifiant du message Gmail à lire ; exclusif avec thread_id."
+            ),
+        },
+        "thread_id": {
+            "type": "string",
+            "description": (
+                "Identifiant du fil Gmail à lire ; exclusif avec message_id."
+            ),
+        },
+        "account": {
+            "type": "string",
+            "description": (
+                "Clé du compte Google à utiliser ; le compte par défaut "
+                "quand il est absent."
+            ),
+        },
+        "max_messages": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20,
+            "description": "Nombre de messages lus dans un fil, de 1 à 20. Défaut 10.",
+        },
+    },
+    "required": [],
 }
 
 # -- Instruction de plugin ----------------------------------------------------
@@ -169,6 +215,35 @@ _VALIDATION_MESSAGE = (
 )
 _NOT_FOUND_MESSAGE = (
     _SEARCH_PREFIX + "le message ou la boîte demandée est introuvable."
+)
+
+_READ_PREFIX = "La lecture du message Gmail n'a pas abouti : "
+
+_READ_UNREACHABLE_MESSAGE = (
+    _READ_PREFIX + "le service Gmail est injoignable. Réessaie dans un instant."
+)
+_READ_TIMEOUT_MESSAGE = (
+    _READ_PREFIX
+    + "le service Gmail n'a pas répondu à temps. Réessaie dans un instant."
+)
+_READ_UNREADABLE_MESSAGE = (
+    _READ_PREFIX
+    + "le service Gmail a renvoyé une réponse illisible. Réessaie dans un instant."
+)
+_READ_REFUSED_MESSAGE = (
+    _READ_PREFIX + "l'accès au compte a été refusé. Réessaie dans un instant."
+)
+_READ_FORBIDDEN_MESSAGE = _READ_PREFIX + "l'accès à ce compte est refusé."
+_READ_RATE_MESSAGE = (
+    _READ_PREFIX
+    + "trop de requêtes ont été envoyées. Réessaie dans un instant."
+)
+_READ_VALIDATION_MESSAGE = (
+    _READ_PREFIX
+    + "la requête a été refusée. Vérifie l'identifiant du message ou du fil."
+)
+_READ_NOT_FOUND_MESSAGE = (
+    _READ_PREFIX + "le message ou le fil demandé est introuvable."
 )
 
 
@@ -623,6 +698,57 @@ def _status_error(status: int) -> str:
     return _SEARCH_PREFIX + f"le service Gmail a renvoyé une erreur (réponse {status})."
 
 
+# -- HTTP de ``gmail_read`` ---------------------------------------------------
+
+
+async def _read_get(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    url: str,
+    params: Mapping[str, object],
+) -> httpx2.Response:
+    """GET réutilisant le socle (jeton, 401) avec les phrases de lecture."""
+    try:
+        return await _authorized_get(settings, account, trace, url, params)
+    except _RequestFailure as exc:
+        raise _RequestFailure(_read_transport_message(exc.status), exc.status) from exc
+
+
+def _read_transport_message(status: str) -> str:
+    """Phrase de lecture d'une panne de transport, jamais un détail brut."""
+    if status == "timeout":
+        return _READ_TIMEOUT_MESSAGE
+    if status == "unreadable":
+        return _READ_UNREADABLE_MESSAGE
+    return _READ_UNREACHABLE_MESSAGE
+
+
+def _read_json_body(response: httpx2.Response) -> Mapping[str, Any]:
+    """Corps JSON objet, relu avec la phrase d'illisibilité de lecture."""
+    try:
+        return _json_body(response)
+    except _RequestFailure as exc:
+        raise _RequestFailure(_READ_UNREADABLE_MESSAGE, exc.status) from exc
+
+
+def _read_status_error(status: int) -> str:
+    """Phrase française d'un statut Gmail rencontré en lecture."""
+    if status == 400:
+        return _READ_VALIDATION_MESSAGE
+    if status == 401:
+        return _READ_REFUSED_MESSAGE
+    if status == 403:
+        return _READ_FORBIDDEN_MESSAGE
+    if status == 404:
+        return _READ_NOT_FOUND_MESSAGE
+    if status in (429, 529):
+        return _READ_RATE_MESSAGE
+    if status >= 500:
+        return _READ_PREFIX + f"le service Gmail est indisponible (réponse {status})."
+    return _READ_PREFIX + f"le service Gmail a renvoyé une erreur (réponse {status})."
+
+
 # -- Tool ``gmail_search`` ----------------------------------------------------
 
 
@@ -630,7 +756,10 @@ def _tool_bindings(
     settings: _Settings, trace: Trace
 ) -> tuple[ToolBinding, ...]:
     """Les Tools du plugin ; le socle ajoute ici ceux des tickets suivants."""
-    return (_gmail_search_tool(settings, trace),)
+    return (
+        _gmail_search_tool(settings, trace),
+        _gmail_read_tool(settings, trace),
+    )
 
 
 def _gmail_search_tool(settings: _Settings, trace: Trace) -> ToolBinding:
@@ -896,3 +1025,273 @@ def _fail(
     _trace_tool(trace, tool, account, started, "error")
     trace("ToolFailed", {"tool": tool, "account": account, "status": status})
     return {"status": "error", "message": message}
+
+
+# -- Tool ``gmail_read`` ------------------------------------------------------
+
+
+def _gmail_read_tool(settings: _Settings, trace: Trace) -> ToolBinding:
+    """Déclare ``gmail_read`` et son handler : un appel ne lève jamais."""
+
+    async def handle(arguments: Mapping[str, object]) -> Mapping[str, object]:
+        return await _gmail_read(settings, arguments, trace)
+
+    return ToolBinding(
+        spec=ToolSpec(
+            name="gmail_read",
+            description=GMAIL_READ_DESCRIPTION,
+            parameters=GMAIL_READ_PARAMETERS,
+        ),
+        handler=handle,
+    )
+
+
+async def _gmail_read(
+    settings: _Settings,
+    arguments: Mapping[str, object],
+    trace: Trace,
+) -> Mapping[str, object]:
+    """Lit un message ou un fil et rend son texte, sans jamais lever."""
+    tool = "gmail_read"
+    started = asyncio.get_running_loop().time()
+
+    account = _resolve_account(settings, arguments.get("account"))
+    if account is None:
+        raw = arguments.get("account")
+        shown = raw.strip() if isinstance(raw, str) and raw.strip() else ""
+        key = _account_key(shown) if shown else ""
+        message = (
+            f"Le compte « {shown} » est inconnu. "
+            f"Comptes disponibles : {_account_names(settings)}."
+        )
+        return _fail(trace, tool, key, started, "invalid_account", message)
+
+    message_id = _optional_text(arguments.get("message_id"))
+    thread_id = _optional_text(arguments.get("thread_id"))
+    if message_id is not None and thread_id is not None:
+        message = (
+            _READ_PREFIX
+            + "indique un seul identifiant, message_id ou thread_id, pas les deux."
+        )
+        return _fail(trace, tool, account.key, started, "invalid_identifier", message)
+    if message_id is None and thread_id is None:
+        message = _READ_PREFIX + "indique un message_id ou un thread_id."
+        return _fail(trace, tool, account.key, started, "invalid_identifier", message)
+
+    max_messages = _bounded_int(
+        arguments.get("max_messages"),
+        default=GMAIL_READ_DEFAULT,
+        minimum=GMAIL_READ_MIN,
+        maximum=GMAIL_READ_MAX,
+    )
+
+    try:
+        if message_id is not None:
+            messages, parent_thread_id, capped = await _read_message_by_id(
+                settings, account, trace, message_id
+            )
+        else:
+            messages, parent_thread_id, capped = await _read_thread_by_id(
+                settings,
+                account,
+                trace,
+                thread_id if thread_id is not None else "",
+                max_messages=max_messages,
+            )
+    except asyncio.CancelledError:
+        raise
+    except _AccountUnavailable as exc:
+        return _fail(trace, tool, account.key, started, "unavailable", exc.message)
+    except _RequestFailure as exc:
+        return _fail(trace, tool, account.key, started, exc.status, exc.message)
+    except Exception as exc:  # défense : le handler ne lève jamais
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            type(exc).__name__,
+            _READ_UNREADABLE_MESSAGE,
+        )
+
+    payload: dict[str, object] = {
+        "status": "ok",
+        "account": account.key,
+        "messages": messages,
+    }
+    if parent_thread_id:
+        payload["thread_id"] = parent_thread_id
+    if capped or any(bool(item["truncated"]) for item in messages):
+        payload["truncated"] = True
+    _trace_tool(trace, tool, account.key, started, "ok", len(messages))
+    return payload
+
+
+async def _read_message_by_id(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    identifier: str,
+) -> tuple[list[dict[str, object]], str | None, bool]:
+    """``GET /messages/{id}?format=full`` : un message, jamais son fil entier."""
+    url = settings.api_base_url + GMAIL_MESSAGES_PATH + "/" + identifier
+    body = await _read_object(settings, account, trace, url, {"format": "full"})
+    message = _read_message(body, fallback_id=identifier)
+    return [message], _optional_text(body.get("threadId")), False
+
+
+async def _read_thread_by_id(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    identifier: str,
+    *,
+    max_messages: int,
+) -> tuple[list[dict[str, object]], str | None, bool]:
+    """``GET /threads/{id}?format=full``, borné à ``max_messages`` messages."""
+    url = settings.api_base_url + GMAIL_THREADS_PATH + "/" + identifier
+    body = await _read_object(settings, account, trace, url, {"format": "full"})
+    listed = body.get("messages")
+    items = listed if isinstance(listed, list) else []
+    messages = [
+        _read_message(item)
+        for item in items[:max_messages]
+        if isinstance(item, dict)
+    ]
+    thread_id = _optional_text(body.get("id")) or identifier
+    return messages, thread_id, len(items) > max_messages
+
+
+async def _read_object(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    url: str,
+    params: Mapping[str, object],
+) -> Mapping[str, Any]:
+    """GET porteur du jeton, puis corps JSON ; les statuts deviennent des phrases."""
+    response = await _read_get(settings, account, trace, url, params)
+    if response.status_code >= 400:
+        raise _RequestFailure(
+            _read_status_error(response.status_code),
+            f"HTTP {response.status_code}",
+        )
+    return _read_json_body(response)
+
+
+def _read_message(
+    message: Mapping[str, Any], *, fallback_id: str = ""
+) -> dict[str, object]:
+    """Un message Gmail complet rendu en texte, pièces jointes nommées seulement."""
+    headers = _headers(message)
+    payload = message.get("payload")
+    body, attachments = _read_payload(
+        payload if isinstance(payload, dict) else {}
+    )
+    body, truncated = _truncate_body(body)
+    return {
+        "id": _text(message.get("id")) or fallback_id,
+        "from": headers.get("from", ""),
+        "to": headers.get("to", ""),
+        "cc": headers.get("cc", ""),
+        "subject": headers.get("subject", ""),
+        "date": headers.get("date", ""),
+        "body": body,
+        "truncated": truncated,
+        "attachments": attachments,
+    }
+
+
+def _read_payload(
+    payload: Mapping[str, Any],
+) -> tuple[str, list[str]]:
+    """Corps textuel d'une charge Gmail et noms des pièces jointes.
+
+    Le ``text/plain`` l'emporte ; à défaut, le HTML est nettoyé. Une partie
+    portant un nom de fichier est une pièce jointe : son nom est rendu, son
+    contenu n'est jamais décodé.
+    """
+    plain: list[str] = []
+    rendered_html: list[str] = []
+    attachments: list[str] = []
+    for part in _payload_parts(payload):
+        filename = part.get("filename")
+        if isinstance(filename, str) and filename.strip():
+            name = filename.strip()
+            if name not in attachments:
+                attachments.append(name)
+            continue
+        text = _part_text(part)
+        if not text:
+            continue
+        if part.get("mimeType") == "text/plain":
+            plain.append(text)
+        elif part.get("mimeType") == "text/html":
+            rendered_html.append(text)
+
+    if plain:
+        body = "\n\n".join(segment.strip() for segment in plain if segment.strip())
+    else:
+        cleaned = [
+            _clean_html(segment)
+            for segment in rendered_html
+            if segment.strip()
+        ]
+        body = "\n\n".join(segment for segment in cleaned if segment)
+    return body, attachments
+
+
+def _payload_parts(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Toutes les parties d'une charge, dans l'ordre du document."""
+    parts: list[Mapping[str, Any]] = [payload]
+    children = payload.get("parts")
+    if isinstance(children, list):
+        for child in children:
+            if isinstance(child, dict):
+                parts.extend(_payload_parts(child))
+    return parts
+
+
+def _part_text(part: Mapping[str, Any]) -> str:
+    """Texte décodé d'une partie Gmail ; un corps absent ou illisible est vide."""
+    body = part.get("body")
+    if not isinstance(body, dict):
+        return ""
+    data = body.get("data")
+    if not isinstance(data, str) or not data.strip():
+        return ""
+    padded = data + "=" * (-len(data) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
+    except (TypeError, ValueError):
+        return ""
+    return decoded.decode("utf-8", "replace")
+
+
+_HTML_SCRIPT_RE = re.compile(
+    r"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL
+)
+_HTML_BREAK_RE = re.compile(
+    r"<br\s*/?>|</p\s*>|</div\s*>|</li\s*>|</tr\s*>", re.IGNORECASE
+)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_HTML_SPACES_RE = re.compile(r"[ \t\f\v]+")
+_HTML_BLANK_LINES_RE = re.compile(r"\n{3,}")
+
+
+def _clean_html(raw: str) -> str:
+    """HTML lisible : scripts retirés, balises coupées, entités décodées."""
+    without_scripts = _HTML_SCRIPT_RE.sub(" ", raw)
+    with_breaks = _HTML_BREAK_RE.sub("\n", without_scripts)
+    without_tags = _HTML_TAG_RE.sub("", with_breaks)
+    text = html.unescape(without_tags).replace("\u00a0", " ")
+    lines = [_HTML_SPACES_RE.sub(" ", line).strip() for line in text.splitlines()]
+    joined = _HTML_BLANK_LINES_RE.sub("\n\n", "\n".join(lines))
+    return joined.strip()
+
+
+def _truncate_body(body: str) -> tuple[str, bool]:
+    """Coupe le corps à la limite annoncée et dit si une coupe a eu lieu."""
+    if len(body) <= GMAIL_READ_BODY_LIMIT:
+        return body, False
+    return body[:GMAIL_READ_BODY_LIMIT], True
