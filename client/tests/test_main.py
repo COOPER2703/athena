@@ -7,9 +7,11 @@ from pathlib import Path
 
 import pytest
 
+import client.__main__ as main_module
 from client.__main__ import _build_app, _enter_loop, cli, main
 from client.app import ClientApp
 from client.config import AppConfig
+from client.wake_word import WakeWordUnavailableError
 from client.ws_client import MissingAccessTokenError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -34,8 +36,44 @@ class FailingApp:
 
 def test_build_app_returns_client_app(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ATHENA_ACCESS_TOKEN", "ath_secret")
+    monkeypatch.setenv("ATHENA_WAKE_WORD", "0")
     app = _build_app(AppConfig())
     assert isinstance(app, ClientApp)
+
+
+def test_build_app_builds_the_detector_from_the_wake_word_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATHENA_ACCESS_TOKEN", "ath_secret")
+    monkeypatch.setenv("ATHENA_WAKE_WORD", "1")
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    class RecordingDetector:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            calls.append((args, kwargs))
+
+        def process(self, chunk: bytes) -> None:
+            return None
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(main_module, "OpenWakeWordDetector", RecordingDetector)
+    cfg = AppConfig()
+
+    _build_app(cfg)
+
+    assert calls == [
+        (
+            (cfg.wake_word.model_path,),
+            {
+                "threshold": cfg.wake_word.threshold,
+                "pre_roll_ms": cfg.wake_word.pre_roll_ms,
+                "vad": cfg.wake_word.vad,
+                "vad_model_path": cfg.wake_word.vad_model_path,
+            },
+        )
+    ]
 
 
 def test_build_app_refuses_to_start_without_an_access_token(
@@ -55,6 +93,41 @@ def test_cli_reports_a_missing_access_token(
         cli()
     assert excinfo.value.code == 2
     assert "ATHENA_ACCESS_TOKEN" in capsys.readouterr().err
+
+
+def test_build_app_does_not_load_a_detector_when_wake_word_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ATHENA_ACCESS_TOKEN", "ath_secret")
+    monkeypatch.setenv("ATHENA_WAKE_WORD", "0")
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise AssertionError("la Veille coupée ne doit pas charger de modèle")
+
+    monkeypatch.setattr(main_module, "OpenWakeWordDetector", fail)
+
+    app = _build_app(AppConfig())
+
+    assert isinstance(app, ClientApp)
+
+
+def test_cli_reports_an_unavailable_wake_word(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("ATHENA_ACCESS_TOKEN", "ath_secret")
+
+    def fail(cfg: AppConfig) -> None:
+        raise WakeWordUnavailableError(
+            "Modèle de Wake word introuvable : /tmp/manquant.onnx."
+        )
+
+    monkeypatch.setattr(main_module, "_build_app", fail)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli()
+
+    assert excinfo.value.code == 2
+    assert "/tmp/manquant.onnx" in capsys.readouterr().err
 
 
 def test_entrypoints_are_exposed() -> None:
