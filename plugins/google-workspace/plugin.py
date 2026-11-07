@@ -507,15 +507,34 @@ async def _refresh(
     return token.value
 
 
+# Codes d'erreur OAuth connus : seule cette liste peut devenir la raison
+# tracée d'un échec de rafraîchissement. Un intermédiaire (proxy, réponse
+# inattendue) qui glisserait un secret, une adresse ou un contenu dans
+# ``error`` retombe donc sur le statut HTTP, jamais dans une Trace.
+_OAUTH_ERRORS = frozenset(
+    {
+        "access_denied",
+        "invalid_client",
+        "invalid_grant",
+        "invalid_request",
+        "invalid_scope",
+        "server_error",
+        "temporarily_unavailable",
+        "unauthorized_client",
+        "unsupported_grant_type",
+    }
+)
+
+
 def _oauth_error(response: httpx2.Response) -> str:
-    """Code d'erreur OAuth (``invalid_grant``…) ou statut, jamais un secret."""
+    """Code d'erreur OAuth connu ou statut, jamais un texte arbitraire."""
     try:
         body = response.json()
     except ValueError:
         body = None
     if isinstance(body, dict):
         error = body.get("error")
-        if isinstance(error, str) and error.strip():
+        if isinstance(error, str) and error.strip() in _OAUTH_ERRORS:
             return error.strip()
     return f"HTTP {response.status_code}"
 

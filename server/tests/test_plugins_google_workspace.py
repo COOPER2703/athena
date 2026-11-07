@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from conftest import RecordingTraceSink
+from conftest import RecordingTraceSink, wait_until
 from google_stub import GoogleStub
 from google_workspace_harness import (
     ACCESS_TOKEN_PERSO,
@@ -58,6 +58,7 @@ from google_workspace_harness import (
 from server.adapters.plugins import PluginLoader
 from server.adapters.plugins.loader import PluginLoadError
 from server.app.secrets import EnvSecretResolver
+from server.app.trace import FileTraceSink
 from server.core.plugins import PluginRegistry
 
 # ---------------------------------------------------------------------------
@@ -1136,3 +1137,409 @@ def test_an_error_traces_tool_called_and_tool_failed_without_content(
                 assert "requête secrète" not in _traces_json(sink)
 
     asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Dégradation multi-comptes, Console et smoke test (#141)
+#
+# Ces tests complètent le socle : plusieurs appels sur un compte cassé, la
+# reprise à chaud, la retente globale quand tous les comptes tombent, la ligne
+# de Console et l'absence de fuite dans les raisons tracées et le journal.
+# ---------------------------------------------------------------------------
+
+
+def test_a_refresh_reason_never_repeats_what_the_token_endpoint_returned(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            stub.route_token(
+                REFRESH_TOKEN_PRO, access_token=ACCESS_TOKEN_PRO
+            )
+            # Un intermédiaire hostile glisse un secret, une adresse et un
+            # contenu dans le code d'erreur OAuth. Seul un code connu peut
+            # devenir une raison tracée ; tout le reste retombe sur le statut.
+            hostile = f"{REFRESH_TOKEN_PERSO} camille@example.test Objet secret"
+            stub.route_token(
+                REFRESH_TOKEN_PERSO,
+                status=400,
+                error=hostile,
+                error_description=hostile,
+            )
+            sink = RecordingTraceSink()
+            registry, loader = build_plugins(tmp_path, sink, stub.base_url)
+            async with running_app(registry=registry, loader=loader) as (
+                app,
+                live,
+                transport,
+                _,
+            ):
+                assert app.plugins.states["google-workspace"] == "activated"
+
+                [unavailable] = sink.of_kind("AccountUnavailable")
+                assert unavailable.payload == {
+                    "plugin": "google-workspace",
+                    "account": "perso",
+                    "reason": "HTTP 400",
+                }
+                [refresh_failed] = sink.of_kind("TokenRefreshFailed")
+                assert refresh_failed.payload == {
+                    "plugin": "google-workspace",
+                    "account": "perso",
+                    "reason": "HTTP 400",
+                }
+
+                async with live_session(transport, live) as session:
+                    payload = await call_tool(
+                        session,
+                        "gmail_search",
+                        {"query": "x", "account": "perso"},
+                    )
+                assert payload["status"] == "error"
+
+                rendered = _traces_json(sink)
+                for forbidden in (
+                    REFRESH_TOKEN_PERSO,
+                    "camille@example.test",
+                    "Objet secret",
+                    hostile,
+                ):
+                    assert forbidden not in rendered
+                    assert forbidden not in payload["message"]
+                assert hostile not in json.dumps(app.snapshot(), default=str)
+
+    asyncio.run(scenario())
+
+
+def test_a_failed_account_is_retried_on_every_call_until_the_token_works(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            stub.route_token(
+                REFRESH_TOKEN_PRO, access_token=ACCESS_TOKEN_PRO
+            )
+            stub.route_token(
+                REFRESH_TOKEN_PERSO, status=400, error="invalid_grant"
+            )
+            stub.route("GET", MESSAGES_PATH, body=gmail_message_list())
+            sink = RecordingTraceSink()
+            registry, loader = build_plugins(tmp_path, sink, stub.base_url)
+            async with running_app(registry=registry, loader=loader) as (
+                app,
+                live,
+                transport,
+                _,
+            ):
+                assert app.plugins.states["google-workspace"] == "activated"
+
+                async with live_session(transport, live) as session:
+                    first = await call_tool(
+                        session,
+                        "gmail_search",
+                        {"query": "un", "account": "perso"},
+                    )
+                    second = await call_tool(
+                        session,
+                        "gmail_search",
+                        {"query": "deux", "account": "perso"},
+                    )
+                    usable = await call_tool(
+                        session,
+                        "gmail_search",
+                        {"query": "trois", "account": "pro"},
+                    )
+
+                    # Le refresh token redevient valide (révocation levée,
+                    # propagation Google) : le prochain appel refait l'échange
+                    # et réussit, sans redémarrage. Une réautorisation, elle,
+                    # fournit un nouveau token et demande un redémarrage.
+                    stub.route_token(
+                        REFRESH_TOKEN_PERSO, access_token=ACCESS_TOKEN_PERSO
+                    )
+                    recovered = await call_tool(
+                        session,
+                        "gmail_search",
+                        {"query": "quatre", "account": "perso"},
+                    )
+
+                expected = (
+                    "Le compte « perso » est indisponible : "
+                    "réautorise-le, puis réessaie."
+                )
+                assert first == {"status": "error", "message": expected}
+                assert second == first
+                assert usable["status"] == "ok"
+                assert usable["account"] == "pro"
+                assert recovered["status"] == "ok"
+                assert recovered["account"] == "perso"
+
+                # Démarrage + un échange à chaque appel sur le compte cassé,
+                # puis un dernier échange après réautorisation.
+                perso_exchanges = [
+                    request
+                    for request in stub.token_requests
+                    if request["form"]["refresh_token"]
+                    == [REFRESH_TOKEN_PERSO]
+                ]
+                assert len(perso_exchanges) == 4
+
+                # Seuls le compte sain et le compte réparé lisent Gmail.
+                assert [
+                    request["authorization"]
+                    for request in stub.requests_for("GET", MESSAGES_PATH)
+                ] == [
+                    f"Bearer {ACCESS_TOKEN_PRO}",
+                    f"Bearer {ACCESS_TOKEN_PERSO}",
+                ]
+
+                # Le compte n'est tracé indisponible qu'au démarrage : les
+                # appels suivants se lisent dans les Traces de Tool.
+                assert len(sink.of_kind("AccountUnavailable")) == 1
+
+                # Chaque échec émet ToolCalled puis ToolFailed ; un succès
+                # n'émet que ToolCalled.
+                called = sink.of_kind("ToolCalled")
+                assert [
+                    (entry.payload["account"], entry.payload["status"])
+                    for entry in called
+                ] == [
+                    ("perso", "error"),
+                    ("perso", "error"),
+                    ("pro", "ok"),
+                    ("perso", "ok"),
+                ]
+                failed = sink.of_kind("ToolFailed")
+                assert [
+                    (entry.payload["account"], entry.payload["status"])
+                    for entry in failed
+                ] == [("perso", "unavailable"), ("perso", "unavailable")]
+                assert [
+                    entry.kind
+                    for entry in sink.entries
+                    if entry.kind in ("ToolCalled", "ToolFailed")
+                ] == [
+                    "ToolCalled",
+                    "ToolFailed",
+                    "ToolCalled",
+                    "ToolFailed",
+                    "ToolCalled",
+                    "ToolCalled",
+                ]
+
+    asyncio.run(scenario())
+
+
+def test_the_console_snapshot_shows_the_activated_plugin_and_its_tools(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            stub.route_token(
+                REFRESH_TOKEN_PRO, access_token=ACCESS_TOKEN_PRO
+            )
+            stub.route_token(
+                REFRESH_TOKEN_PERSO, status=400, error="invalid_grant"
+            )
+            sink = RecordingTraceSink()
+            registry, loader = build_plugins(tmp_path, sink, stub.base_url)
+            async with running_app(registry=registry, loader=loader) as (
+                app,
+                live,
+                transport,
+                _,
+            ):
+                # Un compte indisponible ne retire pas le plugin de la Console :
+                # il reste activé et garde ses Tools.
+                assert app.snapshot()["plugins"] == [
+                    {
+                        "name": "google-workspace",
+                        "state": "activated",
+                        "tools": ["gmail_search"],
+                    }
+                ]
+                assert app.plugins.tools.owner_of("gmail_search") == (
+                    "google-workspace"
+                )
+                async with live_session(transport, live) as _session:
+                    assert set(declared(live)) == {"gmail_search"}
+
+                [activated] = [
+                    entry
+                    for entry in sink.of_kind("PluginState")
+                    if entry.payload["state"] == "activated"
+                ]
+                assert activated.payload["tools"] == 1
+                assert states(sink) == ["activated"]
+
+    asyncio.run(scenario())
+
+
+def test_all_accounts_failing_degrades_the_start_and_retries_globally(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            for refresh_token in (REFRESH_TOKEN_PRO, REFRESH_TOKEN_PERSO):
+                stub.route_token(
+                    refresh_token, status=400, error="invalid_grant"
+                )
+            sink = RecordingTraceSink()
+            registry, loader = build_plugins(tmp_path, sink, stub.base_url)
+            async with running_app(
+                registry=registry, loader=loader, retry_interval=0.05
+            ) as (app, live, transport, _):
+                # Aucun compte : le serveur démarre quand même, sans Tools.
+                # La retente de fond peut déjà avoir émis une seconde Trace :
+                # seule la première et l'état courant comptent ici.
+                assert states(sink)[0] == "failed"
+                assert app.plugins.states["google-workspace"] == "failed"
+                assert app.plugins.tools.specs() == ()
+                assert app.snapshot()["plugins"] == [
+                    {
+                        "name": "google-workspace",
+                        "state": "failed",
+                        "tools": [],
+                    }
+                ]
+                first = sink.of_kind("PluginState")[0]
+                assert first.payload["state"] == "failed"
+                assert first.payload["reason"].startswith("PluginUnavailable")
+
+                # La retente globale tourne toute seule et reste en échec
+                # tant que Google refuse les deux comptes.
+                await wait_until(
+                    lambda: any(
+                        entry.payload.get("retry") is True
+                        and entry.payload["state"] == "failed"
+                        for entry in sink.of_kind("PluginState")
+                    ),
+                    timeout=2.0,
+                )
+                assert app.plugins.states["google-workspace"] == "failed"
+
+                # Refresh tokens réparés : la retente suivante active le plugin.
+                program_tokens(stub)
+                stub.route("GET", MESSAGES_PATH, body=gmail_message_list())
+                await wait_for_state(app, "google-workspace", "activated")
+
+                assert app.snapshot()["plugins"] == [
+                    {
+                        "name": "google-workspace",
+                        "state": "activated",
+                        "tools": ["gmail_search"],
+                    }
+                ]
+                [last] = [
+                    entry
+                    for entry in sink.of_kind("PluginState")
+                    if entry.payload.get("retry") is True
+                    and entry.payload["state"] == "activated"
+                ]
+                assert last.payload["tools"] == 1
+
+                unavailable = sink.of_kind("AccountUnavailable")
+                assert {entry.payload["account"] for entry in unavailable} == {
+                    "pro",
+                    "perso",
+                }
+                assert all(
+                    entry.payload["reason"] == "invalid_grant"
+                    for entry in unavailable
+                )
+                rendered = _traces_json(sink)
+                assert all(
+                    secret not in rendered for secret in TOKEN_SECRETS
+                )
+
+                async with live_session(transport, live) as session:
+                    payload = await call_tool(
+                        session, "gmail_search", {"query": "réparé"}
+                    )
+                    assert payload["status"] == "ok"
+
+    asyncio.run(scenario())
+
+
+def test_no_secret_reaches_the_log_the_snapshot_or_an_error_message(
+    tmp_path: Path,
+) -> None:
+    log_path = tmp_path / "logs" / "server.log"
+    log = FileTraceSink(log_path, min_level="debug")
+    try:
+
+        async def scenario() -> None:
+            async with GoogleStub() as stub:
+                stub.route_token(
+                    REFRESH_TOKEN_PRO, access_token=ACCESS_TOKEN_PRO
+                )
+                stub.route_token(
+                    REFRESH_TOKEN_PERSO, status=400, error="invalid_grant"
+                )
+                stub.route("GET", MESSAGES_PATH, body=gmail_message_list())
+                plugin_sink = RecordingTraceSink()
+                registry, loader = build_plugins(
+                    tmp_path, plugin_sink, stub.base_url, extra_sinks=[log]
+                )
+                async with running_app(
+                    registry=registry, loader=loader, extra_sinks=[log]
+                ) as (app, live, transport, app_sink):
+                    async with live_session(transport, live) as session:
+                        ok = await call_tool(
+                            session,
+                            "gmail_search",
+                            {"query": "requête confidentielle", "account": "pro"},
+                        )
+                        failed = await call_tool(
+                            session,
+                            "gmail_search",
+                            {"query": "requête confidentielle", "account": "perso"},
+                        )
+
+                    assert ok["status"] == "ok"
+                    assert failed["status"] == "error"
+                    # Les secrets partent réellement : le test n'est pas vide.
+                    assert {
+                        request["form"]["refresh_token"][0]
+                        for request in stub.token_requests
+                    } == {REFRESH_TOKEN_PRO, REFRESH_TOKEN_PERSO}
+
+                    traces = json.dumps(
+                        [
+                            entry.payload
+                            for entry in (
+                                *app_sink.entries,
+                                *plugin_sink.entries,
+                            )
+                        ],
+                        default=str,
+                    )
+                    snapshot = json.dumps(app.snapshot(), default=str)
+                    plugin_states = json.dumps(
+                        app.plugins.states, default=str
+                    )
+                    for forbidden in (
+                        *TOKEN_SECRETS,
+                        ACCESS_TOKEN_PRO,
+                        "requête confidentielle",
+                    ):
+                        assert forbidden not in traces
+                        assert forbidden not in snapshot
+                        assert forbidden not in plugin_states
+                        assert forbidden not in failed["message"]
+                        assert forbidden not in str(ok.get("message", ""))
+
+        asyncio.run(scenario())
+    finally:
+        log.close()
+
+    rendered = log_path.read_text(encoding="utf-8")
+    # Le journal porte bien les Traces de dégradation et d'appel : l'absence
+    # de secret est une vraie absence, pas un fichier vide.
+    assert "AccountUnavailable" in rendered
+    assert "TokenRefreshFailed" in rendered
+    assert "ToolCalled" in rendered
+    assert "ToolFailed" in rendered
+    for secret in TOKEN_SECRETS:
+        assert secret not in rendered
+    assert "requête confidentielle" not in rendered
