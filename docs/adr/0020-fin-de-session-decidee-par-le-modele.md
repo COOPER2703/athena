@@ -12,10 +12,10 @@ d'Annonce gardent `tools=()` dans cette tranche, mais cette garde structurelle e
 ## Contexte
 
 Une Session ne se terminait que par un signal de fin de Gemini, une défaillance, un
-remplacement, ou le timeout d'inactivité de 30 s. Quand l'utilisateur dit clairement « au
-revoir », Athena répond, puis la Session reste ouverte 30 s : le Client reste `ACTIVE`,
-continue d'envoyer l'audio du micro, et la Session suivante est retardée. L'utilisateur
-doit attendre ou interrompre à la main.
+remplacement, ou le timeout d'inactivité de 30 s. Quand l'échange est visiblement terminé
+— par exemple l'utilisateur dit « au revoir » ou « non c'est bon » —, Athena répond, puis la
+Session reste ouverte 30 s : le Client reste `ACTIVE`, continue d'envoyer l'audio du micro,
+et la Session suivante est retardée. L'utilisateur doit attendre ou interrompre à la main.
 
 Le motif de fin ne permettait pas non plus de distinguer une fin **décidée par le modèle**
 d'une fermeture Gemini (`NORMAL`) ou d'un timeout (`TIMEOUT`). L'exploitant ne pouvait donc
@@ -30,10 +30,17 @@ pas lire dans les Traces pourquoi Athena avait arrêté d'écouter.
 - Il n'a **aucun paramètre** (`{"type": "object", "properties": {}}`). Son handler rend
   `{"status": "ok"}` et ne fait rien d'autre : la politique de fermeture reste dans le
   Coordinator (ADR-0008). La description du Tool et le prompt système lui donnent la même
-  consigne — dire d'abord au revoir, ne pas clore pendant une demande en cours.
+  consigne : le modèle juge lui-même que l'échange est terminé, dit d'abord au revoir, et ne
+  clôt pas pendant une demande en cours. En cas de doute, il laisse la Session ouverte.
 - Il est déclaré dans `OpenLiveConnection.tools` de toute Session ordinaire, y compris
   avant que la Session ne devienne visible.
 - Il est **absent** des Sessions d'Annonce, qui conservent `tools=()` (ADR-0017).
+
+Le modèle ne se limite pas aux formules de fin explicites (« au revoir », « c'est tout »,
+« merci »). Une clôture de conversation ordinaire — « non c'est bon », « nickel, merci », un
+acquiescement final après la réponse d'Athena — suffit à ouvrir la Clôture en attente. La
+décision reste au modèle : le noyau ne déduit jamais une fin de l'audio ou d'une
+transcription, il exécute seulement l'appel du Tool.
 
 ### Clôture en attente
 
@@ -113,6 +120,9 @@ retirer la liste vide ; elle ne doit pas être faite par simple symétrie.
 
 ## Alternatives écartées
 
+- **Attendre une formule de fin explicite.** Une clôture ordinaire (« non c'est bon »,
+  « nickel, merci ») laisserait la Session ouverte 30 s et le Client actif, exactement le
+  problème initial.
 - **Fermer à l'appel du Tool.** Coupe la phrase d'adieu et le playback du Client.
 - **Un simple timer fixe, sans réarmement.** Coupe une réponse longue ; ou, s'il est trop
   long, ne rend pas la main assez vite.

@@ -683,6 +683,8 @@ def test_system_prompt_explains_when_to_end_the_session() -> None:
     assert "FIN DE SESSION" in prompt
     assert END_SESSION in prompt
     assert "au revoir" in prompt
+    assert "c'est bon" in prompt
+    assert "doute" in prompt
     assert "pas disponible" in prompt
 
 

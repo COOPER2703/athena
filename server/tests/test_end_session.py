@@ -124,6 +124,17 @@ def test_ordinary_session_declares_end_session_before_visibility():
     assert END_SESSION in names
 
 
+def test_end_session_description_lets_the_model_judge_implicit_goodbyes():
+    """Le modèle décide de la fin : « non c'est bon » suffit, sans formule explicite."""
+    registry = ToolRegistry()
+    register_session_tools(registry)
+    spec = next(spec for spec in registry.specs() if spec.name == END_SESSION)
+
+    description = spec.description.lower()
+    assert "c'est bon" in description
+    assert "doute" in description
+
+
 def test_end_session_replies_before_opening_the_pending_close():
     """Le résultat part d'abord, puis la grâce de 3 s ; aucune fermeture immédiate."""
     coordinator = _coordinator()

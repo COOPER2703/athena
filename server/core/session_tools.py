@@ -10,11 +10,14 @@ END_SESSION = "end_session"
 _END_SESSION_SPEC = ToolSpec(
     name=END_SESSION,
     description=(
-        "Demande la fin de la Session quand l'utilisateur a clairement indiqué "
-        "que la conversation est terminée (au revoir, c'est tout, merci, à "
-        "bientôt) ou demande explicitement d'arrêter. Prononce d'abord tes mots "
-        "d'adieu : la Session se ferme quelques secondes après. N'appelle pas ce "
-        "Tool tant qu'une demande est en cours."
+        "Décide de la fin de la Session quand l'échange te paraît terminé, sans "
+        "attendre une demande explicite : « au revoir », « c'est tout », « non "
+        "c'est bon », « nickel, merci », ou un acquiescement final après ta "
+        "réponse peuvent suffire. Prononce d'abord une courte phrase d'adieu : "
+        "la Session se ferme quelques secondes après. Ne l'appelle pas tant "
+        "qu'une demande est en cours, pendant une hésitation, ou si l'utilisateur "
+        "peut encore vouloir préciser quelque chose ; en cas de doute, laisse la "
+        "Session ouverte."
     ),
     parameters={"type": "object", "properties": {}},
 )
