@@ -47,6 +47,8 @@ from google_workspace_harness import (
     declared,
     gmail_message_list,
     gmail_metadata,
+    gmail_reply_source,
+    gmail_sent_message,
     google_workspace_session,
     install_google_workspace,
     live_session,
@@ -333,7 +335,11 @@ def test_each_account_refresh_token_is_exchanged_at_startup(
                 assert row == {
                     "name": "google-workspace",
                     "state": "activated",
-                    "tools": ["gmail_search"],
+                    "tools": [
+                        "gmail_reply",
+                        "gmail_search",
+                        "gmail_send",
+                    ],
                 }
 
                 # Un échange par compte, avec le formulaire OAuth exact.
@@ -486,7 +492,11 @@ def test_all_accounts_unavailable_degrades_the_start_then_repairs(
                         session, "gmail_search", {"query": "après réparation"}
                     )
                     assert payload["status"] == "ok"
-                    assert declared(live).keys() == {"gmail_search"}
+                    assert declared(live).keys() == {
+                        "gmail_reply",
+                        "gmail_search",
+                        "gmail_send",
+                    }
 
     asyncio.run(scenario())
 
@@ -1013,7 +1023,11 @@ def test_the_tool_instruction_and_console_row_are_exact(
                 _,
             ):
                 tools = declared(live)
-                assert set(tools) == {"gmail_search"}
+                assert set(tools) == {
+                    "gmail_reply",
+                    "gmail_search",
+                    "gmail_send",
+                }
                 assert (
                     dict(tools["gmail_search"].parameters_json_schema)
                     == GMAIL_SEARCH_PARAMETERS
@@ -1027,7 +1041,11 @@ def test_the_tool_instruction_and_console_row_are_exact(
                 assert INSTRUCTION in live.instruction()
 
                 [row] = app.snapshot()["plugins"]
-                assert row["tools"] == ["gmail_search"]
+                assert row["tools"] == [
+                    "gmail_reply",
+                    "gmail_search",
+                    "gmail_send",
+                ]
 
     asyncio.run(scenario())
 
@@ -1134,5 +1152,643 @@ def test_an_error_traces_tool_called_and_tool_failed_without_content(
                 assert failed.payload["account"] == "perso"
                 assert failed.payload["status"] == "HTTP 403"
                 assert "requête secrète" not in _traces_json(sink)
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Envoi et réponse Gmail (#138)
+# ---------------------------------------------------------------------------
+
+
+def test_gmail_send_composes_a_utf8_plain_text_mime_and_returns_the_new_ids(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "POST",
+                MESSAGES_PATH,
+                body={"id": "envoye-1", "threadId": "fil-envoye-1"},
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "gmail_send",
+                    {
+                        "to": ["Camille <camille@example.test>"],
+                        "subject": "Déjeuner à Noël",
+                        "body": "Bonjour,\n\nOn se voit à midi ?\n\nÀ bientôt — café.",
+                    },
+                )
+
+                assert payload == {
+                    "status": "ok",
+                    "message_id": "envoye-1",
+                    "thread_id": "fil-envoye-1",
+                }
+
+                [request] = stub.requests_for("POST", MESSAGES_PATH)
+                assert request["authorization"] == f"Bearer {ACCESS_TOKEN_PERSO}"
+                assert request["content_type"].startswith("application/json")
+                assert set(request["body"]) == {"raw"}
+
+                message = gmail_sent_message(request)
+                assert message["To"] == "Camille <camille@example.test>"
+                assert message["Subject"] == "Déjeuner à Noël"
+                assert message.get_content_type() == "text/plain"
+                assert message.get_content_charset() == "utf-8"
+                assert message.get_content() == (
+                    "Bonjour,\n\nOn se voit à midi ?\n\nÀ bientôt — café.\n"
+                )
+
+    asyncio.run(scenario())
+
+
+def test_gmail_send_puts_cc_and_bcc_in_the_same_mime(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "POST",
+                MESSAGES_PATH,
+                body={"id": "envoye-2", "threadId": "fil-envoye-2"},
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "gmail_send",
+                    {
+                        "to": ["camille@example.test"],
+                        "cc": ["bureau@example.test", "equipe@example.test"],
+                        "bcc": ["archive@example.test"],
+                        "subject": "Compte rendu",
+                        "body": "Voici le compte rendu.",
+                    },
+                )
+
+                assert payload["status"] == "ok"
+                [request] = stub.requests_for("POST", MESSAGES_PATH)
+                message = gmail_sent_message(request)
+                assert message["To"] == "camille@example.test"
+                assert message["Cc"] == (
+                    "bureau@example.test, equipe@example.test"
+                )
+                assert message["Bcc"] == "archive@example.test"
+                assert message.get_content() == "Voici le compte rendu.\n"
+
+    asyncio.run(scenario())
+
+
+def test_gmail_send_refuses_an_empty_recipient_or_body_before_any_call(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                missing_to = await call_tool(
+                    session,
+                    "gmail_send",
+                    {"subject": "Objet", "body": "Corps"},
+                )
+                empty_to = await call_tool(
+                    session,
+                    "gmail_send",
+                    {"to": [], "subject": "Objet", "body": "Corps"},
+                )
+                empty_body = await call_tool(
+                    session,
+                    "gmail_send",
+                    {
+                        "to": ["camille@example.test"],
+                        "subject": "Objet",
+                        "body": "   ",
+                    },
+                )
+                unknown = await call_tool(
+                    session,
+                    "gmail_send",
+                    {
+                        "to": ["camille@example.test"],
+                        "subject": "Objet",
+                        "body": "Corps",
+                        "account": "inconnu",
+                    },
+                )
+
+                for payload in (missing_to, empty_to):
+                    assert payload["status"] == "error"
+                    assert payload["message"].startswith(
+                        "L'envoi du mail n'a pas abouti"
+                    )
+                    assert "destinataire" in payload["message"]
+                assert empty_body["status"] == "error"
+                assert "corps" in empty_body["message"]
+                assert unknown["status"] == "error"
+                assert "inconnu" in unknown["message"]
+
+                assert stub.requests_for("POST", MESSAGES_PATH) == []
+
+    asyncio.run(scenario())
+
+
+def test_gmail_send_turns_a_refused_send_into_a_french_sentence(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "POST",
+                MESSAGES_PATH,
+                status=403,
+                body={"error": {"code": 403}},
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                sink,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "gmail_send",
+                    {
+                        "to": ["camille@example.test"],
+                        "subject": "Objet",
+                        "body": "Corps",
+                    },
+                )
+
+                assert payload["status"] == "error"
+                assert payload["message"].startswith(
+                    "L'envoi du mail n'a pas abouti"
+                )
+                assert "refusé" in payload["message"]
+                assert len(stub.requests_for("POST", MESSAGES_PATH)) == 1
+                assert len(stub.token_requests) == 2
+                assert sink.of_kind("ToolFailed")[-1].payload["status"] == (
+                    "HTTP 403"
+                )
+
+    asyncio.run(scenario())
+
+
+def test_a_401_on_send_refreshes_once_and_replays_the_same_raw_message(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            stub.route_token(
+                REFRESH_TOKEN_PRO, access_token=ACCESS_TOKEN_PRO
+            )
+            stub.route_token_sequence(
+                REFRESH_TOKEN_PERSO,
+                [
+                    {"access_token": ACCESS_TOKEN_PERSO},
+                    {"access_token": "access-token-perso-2"},
+                ],
+            )
+            stub.route_sequence(
+                "POST",
+                MESSAGES_PATH,
+                [
+                    {"status": 401, "body": {"error": {"code": 401}}},
+                    {"body": {"id": "envoye-3", "threadId": "fil-envoye-3"}},
+                ],
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "gmail_send",
+                    {
+                        "to": ["camille@example.test"],
+                        "subject": "Après 401",
+                        "body": "Corps",
+                    },
+                )
+
+                assert payload == {
+                    "status": "ok",
+                    "message_id": "envoye-3",
+                    "thread_id": "fil-envoye-3",
+                }
+                sent = stub.requests_for("POST", MESSAGES_PATH)
+                assert [request["authorization"] for request in sent] == [
+                    f"Bearer {ACCESS_TOKEN_PERSO}",
+                    "Bearer access-token-perso-2",
+                ]
+                # Le rejeu porte exactement le même message.
+                assert sent[0]["body"]["raw"] == sent[1]["body"]["raw"]
+
+    asyncio.run(scenario())
+
+
+def test_gmail_reply_reuses_the_thread_recipient_and_reply_headers(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            original = gmail_reply_source(
+                "m1",
+                thread_id="t1",
+                references="<racine@example.test>",
+            )
+            stub.route("GET", f"{MESSAGES_PATH}/m1", body=original)
+            stub.route(
+                "POST",
+                MESSAGES_PATH,
+                body={"id": "reponse-1", "threadId": "t1"},
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "gmail_reply",
+                    {"message_id": "m1", "body": "Oui, à midi."},
+                )
+
+                assert payload == {
+                    "status": "ok",
+                    "message_id": "reponse-1",
+                    "thread_id": "t1",
+                }
+
+                [fetched] = stub.requests_for("GET", f"{MESSAGES_PATH}/m1")
+                assert fetched["query"]["format"] == ["metadata"]
+                assert fetched["query"]["metadataHeaders"] == [
+                    "From",
+                    "To",
+                    "Cc",
+                    "Subject",
+                    "Message-ID",
+                    "References",
+                ]
+
+                [posted] = stub.requests_for("POST", MESSAGES_PATH)
+                assert posted["body"]["threadId"] == "t1"
+                message = gmail_sent_message(posted)
+                assert message["To"] == "Camille <camille@example.test>"
+                assert message["Cc"] is None
+                assert message["Subject"] == "Re: Déjeuner jeudi"
+                assert message["In-Reply-To"] == "<original@example.test>"
+                assert message["References"] == (
+                    "<racine@example.test> <original@example.test>"
+                )
+                assert message.get_content() == "Oui, à midi.\n"
+                assert stub.requests_for("GET", "/gmail/v1/users/me/profile") == []
+
+    asyncio.run(scenario())
+
+
+def test_gmail_reply_all_adds_the_original_recipients_without_self(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            original = gmail_reply_source(
+                "m1",
+                thread_id="t1",
+                to="perso@example.test, equipe@example.test",
+                cc="bureau@example.test, camille@example.test",
+            )
+            stub.route("GET", f"{MESSAGES_PATH}/m1", body=original)
+            stub.route(
+                "GET",
+                "/gmail/v1/users/me/profile",
+                body={"emailAddress": "perso@example.test"},
+            )
+            stub.route(
+                "POST",
+                MESSAGES_PATH,
+                body={"id": "reponse-2", "threadId": "t1"},
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session,
+                    "gmail_reply",
+                    {
+                        "message_id": "m1",
+                        "body": "Je confirme.",
+                        "reply_all": True,
+                    },
+                )
+
+                assert payload["status"] == "ok"
+                [posted] = stub.requests_for("POST", MESSAGES_PATH)
+                message = gmail_sent_message(posted)
+                assert message["To"] == (
+                    "Camille <camille@example.test>, equipe@example.test"
+                )
+                assert message["Cc"] == "bureau@example.test"
+                assert "perso@example.test" not in (
+                    (message["To"] or "") + (message["Cc"] or "")
+                )
+                assert len(stub.requests_for("GET", "/gmail/v1/users/me/profile")) == 1
+
+    asyncio.run(scenario())
+
+
+def test_gmail_reply_does_not_stack_the_re_prefix(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "GET",
+                f"{MESSAGES_PATH}/m1",
+                body=gmail_reply_source("m1", subject="RE: Déjeuner jeudi"),
+            )
+            stub.route(
+                "POST",
+                MESSAGES_PATH,
+                body={"id": "reponse-3", "threadId": "t1"},
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                await call_tool(
+                    session,
+                    "gmail_reply",
+                    {"message_id": "m1", "body": "D'accord."},
+                )
+
+                [posted] = stub.requests_for("POST", MESSAGES_PATH)
+                assert gmail_sent_message(posted)["Subject"] == (
+                    "RE: Déjeuner jeudi"
+                )
+
+    asyncio.run(scenario())
+
+
+def test_gmail_reply_refuses_an_empty_body_or_a_missing_original(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                no_id = await call_tool(
+                    session, "gmail_reply", {"body": "Bonjour."}
+                )
+                empty_body = await call_tool(
+                    session,
+                    "gmail_reply",
+                    {"message_id": "m1", "body": "   "},
+                )
+                unknown = await call_tool(
+                    session,
+                    "gmail_reply",
+                    {
+                        "message_id": "m1",
+                        "body": "Bonjour.",
+                        "account": "inconnu",
+                    },
+                )
+                # Aucune route n'est programmée : le message est introuvable.
+                missing = await call_tool(
+                    session,
+                    "gmail_reply",
+                    {"message_id": "absent", "body": "Bonjour."},
+                )
+
+                for payload in (no_id, empty_body, missing):
+                    assert payload["status"] == "error"
+                    assert payload["message"].startswith(
+                        "La réponse au mail n'a pas abouti"
+                    )
+                assert "identifiant" in no_id["message"]
+                assert "corps" in empty_body["message"]
+                assert "inconnu" in unknown["message"]
+                assert "introuvable" in missing["message"]
+                assert stub.requests_for("GET", f"{MESSAGES_PATH}/m1") == []
+                assert stub.requests_for("POST", MESSAGES_PATH) == []
+
+    asyncio.run(scenario())
+
+
+def test_gmail_send_and_reply_declarations_are_exact(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                live,
+                _,
+                _,
+                _,
+            ):
+                tools = declared(live)
+                assert tools["gmail_send"].description == (
+                    "Envoie un mail en texte brut."
+                )
+                assert dict(tools["gmail_send"].parameters_json_schema) == {
+                    "type": "object",
+                    "properties": {
+                        "to": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "description": (
+                                "Destinataires principaux, au moins un."
+                            ),
+                        },
+                        "cc": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Destinataires en copie.",
+                        },
+                        "bcc": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Destinataires en copie cachée.",
+                        },
+                        "subject": {
+                            "type": "string",
+                            "description": "Objet du mail.",
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Corps du mail, en texte brut.",
+                        },
+                        "account": {
+                            "type": "string",
+                            "description": (
+                                "Clé du compte Google à utiliser ; le compte "
+                                "par défaut quand il est absent."
+                            ),
+                        },
+                    },
+                    "required": ["to", "subject", "body"],
+                }
+                assert tools["gmail_reply"].description == (
+                    "Répond dans le fil d'un message Gmail."
+                )
+                assert dict(tools["gmail_reply"].parameters_json_schema) == {
+                    "type": "object",
+                    "properties": {
+                        "message_id": {
+                            "type": "string",
+                            "description": (
+                                "Identifiant du message auquel répondre."
+                            ),
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": (
+                                "Corps de la réponse, en texte brut."
+                            ),
+                        },
+                        "reply_all": {
+                            "type": "boolean",
+                            "description": (
+                                "Répondre aussi aux autres destinataires du "
+                                "message d'origine."
+                            ),
+                        },
+                        "account": {
+                            "type": "string",
+                            "description": (
+                                "Clé du compte Google à utiliser ; le compte "
+                                "par défaut quand il est absent."
+                            ),
+                        },
+                    },
+                    "required": ["message_id", "body"],
+                }
+                # La règle de relecture et de confirmation explicite est
+                # portée par l'instruction composée depuis #136.
+                assert "attends un « oui » explicite avant d'envoyer" in (
+                    live.instruction()
+                )
+
+    asyncio.run(scenario())
+
+
+def test_send_and_reply_traces_never_carry_addresses_subjects_or_bodies(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "GET",
+                f"{MESSAGES_PATH}/m1",
+                body=gmail_reply_source(
+                    "m1",
+                    sender="camille@example.test",
+                    subject="Objet très confidentiel",
+                ),
+            )
+            stub.route(
+                "POST",
+                MESSAGES_PATH,
+                body={"id": "envoye-4", "threadId": "fil-4"},
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                sink,
+                _,
+            ):
+                sent = await call_tool(
+                    session,
+                    "gmail_send",
+                    {
+                        "to": ["camille@example.test"],
+                        "subject": "Objet très confidentiel",
+                        "body": "Corps très confidentiel",
+                    },
+                )
+                replied = await call_tool(
+                    session,
+                    "gmail_reply",
+                    {
+                        "message_id": "m1",
+                        "body": "Réponse très confidentielle",
+                    },
+                )
+
+                assert sent["status"] == "ok"
+                assert replied["status"] == "ok"
+
+                called = sink.of_kind("ToolCalled")
+                assert [entry.payload["tool"] for entry in called] == [
+                    "gmail_send",
+                    "gmail_reply",
+                ]
+                assert all(
+                    "result_count" not in entry.payload for entry in called
+                )
+
+                rendered = _traces_json(sink)
+                for forbidden in (
+                    *TOKEN_SECRETS,
+                    ACCESS_TOKEN_PERSO,
+                    "camille@example.test",
+                    "Objet très confidentiel",
+                    "Corps très confidentiel",
+                    "Réponse très confidentielle",
+                    "raw",
+                    MESSAGES_PATH,
+                    "/gmail/",
+                ):
+                    assert forbidden not in rendered
 
     asyncio.run(scenario())
