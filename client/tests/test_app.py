@@ -6,8 +6,9 @@ from typing import Any
 import pytest
 
 from client.app import ClientApp
-from client.config import AppConfig
+from client.config import AppConfig, WakeWordConfig
 from client.state import ClientState
+from client.wake_word import Detection
 from client.ws_client import AccessTokenRefusedError
 from protocol import SessionEnded, SessionStarted
 
@@ -49,6 +50,22 @@ class BlockingFakeAudio(FakeAudio):
         return b""
 
 
+class FakeDetector:
+    def __init__(
+        self, detections: dict[bytes, Detection] | None = None
+    ) -> None:
+        self._detections = detections or {}
+        self.processed: list[bytes] = []
+        self.closed = False
+
+    def process(self, chunk: bytes) -> Detection | None:
+        self.processed.append(chunk)
+        return self._detections.get(chunk)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class FakeTransport:
     def __init__(self) -> None:
         self.listener: Any = None
@@ -57,6 +74,7 @@ class FakeTransport:
         self.interrupts = 0
         self.connected = False
         self.disconnected = False
+        self.events: list[tuple[str, bytes | None]] = []
 
     @property
     def client_id(self) -> str | None:
@@ -75,9 +93,11 @@ class FakeTransport:
 
     async def send_audio(self, data: bytes) -> None:
         self.sent_audio.append(data)
+        self.events.append(("audio", data))
 
     async def send_session_start(self) -> None:
         self.session_starts += 1
+        self.events.append(("session_start", None))
 
     async def send_interrupt(self) -> None:
         self.interrupts += 1
@@ -100,11 +120,13 @@ def make_app(
     cfg: AppConfig | None = None,
     audio: FakeAudio | None = None,
     transport: FakeTransport | None = None,
+    detector: FakeDetector | None = None,
 ) -> ClientApp:
     return ClientApp(
         cfg or AppConfig(),
         audio=audio or FakeAudio(),
         transport=transport or FakeTransport(),
+        detector=detector,
     )
 
 
@@ -241,6 +263,148 @@ def test_server_audio_is_written_to_output() -> None:
 
         app.stop()
         await asyncio.wait_for(run_task, timeout=1)
+
+    asyncio.run(scenario())
+
+
+def test_wake_word_detection_starts_a_session_with_the_pre_roll() -> None:
+    async def scenario() -> None:
+        transport = FakeTransport()
+        transport.connected = True
+        detector = FakeDetector(
+            {b"trigger": Detection(score=0.87, pre_roll=b"before-trigger")}
+        )
+        app = make_app(transport=transport, detector=detector)
+
+        await app.forward_audio(b"trigger")
+        await app.forward_audio(b"live")
+
+        assert transport.session_starts == 1
+        assert app.state is ClientState.ACTIVE
+        assert transport.events == [
+            ("session_start", None),
+            ("audio", b"before-trigger"),
+            ("audio", b"live"),
+        ]
+        assert detector.processed == [b"trigger"]
+
+    asyncio.run(scenario())
+
+
+def test_audio_before_a_detection_is_only_fed_to_the_detector() -> None:
+    async def scenario() -> None:
+        transport = FakeTransport()
+        transport.connected = True
+        detector = FakeDetector()
+        app = make_app(transport=transport, detector=detector)
+
+        await app.forward_audio(b"silence")
+
+        assert detector.processed == [b"silence"]
+        assert transport.session_starts == 0
+        assert transport.sent_audio == []
+        assert app.state is ClientState.LISTENING
+
+    asyncio.run(scenario())
+
+
+def test_detector_is_not_consulted_while_active() -> None:
+    async def scenario() -> None:
+        transport = FakeTransport()
+        detector = FakeDetector()
+        app = make_app(transport=transport, detector=detector)
+        await app.on_session_started(SessionStarted())
+
+        await app.forward_audio(b"live")
+
+        assert detector.processed == []
+        assert transport.sent_audio == [b"live"]
+
+    asyncio.run(scenario())
+
+
+def test_offline_detection_is_ignored_and_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def scenario() -> None:
+        transport = FakeTransport()
+        detector = FakeDetector({b"trigger": Detection(score=0.91)})
+        app = make_app(transport=transport, detector=detector)
+
+        with caplog.at_level("WARNING", logger="athena.client"):
+            await app.forward_audio(b"trigger")
+
+        assert transport.session_starts == 0
+        assert transport.sent_audio == []
+        assert app.state is ClientState.LISTENING
+
+    asyncio.run(scenario())
+
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING"
+    ]
+    assert any("hors connexion" in message for message in warnings)
+    assert any("0.910" in message for message in warnings)
+
+
+def test_disabled_wake_word_never_consults_the_detector() -> None:
+    async def scenario() -> None:
+        cfg = AppConfig(wake_word=WakeWordConfig(enabled=False))
+        transport = FakeTransport()
+        transport.connected = True
+        detector = FakeDetector({b"trigger": Detection(score=0.99)})
+        app = make_app(cfg=cfg, transport=transport, detector=detector)
+
+        await app.forward_audio(b"trigger")
+        await app.tap()
+
+        assert detector.processed == []
+        assert transport.session_starts == 1
+        assert app.state is ClientState.ACTIVE
+
+    asyncio.run(scenario())
+
+
+def test_detection_is_logged_with_its_score(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def scenario() -> None:
+        transport = FakeTransport()
+        transport.connected = True
+        detector = FakeDetector({b"trigger": Detection(score=0.87)})
+        app = make_app(transport=transport, detector=detector)
+
+        with caplog.at_level("INFO", logger="athena.client"):
+            await app.forward_audio(b"trigger")
+
+    asyncio.run(scenario())
+
+    infos = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "INFO"
+    ]
+    assert any(
+        "Wake word détecté" in message and "0.870" in message
+        for message in infos
+    )
+
+
+def test_detector_is_closed_when_the_client_stops() -> None:
+    async def scenario() -> None:
+        audio = BlockingFakeAudio()
+        detector = FakeDetector()
+        app = make_app(audio=audio, detector=detector)
+
+        run_task = asyncio.create_task(app.run())
+        await wait_until(lambda: audio.started_output)
+
+        app.stop()
+        await asyncio.wait_for(run_task, timeout=1)
+
+        assert detector.closed
 
     asyncio.run(scenario())
 
