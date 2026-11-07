@@ -19,6 +19,7 @@ la place aux Tools Gmail puis Calendar sans réorganiser le socle.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -2652,6 +2653,11 @@ def test_gmail_send_composes_a_utf8_plain_text_mime_and_returns_the_new_ids(
                 assert request["authorization"] == f"Bearer {ACCESS_TOKEN_PERSO}"
                 assert request["content_type"].startswith("application/json")
                 assert set(request["body"]) == {"raw"}
+
+                raw = base64.urlsafe_b64decode(request["body"]["raw"])
+                # En-têtes encodés (RFC 2047) et lignes RFC 5322 en CRLF.
+                assert b"Subject: =?utf-8?" in raw
+                assert b"\r\n" in raw
 
                 message = gmail_sent_message(request)
                 assert message["To"] == "Camille <camille@example.test>"
