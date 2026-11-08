@@ -30,7 +30,13 @@ from server.app.config import (
     ServerConfig,
     WebhookConfig,
 )
-from server.app.root import App, build_app, load_announce_prompt, load_judge_prompt
+from server.app.root import (
+    App,
+    build_app,
+    load_announce_prompt,
+    load_judge_prompt,
+    load_system_prompt,
+)
 from server.app.secrets import EnvSecretResolver
 from server.core.commands import (
     AnnounceSessionEnded,
@@ -62,6 +68,7 @@ from server.core.plugins import PluginRegistry
 from server.core.ports import MemoryHit
 from server.core.tools import ToolRegistry
 from server.core.memory_tools import register_memory_tools
+from server.core.session_tools import END_SESSION, register_session_tools
 from server.core.coordinator import (
     EVENT_WINDOW_TIMER_ID,
     EVENT_WINDOW_TIMEOUT,
@@ -498,13 +505,20 @@ def test_build_app_installs_logging_bridge_debug_only_when_flag_on(
         root.setLevel(original_level)
 
 
-def test_build_app_wires_the_kernel_memory_tools(tmp_path: Path) -> None:
+def test_build_app_wires_the_kernel_tools(tmp_path: Path) -> None:
     app = build_app(
         AppConfig(gemini=GeminiConfig(api_key="test-key"), log_dir=str(tmp_path))
     )
 
     assert app.tools is not None
-    assert {spec.name for spec in app.tools.specs()} == {"save_memory", "forget_memory"}
+    assert {spec.name for spec in app.tools.specs()} == {
+        "save_memory",
+        "forget_memory",
+        "end_session",
+    }
+    assert app.tools.owner_of("end_session") == "core"
+    spec = next(spec for spec in app.tools.specs() if spec.name == END_SESSION)
+    assert spec.parameters == {"type": "object", "properties": {}}
 
 
 def test_save_memory_tool_call_reaches_the_store_and_the_model() -> None:
@@ -512,6 +526,7 @@ def test_save_memory_tool_call_reaches_the_store_and_the_model() -> None:
         memory = FakeMemory()
         registry = ToolRegistry()
         register_memory_tools(registry, memory, "alice")
+        register_session_tools(registry)
         transport, gemini, clock, sink, app = _build(memory, tools=registry)
         runner = asyncio.create_task(app.run())
         try:
@@ -522,6 +537,7 @@ def test_save_memory_tool_call_reaches_the_store_and_the_model() -> None:
             assert {spec.name for spec in opened.tools} == {
                 "save_memory",
                 "forget_memory",
+                "end_session",
             }
             await gemini.feed(LlmOpened())
 
@@ -598,12 +614,19 @@ def test_pushed_event_at_rest_judges_then_opens_an_announcement_connection() -> 
 
 def test_announcement_connection_carries_none_of_the_kernel_tools() -> None:
     """Bout en bout : les Tools du noyau existent et sont servis à une Session
-    demandée, mais la Connexion d'Annonce est ouverte sans aucun outil (#81)."""
+    demandée, mais la Connexion d'Annonce est ouverte sans aucun outil (#81).
+
+    Décision **provisoire** : la Connexion d'Annonce devra exposer les mêmes
+    Tools qu'une Session ordinaire dès qu'un système de protection contre les
+    injections existera. La garde structurelle actuelle reste volontairement
+    intacte — voir ADR-0020, section « Décision à réviser » (#123).
+    """
 
     async def scenario() -> None:
         memory = FakeMemory()
         registry = ToolRegistry()
         register_memory_tools(registry, memory, "alice")
+        register_session_tools(registry)
         transport, gemini, clock, sink, app = _build(
             memory,
             tools=registry,
@@ -651,6 +674,20 @@ def test_load_announce_prompt_reads_the_versioned_file() -> None:
     assert prompt == load_announce_prompt()
 
 
+def test_system_prompt_explains_when_to_end_the_session() -> None:
+    """Le prompt partage la politique du Tool : dire au revoir d'abord, et ne
+    pas clore pendant une demande en cours. Il reste inoffensif en Annonce, où
+    le Tool n'est pas déclaré (le prompt le dit explicitement)."""
+    prompt = load_system_prompt()
+
+    assert "FIN DE SESSION" in prompt
+    assert END_SESSION in prompt
+    assert "au revoir" in prompt
+    assert "c'est bon" in prompt
+    assert "doute" in prompt
+    assert "pas disponible" in prompt
+
+
 def test_run_serves_the_webhook_and_binds_push_event() -> None:
     async def scenario() -> None:
         hook = FakeWebhook()
@@ -687,6 +724,7 @@ def test_build_app_wires_the_plugin_registry_and_loader(tmp_path: Path) -> None:
     assert app.tools is app.plugins.tools
     assert app.tools.owner_of("save_memory") == "core"
     assert app.tools.owner_of("forget_memory") == "core"
+    assert app.tools.owner_of("end_session") == "core"
 
 
 class FakePluginLoader:
@@ -854,6 +892,7 @@ def test_build_app_announces_the_kernel_and_plugin_tools_on_registration(
                 assert response.server_tools == [
                     "save_memory",
                     "forget_memory",
+                    "end_session",
                     "fixture__echo",
                 ]
         finally:

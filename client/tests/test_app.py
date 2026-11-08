@@ -302,6 +302,124 @@ def test_empty_chunk_is_ignored() -> None:
     asyncio.run(scenario())
 
 
+class FailingOnceAudio(FakeAudio):
+    """Le premier ``read`` échoue comme le fait PortAudio/ALSA, puis se bloque."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+        self._gate = asyncio.Event()
+
+    async def read_chunk(self) -> bytes:
+        self.reads += 1
+        if self.reads == 1:
+            raise OSError("PaAlsaStream_SetUpBuffers failed")
+        await self._gate.wait()
+        return b""
+
+
+def test_transient_capture_failure_does_not_stop_the_client() -> None:
+    """Une erreur ALSA de lecture micro ne doit pas tuer la Session suivante."""
+
+    async def scenario() -> None:
+        audio = FailingOnceAudio()
+        transport = FakeTransport()
+        app = make_app(audio=audio, transport=transport)
+
+        run_task = asyncio.create_task(app.run())
+        await wait_until(lambda: audio.reads >= 1)
+        await asyncio.sleep(0.05)
+
+        assert not run_task.done()
+        assert not audio.closed
+        assert not transport.disconnected
+        assert app.state is ClientState.LISTENING
+
+        app.stop()
+        await asyncio.wait_for(run_task, timeout=1)
+
+    asyncio.run(scenario())
+
+
+def test_session_end_keeps_queued_playback_for_the_farewell() -> None:
+    """La fin de Session laisse l'audio déjà reçu s'achever (ADR-0022)."""
+
+    async def scenario() -> None:
+        audio = FakeAudio()
+        app = make_app(audio=audio)
+        await app.on_session_started(SessionStarted())
+        await app.on_audio(b"\x01")
+        await app.on_audio(b"\x02")
+        audio.flushed = False
+
+        await app.on_session_ended(SessionEnded())
+
+        assert app.state is ClientState.LISTENING
+        assert app._playback.qsize() == 2
+        assert not audio.flushed
+
+    asyncio.run(scenario())
+
+
+def test_new_tap_flushes_the_residual_farewell() -> None:
+    """Un nouveau départ coupe le reliquat de l'ancien adieu."""
+
+    async def scenario() -> None:
+        audio = FakeAudio()
+        transport = FakeTransport()
+        app = make_app(audio=audio, transport=transport)
+        await app.on_session_started(SessionStarted())
+        await app.on_audio(b"\x01")
+        await app.on_session_ended(SessionEnded())
+
+        await app.tap()
+
+        assert app.state is ClientState.ACTIVE
+        assert transport.session_starts == 1
+        assert app._playback.empty()
+        assert audio.flushed
+
+    asyncio.run(scenario())
+
+
+def test_server_session_started_flushes_the_residual_farewell() -> None:
+    """Une Session annoncée pendant le drain coupe aussi le reliquat."""
+
+    async def scenario() -> None:
+        audio = FakeAudio()
+        app = make_app(audio=audio)
+        await app.on_session_started(SessionStarted())
+        await app.on_audio(b"\x01")
+        await app.on_session_ended(SessionEnded())
+
+        await app.on_session_started(SessionStarted())
+
+        assert app.state is ClientState.ACTIVE
+        assert app._playback.empty()
+        assert audio.flushed
+
+    asyncio.run(scenario())
+
+
+def test_disconnect_drops_the_queued_playback() -> None:
+    """Une connexion perdue rend l'audio en file périmé : on le jette."""
+
+    async def scenario() -> None:
+        audio = FakeAudio()
+        app = make_app(audio=audio)
+        await app.on_session_started(SessionStarted())
+        await app.on_audio(b"\x01")
+        audio.flushed = False
+
+        await app.on_disconnect()
+
+        assert app.state is ClientState.LISTENING
+        assert app._playback.empty()
+        assert not audio.flushed
+
+    asyncio.run(scenario())
+
+
 def test_server_audio_is_written_to_output() -> None:
     async def scenario() -> None:
         audio = BlockingFakeAudio()

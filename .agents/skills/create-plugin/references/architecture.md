@@ -28,7 +28,8 @@ The three Surfaces are:
 The core concepts a plugin will meet:
 
 - **Session** — a conversation visible to the Client. It starts with a wake word, a tap, or a
-  proactive Announcement; it ends with a signal or a timeout.
+  proactive Announcement; it ends with a signal, a timeout, or a model-decided
+  `end_session`.
 - **Connexion Live** — the server ↔ Gemini Live link. It can exist without a Session.
 - **Canal d'événements** — the single ordered channel through which adapter inputs and
   external Events enter the kernel. The kernel processes one item at a time and judges an
@@ -36,7 +37,7 @@ The core concepts a plugin will meet:
 - **Memory** — a kernel component, not a plugin (ADR-0006). It owns the Journal, the
   Consolidation, and pinned facts.
 - **Tool** — a function Gemini may call during a Session. A Tool belongs either to the kernel
-  (`save_memory`, `forget_memory`) or to a plugin.
+  (`save_memory`, `forget_memory`, `end_session`) or to a plugin.
 
 ## Where a plugin sits
 

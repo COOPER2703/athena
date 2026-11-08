@@ -36,6 +36,10 @@ class AudioIO:
         self._pya: Any = None
         self._input_stream: Any = None
         self._output_stream: Any = None
+        # PortAudio n'est pas sûr quand on stoppe/écrit le même flux depuis
+        # deux threads : ``flush`` attend la fin de l'écriture en cours.
+        self._output_lock = asyncio.Lock()
+        self._closed = False
 
     def _pyaudio(self) -> Any:
         import pyaudio
@@ -73,32 +77,76 @@ class AudioIO:
         )
 
     async def read_chunk(self) -> bytes:
-        if self._input_stream is None:
+        stream = self._input_stream
+        if stream is None:
             raise RuntimeError("Input stream not started")
-        return await asyncio.to_thread(
-            self._input_stream.read,
-            self._cfg.chunk_size,
-            exception_on_overflow=False,
-        )
+        try:
+            return await asyncio.to_thread(
+                stream.read,
+                self._cfg.chunk_size,
+                exception_on_overflow=False,
+            )
+        except OSError:
+            # Un échec ALSA/PipeWire est transitoire : rouvrir le micro évite
+            # de laisser le Client avec un flux mort.
+            await self._reopen_input()
+            stream = self._input_stream
+            if stream is None:
+                raise
+            return await asyncio.to_thread(
+                stream.read,
+                self._cfg.chunk_size,
+                exception_on_overflow=False,
+            )
+
+    async def _reopen_input(self) -> None:
+        if self._closed:
+            raise RuntimeError("Audio closed")
+        stream = self._input_stream
+        self._input_stream = None
+        if stream is not None:
+            try:
+                await asyncio.to_thread(stream.close)
+            except Exception:
+                pass
+        await self.start_input()
 
     async def write_chunk(self, data: bytes) -> None:
-        if self._output_stream is None:
-            raise RuntimeError("Output stream not started")
-        await asyncio.to_thread(self._output_stream.write, data)
+        async with self._output_lock:
+            stream = self._output_stream
+            if stream is None:
+                raise RuntimeError("Output stream not started")
+            await asyncio.to_thread(stream.write, data)
 
     async def flush(self) -> None:
-        if self._output_stream is None:
-            return
-        await asyncio.to_thread(self._output_stream.stop_stream)
-        await asyncio.to_thread(self._output_stream.start_stream)
+        async with self._output_lock:
+            stream = self._output_stream
+            if stream is None:
+                return
+            await asyncio.to_thread(stream.stop_stream)
+            await asyncio.to_thread(stream.start_stream)
 
     async def close(self) -> None:
-        if self._input_stream:
-            await asyncio.to_thread(self._input_stream.close)
-            self._input_stream = None
-        if self._output_stream:
-            await asyncio.to_thread(self._output_stream.close)
+        self._closed = True
+        input_stream = self._input_stream
+        self._input_stream = None
+        if input_stream:
+            # Arrêter d'abord débloque le ``read`` éventuellement en cours ;
+            # fermer pendant une lecture provoque les erreurs ALSA de teardown.
+            try:
+                await asyncio.to_thread(input_stream.stop_stream)
+            except Exception:
+                pass
+            await asyncio.to_thread(input_stream.close)
+        async with self._output_lock:
+            output_stream = self._output_stream
             self._output_stream = None
+            if output_stream:
+                try:
+                    await asyncio.to_thread(output_stream.stop_stream)
+                except Exception:
+                    pass
+                await asyncio.to_thread(output_stream.close)
         if self._pya:
             self._pya.terminate()
             self._pya = None
