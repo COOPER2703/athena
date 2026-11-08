@@ -51,6 +51,10 @@ class ClientApp:
             await self._flush_playback()
             return
         log.info("Démarrage de Session demandé")
+        # La fin de Session laisse l'adieu s'achever côté Client (ADR-0022) :
+        # un nouveau départ coupe ce reliquat pour que deux voix ne se
+        # chevauchent pas. Le flush est sans effet si rien ne joue.
+        await self._flush_playback()
         # Un tap démarre la Session côté client : la transmission du micro
         # commence tout de suite. Le serveur seul décide quand la Session
         # devient visible (il peut la refermer sans qu'Athena parle).
@@ -111,11 +115,13 @@ class ClientApp:
             data = await self._playback.get()
             await self._audio.write_chunk(data)
 
-    async def _reset_to_listening(self) -> None:
+    async def _reset_to_listening(self, *, drop_playback: bool) -> None:
         self._state = ClientState.LISTENING
         # La fin d'une Session ne coupe pas le flux de sortie : l'audio déjà
-        # joué ou en cours de lecture s'achève, on jette seulement la file.
-        self._drop_playback()
+        # reçu s'achève (ADR-0022). Une perte de connexion, elle, jette la file
+        # devenue périmée.
+        if drop_playback:
+            self._drop_playback()
 
     async def _flush_playback(self) -> None:
         """Barge-in : jette la file et coupe ce qui est en train de jouer."""
@@ -130,16 +136,19 @@ class ClientApp:
         await self._playback.put(data)
 
     async def on_session_started(self, message: SessionStarted) -> None:
+        # Une Session qui démarre pendant que l'adieu précédent s'achève coupe
+        # ce reliquat : le nouveau tour a la priorité (ADR-0022).
+        await self._flush_playback()
         self._state = ClientState.ACTIVE
         log.info("Session active")
 
     async def on_session_ended(self, message: SessionEnded) -> None:
-        await self._reset_to_listening()
+        await self._reset_to_listening(drop_playback=False)
         log.info("Session terminée")
 
     async def on_disconnect(self) -> None:
         log.warning("Connexion perdue, retour en écoute")
-        await self._reset_to_listening()
+        await self._reset_to_listening(drop_playback=True)
 
     async def on_error(self, message: Error) -> None:
         log.error("Erreur serveur: %s", message.message)

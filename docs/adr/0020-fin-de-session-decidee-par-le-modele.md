@@ -4,6 +4,11 @@
 
 accepted
 
+Superseded par l'ADR-0022 pour le mécanisme de **Clôture en attente** (grâce de
+3 s et plafond de 10 s) : `end_session` ferme désormais la Session immédiatement.
+Le reste de cet ADR — propriété `core` du Tool, refus hors Session ordinaire,
+absence dans les Annonces, motif `COMPLETED` — reste en vigueur.
+
 Amende l'ADR-0008 : le Tool du noyau `end_session` existe désormais ; il ne reste plus
 « plus tard la fin de Session ». Ajoute une note de suivi à l'ADR-0017 : les Sessions
 d'Annonce gardent `tools=()` dans cette tranche, mais cette garde structurelle est
