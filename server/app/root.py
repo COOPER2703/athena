@@ -49,6 +49,7 @@ from server.core.events import Event, EventReceived, ShutdownRequested
 from server.core.memory_tools import register_memory_tools
 from server.core.plugins import PluginRegistry
 from server.core.ports import AuthService, EventJudge, MemoryStore, TraceSink
+from server.core.session_tools import register_session_tools
 from server.core.tools import ToolRegistry
 
 _TRACE_SOURCE = "app"
@@ -583,6 +584,9 @@ def build_app(
         config.memory.user_id,
         forget_max_distance=config.memory.recall_max_distance,
     )
+    # Tool du noyau de fin de Session (#130) : enregistré avec les Tools du
+    # noyau, donc avant les plugins. Une collision de nom reste fatale (ADR-0014).
+    register_session_tools(plugins.tools)
     plugin_loader = PluginLoader(
         directory=config.plugins.directory,
         state_path=config.plugins.state_path,

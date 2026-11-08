@@ -22,7 +22,8 @@ _Avoid_: Core, kernel, moteur, backend
 **Session**:
 Conversation active et visible par le Client : l'utilisateur et Athena échangent de
 l'audio. Commence par un Wake word, un tap ou une Annonce proactive ; se termine par un
-signal de fin ou un timeout. La gestion des Sessions est une responsabilité du noyau.
+signal de fin, un timeout, ou un appel du Tool du noyau `end_session`, qui la ferme
+immédiatement. La gestion des Sessions est une responsabilité du noyau.
 _Avoid_: Conversation, call, chat
 
 **Connexion Live**:
@@ -43,9 +44,10 @@ noyau.
 _Avoid_: Function, capability, skill
 
 **Tool du noyau**:
-Un Tool exécuté par le serveur lui-même, indépendant de tout plugin (ex. mémoire, fin de
-Session). Gemini l'appelle comme un autre Tool, mais son exécution ne sort jamais du
-serveur et ne touche pas le protocole client.
+Un Tool exécuté par le serveur lui-même, indépendant de tout plugin (mémoire :
+`save_memory`, `forget_memory` ; fin de Session : `end_session`). Gemini l'appelle comme un
+autre Tool, mais son exécution ne sort jamais du serveur et ne touche pas le protocole
+client.
 _Avoid_: tool interne, tool intégré, tool système
 
 **Wake word**:
@@ -351,6 +353,19 @@ Une page du workspace Notion, seule unité que le plugin `notion` lit et modifie
 données ou une data source n'est pas une Page.
 _Avoid_: Note, fiche, document, page web
 
+### Google Workspace
+
+**Compte Google**:
+Un compte Google dont Athena lit les mails et l'agenda, relié au plugin `google-workspace` par
+un libellé stable (`perso`, `pro`). Se distingue du **Compte** (identité d'accès à la Console),
+de l'**Utilisateur** (personne dont Athena se souvient) et du **Client** (appareil).
+_Avoid_: compte Workspace, compte Gmail, profil Google
+
+**Événement d'agenda**:
+Une entrée de l'agenda Google d'un Compte Google : début, fin, titre, lieu et participants
+éventuels. Se distingue de l'**Événement** (fait externe poussé vers Athena).
+_Avoid_: événement (seul), meeting, créneau
+
 ### Développement assisté
 
 Athena relaie vocalement le travail qu'opencode mène sur un projet : elle présente les
@@ -412,8 +427,10 @@ résultat.
 _Avoid_: Owner, cible, target
 
 **Motif de fin**:
-Le champ `reason` de la fin de Session, qui dit pourquoi une Session se termine. Les valeurs
-numériques sont stables : jamais réordonnées ni réutilisées.
+Le champ `reason` de la fin de Session, qui dit pourquoi une Session se termine. `COMPLETED`
+distingue une fin décidée par le modèle (`end_session`, fermeture immédiate) de `NORMAL`
+(fermeture Gemini) et de `TIMEOUT` (inactivité). Les valeurs numériques sont stables :
+jamais réordonnées ni réutilisées.
 _Avoid_: Raison, cause, status
 
 ## Relationships

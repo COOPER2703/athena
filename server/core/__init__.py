@@ -76,6 +76,7 @@ from server.core.ports import (
     TraceEntry,
     TraceSink,
 )
+from server.core.session_tools import END_SESSION, register_session_tools
 from server.core.state import SessionState
 from server.core.tools import ToolHandler, ToolNameConflict, ToolRegistry
 
@@ -99,6 +100,7 @@ __all__ = [
     "ConsolidationScheduler",
     "Coordinator",
     "Embedder",
+    "END_SESSION",
     "Event",
     "EventJudge",
     "EventReceived",
@@ -150,4 +152,5 @@ __all__ = [
     "TraceSink",
     "local_now",
     "register_memory_tools",
+    "register_session_tools",
 ]

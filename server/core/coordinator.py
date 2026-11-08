@@ -43,12 +43,18 @@ from server.core.events import (
 )
 from server.core.plugins import PluginRegistry
 from server.core.ports import EventJudge, Judgment, MemoryStore, ToolSpec
+from server.core.session_tools import END_SESSION
 from server.core.state import SessionState
 from server.core.tools import ToolRegistry
 from server.core.untrusted import flatten_untrusted, sanitize_untrusted
 
 _TRACE_SOURCE = "core"
 IDLE_TIMEOUT = 30.0
+# ``end_session`` ferme la Session **immédiatement** (ADR-0022) : plus de grâce,
+# plus de plafond, plus d'état de clôture en attente. Le Client finit de jouer
+# l'audio déjà reçu ; le noyau, lui, ne fait plus rien.
+
+
 # Filet de sécurité de l'Annonce (ADR-0007, amendé) : une Connexion Live n'est
 # ouverte que si le jugement **texte** a décidé d'annoncer, mais si le modèle ne
 # produit aucun son, elle est refermée vite — plus court que l'inactivité d'une
@@ -461,8 +467,8 @@ class Coordinator:
         et l'instruction d'Annonce s'y ajoute pour qu'Athena sache qu'un
         Événement a ouvert la Session. Elle s'en distingue sur un point, qui
         est **structurel** : la Connexion est ouverte sans aucun outil, pour
-        qu'un Événement piégé ne puisse jamais déclencher une action (#81,
-        amendement d'ADR-0013 à venir). Le message du juge est la phrase à
+        qu'un Événement piégé ne puisse jamais déclencher une action (#81 ;
+        ADR-0020). Le message du juge est la phrase à
         prononcer ; les faits assainis du lot sont transmis au Live comme
         contexte (``facts``), sans être prononcés, pour qu'Athena puisse
         détailler l'Événement à la demande. La Connexion est marquée ``auto`` :
@@ -506,7 +512,10 @@ class Coordinator:
                 connection_id=self._connection_id,
                 instruction=instruction,
                 # Aucun outil : le contenu externe qui a déclenché l'Annonce
-                # ne peut jamais se traduire par une action (#81).
+                # ne peut jamais se traduire par une action (#81). Décision
+                # **provisoire** : les Sessions d'Annonce exposeront les Tools
+                # ordinaires dès qu'un système anti-injection existera
+                # (ADR-0020, « Décision à réviser »).
                 tools=(),
             ),
             StartIdleTimer(
@@ -677,8 +686,15 @@ class Coordinator:
         """
         return "\n\n".join(section for section in sections if section).strip()
 
+    def _in_live_session(self) -> bool:
+        """Vrai pendant une Session Live active ou visible (jamais au Repos)."""
+        return self._state in (
+            SessionState.LIVE_ACTIVE,
+            SessionState.SESSION_VISIBLE,
+        )
+
     def _on_client_audio(self, event: ClientAudio) -> list[Command]:
-        if self._state in (SessionState.LIVE_ACTIVE, SessionState.SESSION_VISIBLE):
+        if self._in_live_session():
             # Raw mic bytes are not voice activity: never re-arm the idle timer.
             return [
                 SendAudioToLlm(connection_id=self._connection_id, data=event.data),
@@ -699,6 +715,9 @@ class Coordinator:
 
     def _on_client_interrupt(self, event: ClientInterrupt) -> list[Command]:
         client_id = event.client_id or self._client_id
+        # Un barge-in ne peut plus annuler de clôture : ``end_session`` ferme la
+        # Session immédiatement (ADR-0022). Il est traité comme toujours, sans
+        # aucun teardown.
         if self._state is SessionState.SESSION_VISIBLE:
             # Barge-in: the client flushes its own playback; the Session stays
             # visible. No command is emitted for the desktop to stop audio.
@@ -839,8 +858,22 @@ class Coordinator:
         trace porte le plugin propriétaire (``core`` pour un Tool du noyau,
         ``null`` pour un nom inconnu), pour attribuer appels et erreurs dans le
         flux de trace (ADR-0014).
+
+        ``end_session`` relève de la politique du noyau (#130, ADR-0022) : il
+        n'est accepté que dans une Session **ordinaire** active et la ferme
+        **immédiatement** par le chemin de fin unique, avec ``COMPLETED``. Une
+        Connexion de jugement ou une Session d'Annonce n'est pas ordinaire
+        (``tools=()``, ADR-0020) : le modèle reçoit une erreur et la Session
+        reste vivante.
         """
         plugin = self._tool_owner(event.name)
+        is_end_session = event.name == END_SESSION
+        # Le Tool de clôture n'a de sens que dans une Session ordinaire active :
+        # ni la Connexion de jugement (``_judging``) ni la Session automatique
+        # d'Annonce (``_auto``) ne peuvent l'appeler (#130, ADR-0020).
+        ordinary = (
+            self._in_live_session() and not self._judging and not self._auto
+        )
         commands: list[Command] = [
             self._trace(
                 "ToolCall",
@@ -855,8 +888,13 @@ class Coordinator:
                 },
             )
         ]
-        if self._tools is None:
+        if is_end_session and not ordinary:
             result: Mapping[str, object] = {
+                "status": "error",
+                "message": "end_session outside an ordinary active session",
+            }
+        elif self._tools is None:
+            result = {
                 "status": "error",
                 "message": f"unknown tool: {event.name}",
             }
@@ -885,6 +923,19 @@ class Coordinator:
                 },
             )
         )
+        # ``end_session`` accepté : la Session se ferme immédiatement (#130,
+        # ADR-0022). Le résultat du Tool est tout de même émis avant le
+        # teardown, puis le Client reçoit ``SessionEnded`` même si la Session
+        # n'était pas encore devenue visible : un Client qui a démarré une
+        # Session doit toujours revenir à ``LISTENING``.
+        if is_end_session and ordinary and result.get("status") == "ok":
+            commands.extend(
+                self._teardown(
+                    SessionEndReason.COMPLETED,
+                    "EndSession",
+                    force_announce=True,
+                )
+            )
         return commands
 
     def _tool_owner(self, name: str) -> str | None:
@@ -997,14 +1048,17 @@ class Coordinator:
         kind: str,
         *,
         cause: str | None = None,
+        force_announce: bool = False,
     ) -> list[Command]:
         """Single deterministic termination path.
 
         Ordering is fixed: cancel the idle timer, close the Live connection,
-        announce the Session end only when the Session had become visible,
-        then trace both transitions Idle <- Closing <- origin.
-        Afterwards the Coordinator is back to Idle with no residual identity,
-        so no zombie Session can linger.
+        announce the Session end only when the Session had become visible —
+        or when ``force_announce`` is set, pour qu'un Client qui a démarré une
+        Session jamais devenue visible revienne tout de même à ``LISTENING``
+        (``end_session``, ADR-0022) — then trace both transitions
+        Idle <- Closing <- origin. Afterwards the Coordinator is back to Idle
+        with no residual identity, so no zombie Session can linger.
         """
         from_state = self._state
         old_connection_id = self._connection_id
@@ -1014,9 +1068,9 @@ class Coordinator:
         self._state = SessionState.CLOSING
         commands: list[Command] = [
             CancelIdleTimer(connection_id=old_connection_id),
-            CloseLiveConnection(connection_id=old_connection_id),
         ]
-        if was_visible:
+        commands.append(CloseLiveConnection(connection_id=old_connection_id))
+        if was_visible or force_announce:
             commands.append(
                 AnnounceSessionEnded(client_id=old_client_id, reason=reason)
             )
