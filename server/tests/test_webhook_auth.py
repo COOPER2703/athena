@@ -14,12 +14,8 @@ from pathlib import Path
 
 import aiohttp
 
-from conftest import (
-    FakeClock,
-    RecordingTraceSink,
-    console_session,
-    install_console,
-)
+from conftest import FakeClock, console_session, install_console
+from testkit import RecordingTraceSink
 from server.adapters.auth import SqliteAuthStore
 from server.adapters.webhook import (
     EVENTS_PATH,

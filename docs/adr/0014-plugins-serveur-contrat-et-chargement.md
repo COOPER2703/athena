@@ -1,5 +1,8 @@
 # Plugins serveur : manifeste, découverte et activation
 
+Complété par l'ADR-0023, qui décrit ce qu'un **dossier** de plugin possède et le critère
+qui le rend amovible ; cet ADR-ci reste la référence du contrat et du chargement.
+
 Un plugin serveur est un **dossier déposé** dans le répertoire des plugins, décrit par un
 **Plugin Manifest** et chargé **au démarrage**, jamais à chaud. Son code tourne dans le
 processus du serveur, avec ses privilèges, sans bac à sable : un plugin est du **code de

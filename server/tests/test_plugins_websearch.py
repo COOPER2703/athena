@@ -14,7 +14,7 @@ from typing import Any, AsyncIterator, Sequence
 import pytest
 import websockets
 
-from conftest import FakeJudge, RecordingTraceSink, _url, register, wait_until
+from testkit import FakeJudge, RecordingTraceSink, register, url, wait_until
 from protocol import SessionStart, encode
 from server.adapters.gemini import GeminiLiveAdapter
 from server.adapters.plugins import PluginLoader
@@ -190,7 +190,7 @@ async def _running_app(
 async def _live_session(
     transport: WebSocketTransport, live: _ToolLiveConnect
 ) -> AsyncIterator[_ScriptedSession]:
-    async with websockets.connect(_url(transport)) as ws:
+    async with websockets.connect(url(transport)) as ws:
         await register(ws, transport, drain=False)
         await ws.send(encode(SessionStart()))
         await wait_until(lambda: bool(live.sessions))
@@ -1499,7 +1499,7 @@ def test_an_announcement_session_declares_no_web_search(tmp_path: Path) -> None:
                 # l'Annonce, pas une absence de plugin, qui le retire.
                 assert app.tools.owner_of("web_search") == "websearch"
 
-                async with websockets.connect(_url(transport)) as ws:
+                async with websockets.connect(url(transport)) as ws:
                     await register(ws, transport, client_name="desktop", drain=False)
                     await wait_until(
                         lambda: any(

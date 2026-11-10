@@ -77,13 +77,13 @@ Les deux mécanismes de credential (ADR-0017) :
 
 ### Créer un plugin
 
-Le skill `create-plugin` (`.agents/skills/create-plugin/SKILL.md`) conçoit un nouveau plugin
-serveur : il demande le nom et le but, délègue le grill à `grill-with-docs`, puis produit une
-spec et des tickets d'implémentation. Il n'écrit aucun code. Se lance avec `/create-plugin`.
-
-Le contrat public est `plugin_api` (jamais `server`) ; les décisions sont ADR-0014 et
-ADR-0018 ; les deux exemples sont `plugins/websearch` (HTTP) et `plugins/homeassistant` (MCP).
-Les skills tiers sont installés par `npx skills add` et épinglés dans `skills-lock.json`.
+La forme obligatoire d'un dossier de plugin — manifeste, entrypoint, README, glossaire,
+tests, smoke test, ADR locaux — et son critère d'amovibilité sont dans
+`plugins/README.md`. Le skill `create-plugin` (`.agents/skills/create-plugin/SKILL.md`)
+la produit : il demande le nom et le but, délègue le grill à `grill-with-docs`, puis
+produit une spec et des tickets, sans écrire de code. Le contrat public est `plugin_api`
+(jamais `server`) ; les décisions centrales sont ADR-0014 et ADR-0023. Les skills tiers
+sont installés par `npx skills add` et épinglés dans `skills-lock.json`.
 
 ### Recherche web
 

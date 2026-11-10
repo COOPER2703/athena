@@ -5,7 +5,8 @@ import asyncio
 import pytest
 import websockets
 
-from conftest import RecordingTraceSink, _url, register, running_transport, wait_until
+from conftest import running_transport
+from testkit import RecordingTraceSink, register, url, wait_until
 from protocol import (
     Audio,
     Interrupt,
@@ -85,7 +86,7 @@ def test_session_start_drives_real_core_and_wire_sequence() -> None:
             seen: list[Command] = []
             runner = asyncio.create_task(_core_loop(transport, coordinator, seen))
             try:
-                async with websockets.connect(_url(transport)) as ws:
+                async with websockets.connect(url(transport)) as ws:
                     registered = await register(
                         ws, transport, client_name="desktop", drain=False
                     )
@@ -154,8 +155,8 @@ def test_targeted_command_reaches_only_the_addressed_client() -> None:
     async def scenario() -> None:
         async with running_transport() as transport:
             async with (
-                websockets.connect(_url(transport)) as ws_a,
-                websockets.connect(_url(transport)) as ws_b,
+                websockets.connect(url(transport)) as ws_a,
+                websockets.connect(url(transport)) as ws_b,
             ):
                 a = await register(ws_a, transport, client_name="a", drain=False)
                 b = await register(ws_b, transport, client_name="b", drain=False)
@@ -199,7 +200,7 @@ def test_targeted_command_reaches_only_the_addressed_client() -> None:
 def test_inbound_audio_and_interrupt_translate_over_a_real_socket() -> None:
     async def scenario() -> None:
         async with running_transport() as transport:
-            async with websockets.connect(_url(transport)) as ws:
+            async with websockets.connect(url(transport)) as ws:
                 registered = await register(
                     ws, transport, client_name="desktop", drain=False
                 )
@@ -219,7 +220,7 @@ def test_inbound_audio_and_interrupt_translate_over_a_real_socket() -> None:
 def test_tool_result_is_translated_enqueued_and_keeps_connection_alive() -> None:
     async def scenario() -> None:
         async with running_transport() as transport:
-            async with websockets.connect(_url(transport)) as ws:
+            async with websockets.connect(url(transport)) as ws:
                 registered = await register(
                     ws, transport, client_name="desktop", drain=False
                 )
@@ -245,7 +246,7 @@ def test_session_end_is_dropped_without_crashing_the_connection() -> None:
     async def scenario() -> None:
         sink = RecordingTraceSink()
         async with running_transport(sink=sink) as transport:
-            async with websockets.connect(_url(transport)) as ws:
+            async with websockets.connect(url(transport)) as ws:
                 registered = await register(
                     ws, transport, client_name="desktop", drain=False
                 )

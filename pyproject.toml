@@ -41,7 +41,7 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["protocol", "plugin_api", "server", "client"]
+packages = ["protocol", "plugin_api", "server", "client", "testkit"]
 exclude = ["protocol/tests", "server/tests", "client/tests"]
 # `packages` embarque déjà les data files versionnés ; ces motifs rendent
 # l'intention explicite et gardent les modèles de la Veille dans le wheel,
@@ -56,3 +56,12 @@ artifacts = [
     "client/models/*.md",
     "client/models/*.txt",
 ]
+
+# La découverte des tests vit ici, pas dans le Makefile : une seule invocation
+# couvre protocole, serveur, client et plugins. `plugins` est réservé aux tests
+# des plugins, qui vivent à côté de leur code (plugins/README.md).
+[tool.pytest.ini_options]
+testpaths = ["protocol/tests", "server/tests", "client/tests", "plugins"]
+# Les tests tournent en mode `prepend` sans `__init__.py` ; la racine doit être
+# importable pour `testkit`, quel que soit le point d'entrée de pytest.
+pythonpath = ["."]

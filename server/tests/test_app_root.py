@@ -10,13 +10,8 @@ from typing import Callable, TypeVar
 import aiohttp
 import websockets
 
-from conftest import (
-    FakeJudge,
-    RecordingTraceSink,
-    console_session,
-    install_console,
-    wait_until,
-)
+from conftest import console_session, install_console
+from testkit import FakeJudge, RecordingTraceSink, wait_until
 from protocol import Register, Registered, SessionEndReason, decode, encode
 from server import __version__
 from server.adapters.auth import SqliteAuthStore

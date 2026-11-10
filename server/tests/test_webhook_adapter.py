@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import aiohttp
-from conftest import RecordingTraceSink
+from testkit import RecordingTraceSink
 
 from server.adapters.webhook import (
     DEFAULT_SOURCE,

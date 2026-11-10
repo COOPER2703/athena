@@ -9,7 +9,6 @@ travers un vrai ``ToolRegistry``.
 from __future__ import annotations
 
 from conftest import (
-    FakeJudge,
     announcement,
     close_window,
     drive,
@@ -19,6 +18,7 @@ from conftest import (
     traces,
     visible_session,
 )
+from testkit import FakeJudge
 from protocol import SessionEndReason
 from server.core import (
     AnnounceSessionEnded,
