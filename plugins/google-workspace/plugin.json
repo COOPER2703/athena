@@ -1,0 +1,19 @@
+{
+  "api_version": 1,
+  "name": "google-workspace",
+  "version": "0.1.0",
+  "description": "Mails Gmail et agenda Google : lecture, envoi, événements d'agenda",
+  "platform": "server",
+  "entrypoint": "plugin.py",
+  "config": [
+    { "key": "accounts", "type": "string", "required": true },
+    { "key": "default_account", "type": "string" },
+    { "key": "api_base_url", "type": "url" },
+    { "key": "token_url", "type": "url" }
+  ],
+  "secrets": [
+    { "key": "client_id", "required": true },
+    { "key": "client_secret", "required": true },
+    { "key": "refresh_token", "required": true }
+  ]
+}

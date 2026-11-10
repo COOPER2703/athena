@@ -152,6 +152,55 @@ La page parente doit être partagée avec la connexion, sinon le démarrage éch
 `parent_page_id`. La recette complète (partage, capacités, parcours vocal, dépannage) est
 `docs/smoke-test-notion.md`.
 
+### Google Workspace
+
+Le plugin `plugins/google-workspace/` (ADR-0021) expose huit Tools adossés à Gmail et à
+Google Calendar : `gmail_search`, `gmail_read`, `gmail_send`, `gmail_reply` pour les mails,
+`calendar_list_events`, `calendar_create_event`, `calendar_update_event`,
+`calendar_delete_event` pour l'agenda. Chaque **Compte Google** porte son propre client
+OAuth ; les refresh tokens sont échangés en mémoire contre des access tokens d'une heure,
+jamais persistés. Les envois de mails et les suppressions d'événements exigent une
+confirmation explicite. Aucun Événement proactif n'est poussé en v1.
+
+Pour l'activer, ajoutez `google-workspace` à la liste `enabled` de `plugins.json` avec les
+libellés de comptes sous `config.google-workspace`, et fournissez les trois secrets requis
+dans l'environnement ou `.env`, chacun une liste **de même longueur et dans le même ordre**
+que `accounts` (les valeurs Google ne contiennent pas de virgule) :
+
+```json
+{
+  "enabled": ["google-workspace"],
+  "config": {
+    "google-workspace": {
+      "accounts": "Pro,perso",
+      "default_account": "perso"
+    }
+  }
+}
+```
+
+```sh
+ATHENA_PLUGIN_GOOGLE_WORKSPACE_CLIENT_ID=idPro,idPerso
+ATHENA_PLUGIN_GOOGLE_WORKSPACE_CLIENT_SECRET=secretPro,secretPerso
+ATHENA_PLUGIN_GOOGLE_WORKSPACE_REFRESH_TOKEN=rtPro,rtPerso
+```
+
+`default_account` est optionnelle (le premier compte fait foi) ; `api_base_url` et
+`token_url` sont réservées aux tests ou à un proxy. Les scopes demandés sont
+`gmail.readonly`, `gmail.send` et `calendar.events` ; le client OAuth est de type
+« Web application » avec le redirect du Playground, et une application **External +
+Testing** est refusée (refresh tokens expirant en 7 jours).
+
+Au démarrage, `create()` échange en parallèle le refresh token de chaque compte. Si au moins
+un compte répond, le plugin s'active ; un compte refusé (`invalid_grant`) est tracé
+`AccountUnavailable`, reste visible dans la Console et est retenté à **chaque** appel de Tool
+qui le vise, jusqu'à une phrase française d'indisponibilité. Si tous les comptes échouent, le
+plugin rend `PluginUnavailable` : la Console le montre en `failed` et le serveur retente
+toutes les 5 s. Ni les Traces, ni le journal, ni l'instantané, ni les messages d'erreur ne
+portent un secret, une adresse, un objet, un corps, une requête Gmail ou une URL complète.
+La recette complète (client OAuth, Playground, consentement, réautorisation après
+révocation, dépannage) est `docs/smoke-test-google-workspace.md`.
+
 ### Front (`web/`)
 
 Le front est une SPA Vite + React + TypeScript strict, servie en statique par la Console.
