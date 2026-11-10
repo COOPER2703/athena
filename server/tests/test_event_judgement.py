@@ -192,7 +192,12 @@ def test_announcement_activates_the_memory_context_like_a_normal_session():
 
 def test_announcement_connection_opens_without_any_tool():
     """Une Session d'Annonce n'a aucun outil : le contenu externe qui l'a
-    déclenchée ne peut jamais provoquer une action (#81)."""
+    déclenchée ne peut jamais provoquer une action (#81).
+
+    Décision **provisoire** : voir ADR-0020, section « Décision à réviser ».
+    Les Sessions d'Annonce devront exposer les Tools d'une Session ordinaire
+    dès qu'un système de protection contre les injections existera.
+    """
     spec = ToolSpec(
         name="save_memory",
         description="mémorise",

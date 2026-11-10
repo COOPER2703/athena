@@ -1,8 +1,11 @@
 # Tools du noyau : exécution serveur, round-trip porté par le noyau
 
+Amendé par l'ADR-0020 : le Tool du noyau `end_session` existe désormais ; la politique de
+clôture reste dans le Coordinator.
+
 Gemini peut appeler des **Tools du noyau** — des Tools qui appartiennent au noyau et non à
-un plugin (mémoire : `save_memory`, `forget_memory` ; plus tard la fin de Session). Ils sont
-déclarés à l'ouverture de la Connexion Live, exécutés par le serveur, et leur résultat
+un plugin (mémoire : `save_memory`, `forget_memory` ; fin de Session : `end_session`). Ils
+sont déclarés à l'ouverture de la Connexion Live, exécutés par le serveur, et leur résultat
 repart à Gemini par la même connexion. Le **protocole client reste gelé** : un Tool du
 noyau ne touche jamais un Client. Le noyau garde la politique — il résout le Tool dans un
 registre et décide — tandis que l'adaptateur Gemini ne connaît aucun Tool. Le registre est

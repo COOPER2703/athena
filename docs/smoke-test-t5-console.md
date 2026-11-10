@@ -515,12 +515,12 @@ PY
 ```
 
 Attendu : `Registered` avec un `client_id` et `server_tools` (`save_memory`, `forget_memory`,
-plus les Tools de plugin le cas échéant). Sans l'en-tête (ou avec un Jeton `source`, révoqué
-ou inconnu), le serveur refuse le handshake par `401` + `WWW-Authenticate: Bearer` avant toute
-trame. Le Client apparaît dans le panneau Clients de la Console et dans `GET /api/status` —
-sans devenir un Client de la Console : c'est un vrai Client audio, vu par la surface
-d'observation. Le parcours audio réel (`python -m client`, micro/haut-parleur) n'est pas
-automatisable ici ; il reste couvert par les tests existants.
+`end_session`, plus les Tools de plugin le cas échéant). Sans l'en-tête (ou avec un Jeton
+`source`, révoqué ou inconnu), le serveur refuse le handshake par `401` +
+`WWW-Authenticate: Bearer` avant toute trame. Le Client apparaît dans le panneau Clients de
+la Console et dans `GET /api/status` — sans devenir un Client de la Console : c'est un vrai
+Client audio, vu par la surface d'observation. Le parcours audio réel (`python -m client`,
+micro/haut-parleur) n'est pas automatisable ici ; il reste couvert par les tests existants.
 
 ### Webhook `POST /events`
 
@@ -638,13 +638,13 @@ l'état du serveur. Ce sont des résultats observés, pas des invariants du cont
 
 4. **WebSocket réel** — `hello` reçu avec `snapshot` et `backlog` ; après enregistrement
    d'un Client audio factice (`Registered(client_id='…', server_tools=['save_memory',
-   'forget_memory'])`), une trame `status` a poussé `clients: [{client_name: "smoke-t5",
-   platform: "linux"}]` dans les ~1 s du tick ; après une injection `POST /api/events`, une
-   trame `trace` `[console] event_received` est arrivée ; un `POST` sur le Webhook a produit
-   `[webhook] event_received {"chars": 20, "source": "maison"}`. Sur 2,5 s sans changement,
-   **aucune** trame `status` supplémentaire. Redémarrage réel : la socket s'est fermée,
-   `[app] stopped`, puis après relance un nouveau `hello` a été reçu
-   (`backlog` 88 → 6, `state: Idle`) : l'état et le log ont bien été remplacés, pas
+   'forget_memory', 'end_session'])`), une trame `status` a poussé `clients: [{client_name:
+   "smoke-t5", platform: "linux"}]` dans les ~1 s du tick ; après une injection
+   `POST /api/events`, une trame `trace` `[console] event_received` est arrivée ; un `POST`
+   sur le Webhook a produit `[webhook] event_received {"chars": 20, "source": "maison"}`.
+   Sur 2,5 s sans changement, **aucune** trame `status` supplémentaire. Redémarrage réel :
+   la socket s'est fermée, `[app] stopped`, puis après relance un nouveau `hello` a été
+   reçu (`backlog` 88 → 6, `state: Idle`) : l'état et le log ont bien été remplacés, pas
    concaténés.
 
 5. **Navigateur réel (Chrome headless + CDP)** — page chargée depuis le build servi par la

@@ -89,6 +89,16 @@ def test_client_gone_reason_is_stable_at_six():
     )
 
 
+def test_completed_reason_is_stable_at_seven():
+    # Motif décidé par le modèle (Tool ``end_session``) : ajouté en fin
+    # d'énumération, à la suite de ``CLIENT_GONE``. Aucune valeur existante ne
+    # bouge et l'aller-retour sur le fil est garanti.
+    assert SessionEndReason.COMPLETED == 7
+    assert decode(encode(SessionEnded(reason=SessionEndReason.COMPLETED))) == (
+        SessionEnded(reason=SessionEndReason.COMPLETED)
+    )
+
+
 def test_unknown_reason_is_preserved_not_coerced_to_normal():
     decoded = decode(encode(SessionEnded(reason=SessionEndReason(99))))
     assert int(decoded.reason) == 99

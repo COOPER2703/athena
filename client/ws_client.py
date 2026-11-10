@@ -84,6 +84,9 @@ class Transport(Protocol):
     def client_id(self) -> str | None: ...
 
     @property
+    def connected(self) -> bool: ...
+
+    @property
     def is_connected(self) -> bool: ...
 
     async def run(self) -> None: ...
@@ -135,8 +138,13 @@ class WsTransport:
         return self._client_id
 
     @property
-    def is_connected(self) -> bool:
+    def connected(self) -> bool:
         return self._ws is not None and self._connected.is_set()
+
+    @property
+    def is_connected(self) -> bool:
+        """Alias historique de ``connected``, conservé pour les appelants."""
+        return self.connected
 
     def set_listener(self, listener: TransportListener) -> None:
         self._listener = listener
