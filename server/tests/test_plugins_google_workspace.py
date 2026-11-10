@@ -410,6 +410,7 @@ INSTRUCTION = INSTRUCTION_TEMPLATE.replace("{accounts}", "pro, perso").replace(
 )
 
 MESSAGES_PATH = "/gmail/v1/users/me/messages"
+SEND_PATH = f"{MESSAGES_PATH}/send"
 THREADS_PATH = "/gmail/v1/users/me/threads"
 CALENDAR_EVENTS_BASE = "/calendar/v3/calendars"
 CALENDAR_PRIMARY_PATH = f"{CALENDAR_EVENTS_BASE}/primary/events"
@@ -3702,7 +3703,7 @@ def test_gmail_send_composes_a_utf8_plain_text_mime_and_returns_the_new_ids(
             program_tokens(stub)
             stub.route(
                 "POST",
-                MESSAGES_PATH,
+                SEND_PATH,
                 body={"id": "envoye-1", "threadId": "fil-envoye-1"},
             )
             async with google_workspace_session(tmp_path, stub) as (
@@ -3728,7 +3729,7 @@ def test_gmail_send_composes_a_utf8_plain_text_mime_and_returns_the_new_ids(
                     "thread_id": "fil-envoye-1",
                 }
 
-                [request] = stub.requests_for("POST", MESSAGES_PATH)
+                [request] = stub.requests_for("POST", SEND_PATH)
                 assert request["authorization"] == f"Bearer {ACCESS_TOKEN_PERSO}"
                 assert request["content_type"].startswith("application/json")
                 assert set(request["body"]) == {"raw"}
@@ -3758,7 +3759,7 @@ def test_gmail_send_puts_cc_and_bcc_in_the_same_mime(
             program_tokens(stub)
             stub.route(
                 "POST",
-                MESSAGES_PATH,
+                SEND_PATH,
                 body={"id": "envoye-2", "threadId": "fil-envoye-2"},
             )
             async with google_workspace_session(tmp_path, stub) as (
@@ -3781,7 +3782,7 @@ def test_gmail_send_puts_cc_and_bcc_in_the_same_mime(
                 )
 
                 assert payload["status"] == "ok"
-                [request] = stub.requests_for("POST", MESSAGES_PATH)
+                [request] = stub.requests_for("POST", SEND_PATH)
                 message = gmail_sent_message(request)
                 assert message["To"] == "camille@example.test"
                 assert message["Cc"] == (
@@ -3847,7 +3848,7 @@ def test_gmail_send_refuses_an_empty_recipient_or_body_before_any_call(
                 assert unknown["status"] == "error"
                 assert "inconnu" in unknown["message"]
 
-                assert stub.requests_for("POST", MESSAGES_PATH) == []
+                assert stub.requests_for("POST", SEND_PATH) == []
 
     asyncio.run(scenario())
 
@@ -3860,7 +3861,7 @@ def test_gmail_send_turns_a_refused_send_into_a_french_sentence(
             program_tokens(stub)
             stub.route(
                 "POST",
-                MESSAGES_PATH,
+                SEND_PATH,
                 status=403,
                 body={"error": {"code": 403}},
             )
@@ -3886,7 +3887,7 @@ def test_gmail_send_turns_a_refused_send_into_a_french_sentence(
                     "L'envoi du mail n'a pas abouti"
                 )
                 assert "refusé" in payload["message"]
-                assert len(stub.requests_for("POST", MESSAGES_PATH)) == 1
+                assert len(stub.requests_for("POST", SEND_PATH)) == 1
                 assert len(stub.token_requests) == 2
                 assert sink.of_kind("ToolFailed")[-1].payload["status"] == (
                     "HTTP 403"
@@ -3912,7 +3913,7 @@ def test_a_401_on_send_refreshes_once_and_replays_the_same_raw_message(
             )
             stub.route_sequence(
                 "POST",
-                MESSAGES_PATH,
+                SEND_PATH,
                 [
                     {"status": 401, "body": {"error": {"code": 401}}},
                     {"body": {"id": "envoye-3", "threadId": "fil-envoye-3"}},
@@ -3940,7 +3941,7 @@ def test_a_401_on_send_refreshes_once_and_replays_the_same_raw_message(
                     "message_id": "envoye-3",
                     "thread_id": "fil-envoye-3",
                 }
-                sent = stub.requests_for("POST", MESSAGES_PATH)
+                sent = stub.requests_for("POST", SEND_PATH)
                 assert [request["authorization"] for request in sent] == [
                     f"Bearer {ACCESS_TOKEN_PERSO}",
                     "Bearer access-token-perso-2",
@@ -3965,7 +3966,7 @@ def test_gmail_reply_reuses_the_thread_recipient_and_reply_headers(
             stub.route("GET", f"{MESSAGES_PATH}/m1", body=original)
             stub.route(
                 "POST",
-                MESSAGES_PATH,
+                SEND_PATH,
                 body={"id": "reponse-1", "threadId": "t1"},
             )
             async with google_workspace_session(tmp_path, stub) as (
@@ -3998,7 +3999,7 @@ def test_gmail_reply_reuses_the_thread_recipient_and_reply_headers(
                     "References",
                 ]
 
-                [posted] = stub.requests_for("POST", MESSAGES_PATH)
+                [posted] = stub.requests_for("POST", SEND_PATH)
                 assert posted["body"]["threadId"] == "t1"
                 message = gmail_sent_message(posted)
                 assert message["To"] == "Camille <camille@example.test>"
@@ -4031,7 +4032,7 @@ def test_gmail_reply_decodes_an_encoded_subject_and_sender(
             )
             stub.route(
                 "POST",
-                MESSAGES_PATH,
+                SEND_PATH,
                 body={"id": "reponse-encoded", "threadId": "t1"},
             )
             async with google_workspace_session(tmp_path, stub) as (
@@ -4048,7 +4049,7 @@ def test_gmail_reply_decodes_an_encoded_subject_and_sender(
                 )
 
                 assert payload["status"] == "ok"
-                [posted] = stub.requests_for("POST", MESSAGES_PATH)
+                [posted] = stub.requests_for("POST", SEND_PATH)
                 message = gmail_sent_message(posted)
                 assert message["Subject"] == "Re: Déjeuner jeudi"
                 assert message["To"] == (
@@ -4078,7 +4079,7 @@ def test_gmail_reply_all_adds_the_original_recipients_without_self(
             )
             stub.route(
                 "POST",
-                MESSAGES_PATH,
+                SEND_PATH,
                 body={"id": "reponse-2", "threadId": "t1"},
             )
             async with google_workspace_session(tmp_path, stub) as (
@@ -4099,7 +4100,7 @@ def test_gmail_reply_all_adds_the_original_recipients_without_self(
                 )
 
                 assert payload["status"] == "ok"
-                [posted] = stub.requests_for("POST", MESSAGES_PATH)
+                [posted] = stub.requests_for("POST", SEND_PATH)
                 message = gmail_sent_message(posted)
                 assert message["To"] == (
                     "Camille <camille@example.test>, equipe@example.test"
@@ -4126,7 +4127,7 @@ def test_gmail_reply_does_not_stack_the_re_prefix(
             )
             stub.route(
                 "POST",
-                MESSAGES_PATH,
+                SEND_PATH,
                 body={"id": "reponse-3", "threadId": "t1"},
             )
             async with google_workspace_session(tmp_path, stub) as (
@@ -4142,7 +4143,7 @@ def test_gmail_reply_does_not_stack_the_re_prefix(
                     {"message_id": "m1", "body": "D'accord."},
                 )
 
-                [posted] = stub.requests_for("POST", MESSAGES_PATH)
+                [posted] = stub.requests_for("POST", SEND_PATH)
                 assert gmail_sent_message(posted)["Subject"] == (
                     "RE: Déjeuner jeudi"
                 )
@@ -4197,7 +4198,7 @@ def test_gmail_reply_refuses_an_empty_body_or_a_missing_original(
                 assert "inconnu" in unknown["message"]
                 assert "introuvable" in missing["message"]
                 assert stub.requests_for("GET", f"{MESSAGES_PATH}/m1") == []
-                assert stub.requests_for("POST", MESSAGES_PATH) == []
+                assert stub.requests_for("POST", SEND_PATH) == []
 
     asyncio.run(scenario())
 
@@ -4319,7 +4320,7 @@ def test_send_and_reply_traces_never_carry_addresses_subjects_or_bodies(
             )
             stub.route(
                 "POST",
-                MESSAGES_PATH,
+                SEND_PATH,
                 body={"id": "envoye-4", "threadId": "fil-4"},
             )
             async with google_workspace_session(tmp_path, stub) as (

@@ -76,6 +76,9 @@ GMAIL_READ_BODY_LIMIT = 6000
 
 # Chemins Gmail. ``me`` désigne le compte porteur du jeton.
 GMAIL_MESSAGES_PATH = "/gmail/v1/users/me/messages"
+# ``messages.insert`` (POST /messages) n'accepte pas le scope ``gmail.send`` ;
+# l'envoi passe par ``messages.send``, seul endpoint couvert par ce scope.
+GMAIL_SEND_PATH = GMAIL_MESSAGES_PATH + "/send"
 GMAIL_THREADS_PATH = "/gmail/v1/users/me/threads"
 
 # En-têtes de métadonnées demandés à Gmail pour chaque message.
@@ -1748,11 +1751,11 @@ async def _send_raw_message(
     thread_id: str | None,
     prefix: str,
 ) -> Mapping[str, Any]:
-    """``POST /messages`` avec ``raw`` ; ``threadId`` seulement pour une réponse."""
+    """``POST /messages/send`` avec ``raw`` ; ``threadId`` pour une réponse."""
     payload: dict[str, object] = {"raw": raw}
     if thread_id:
         payload["threadId"] = thread_id
-    url = settings.api_base_url + GMAIL_MESSAGES_PATH
+    url = settings.api_base_url + GMAIL_SEND_PATH
     response = await _authorized_delivery(
         settings, account, trace, "POST", url, payload=payload, prefix=prefix
     )
