@@ -963,8 +963,14 @@ def test_pending_playback_suspends_detection() -> None:
         await app.forward_audio(b"silence")
         assert detector.processed == []
 
-        # La fin de Session vide la file ; la Veille est réarmée.
+        # La fin de Session garde l'adieu en file (ADR-0022) : la Veille reste
+        # suspendue tant qu'il n'a pas été joué.
         await app.on_session_ended(SessionEnded())
+        await app.forward_audio(b"silence")
+        assert detector.processed == []
+
+        # Une fois l'adieu joué, la Veille réentend le micro.
+        app._drop_playback()
         await app.forward_audio(b"silence")
         assert detector.processed == [b"silence"]
 
@@ -1044,7 +1050,7 @@ def test_confirmation_leaves_no_timeout_task_alive() -> None:
     asyncio.run(scenario())
 
 
-def test_session_ended_flushes_playback_and_blocks_detection_during_cooldown() -> None:
+def test_session_ended_keeps_playback_and_cooldown_blocks_detection() -> None:
     async def scenario() -> None:
         now = [100.0]
         cfg = AppConfig(wake_word=WakeWordConfig(cooldown_seconds=2.0))
@@ -1064,9 +1070,11 @@ def test_session_ended_flushes_playback_and_blocks_detection_during_cooldown() -
         await app.on_session_ended(SessionEnded())
 
         assert app.state is ClientState.LISTENING
-        assert app._playback.empty()
+        # L'adieu déjà reçu s'achève (ADR-0022) : il reste en file.
+        assert not app._playback.empty()
 
-        # Pendant le cooldown, l'audio ne va pas au détecteur.
+        # Une fois l'adieu joué, seul le cooldown bloque encore la Veille.
+        app._drop_playback()
         await app.forward_audio(b"trigger")
         assert detector.processed == []
 

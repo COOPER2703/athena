@@ -170,7 +170,7 @@ class ClientApp:
                 "audio) après %.1f s, retour en écoute",
                 delay,
             )
-            await self._reset_to_listening()
+            await self._reset_to_listening(drop_playback=True)
         finally:
             if self._session_timeout_task is asyncio.current_task():
                 self._session_timeout_task = None
@@ -317,11 +317,30 @@ class ClientApp:
 
     async def _reset_to_listening(self, *, drop_playback: bool) -> None:
         self._state = ClientState.LISTENING
+        self._session_confirmed = False
+        self._pending_live.clear()
+        self._reset_detector_window()
         # La fin d'une Session ne coupe pas le flux de sortie : l'audio déjà
         # reçu s'achève (ADR-0022). Une perte de connexion, elle, jette la file
         # devenue périmée.
         if drop_playback:
             self._drop_playback()
+        cooldown = self._cfg.wake_word.cooldown_seconds
+        self._cooldown_until = self._now() + max(0.0, cooldown)
+        if cooldown > 0:
+            log.info("Veille en cooldown pendant %.1f s", cooldown)
+
+    def _reset_detector_window(self) -> None:
+        """Jette le pré-roll d'avant la Session sur le retour en écoute."""
+        detector = self._detector
+        if detector is None:
+            return
+        try:
+            detector.reset()
+        except Exception:
+            # Une réinitialisation ratée ne doit pas empêcher la fin de Session
+            # ni le retour en écoute.
+            log.exception("Échec de la réinitialisation du détecteur de Wake word")
 
     async def _flush_playback(self) -> None:
         """Barge-in : jette la file et coupe ce qui est en train de jouer."""
@@ -340,6 +359,10 @@ class ClientApp:
         await self._playback.put(data)
 
     async def on_session_started(self, message: SessionStarted) -> None:
+        # Une Session annoncée confirme que le garde-fou contre la Session
+        # fantôme n'a plus lieu d'être.
+        self._session_confirmed = True
+        await self._stop_session_timeout()
         # Une Session qui démarre pendant que l'adieu précédent s'achève coupe
         # ce reliquat : le nouveau tour a la priorité (ADR-0022).
         await self._flush_playback()
@@ -347,11 +370,13 @@ class ClientApp:
         log.info("Session active")
 
     async def on_session_ended(self, message: SessionEnded) -> None:
+        await self._stop_session_timeout()
         await self._reset_to_listening(drop_playback=False)
         log.info("Session terminée")
 
     async def on_disconnect(self) -> None:
         log.warning("Connexion perdue, retour en écoute")
+        await self._stop_session_timeout()
         await self._reset_to_listening(drop_playback=True)
 
     async def on_error(self, message: Error) -> None:
