@@ -171,7 +171,8 @@ _Avoid_: Channel, conversation, chat room
 
 **Contact**:
 Une personne joignable via Matrix, identifiée par un `user_id`, reliée le cas échéant à
-une Room. Un nom de contact n'est pas un identifiant.
+une Room. Un nom de contact n'est pas un identifiant. Se distingue du **Contact Google**,
+qui vit dans le carnet d'un Compte Google.
 _Avoid_: Interlocuteur, correspondant, utilisateur
 
 **Bridge**:
@@ -379,6 +380,18 @@ _Avoid_: compte Workspace, compte Gmail, profil Google
 Une entrée de l'agenda Google d'un Compte Google : début, fin, titre, lieu et participants
 éventuels. Se distingue de l'**Événement** (fait externe poussé vers Athena).
 _Avoid_: événement (seul), meeting, créneau
+
+**Carnet de contacts**:
+L'ensemble des **Contacts Google** d'un Compte Google, contacts enregistrés et contacts
+mémorisés par Gmail réunis. N'est pas un annuaire : l'annuaire du domaine Workspace n'en
+fait pas partie.
+_Avoid_: répertoire, annuaire, contacts (seul)
+
+**Contact Google**:
+Une personne du carnet d'un **Compte Google**, réduite à un nom d'affichage et à ses
+adresses e-mail. Un nom seul ne la résout pas, et elle peut porter plusieurs adresses :
+c'est une recherche, pas une clé. Se distingue du **Contact** (Matrix).
+_Avoid_: contact (seul), fiche, répertoire, annuaire
 
 ### Développement assisté
 

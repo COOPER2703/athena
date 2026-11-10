@@ -1,4 +1,7 @@
-"""Plugin ``google-workspace`` : mails Gmail et agenda Google (ADR-0021).
+"""Plugin ``google-workspace`` : mails Gmail, agenda Google et contacts.
+
+Le socle est celui de l'ADR-0021 (refresh tokens statiques) ; le carnet ajoute
+l'API People de l'ADR-0022.
 
 Ce module ne connaît du serveur que le contrat public des plugins
 (``plugin_api``) : il n'importe aucun interne. Il échange des refresh tokens
@@ -14,10 +17,12 @@ Un appel de Tool, lui, ne lève jamais : une panne devient une phrase rendue au
 modèle.
 
 Le socle (comptes, jetons, HTTP, erreurs) est partagé : le plugin expose
-huit Tools, quatre pour Gmail (``gmail_search``, ``gmail_read``,
-``gmail_send``, ``gmail_reply``) et quatre pour l'agenda
+neuf Tools, quatre pour Gmail (``gmail_search``, ``gmail_read``,
+``gmail_send``, ``gmail_reply``), quatre pour l'agenda
 (``calendar_list_events``, ``calendar_create_event``,
-``calendar_update_event``, ``calendar_delete_event``).
+``calendar_update_event``, ``calendar_delete_event``) et un pour le carnet
+(``contacts_search``). Le carnet vient de l'API People, sur un hôte distinct
+réglé par ``people_base_url`` (ADR-0022).
 """
 
 from __future__ import annotations
@@ -28,7 +33,7 @@ import email.policy
 import html
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from email.header import decode_header, make_header
 from email.message import EmailMessage
@@ -49,6 +54,7 @@ from plugin_api import (
 # Valeurs sûres appliquées par le plugin quand la configuration manque : le
 # chargeur ne sait pas porter de défaut (ADR-0014).
 DEFAULT_API_BASE_URL = "https://www.googleapis.com"
+DEFAULT_PEOPLE_BASE_URL = "https://people.googleapis.com"
 DEFAULT_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 # Budgets HTTP : un seul essai, sauf le rejeu unique imposé après un 401.
@@ -108,6 +114,25 @@ CALENDAR_MAX_RESULTS_MIN = 1
 
 # Chemin Calendar ; l'identifiant d'agenda y est encodé séparément.
 CALENDAR_EVENTS_BASE_PATH = "/calendar/v3/calendars"
+
+# Carnet People API : deux gisements fusionnés par adresse (ADR-0022).
+PEOPLE_ME_PATH = "/v1/people/me"
+PEOPLE_CONNECTIONS_PATH = "/v1/people/me/connections"
+OTHER_CONTACTS_PATH = "/v1/otherContacts"
+CONTACTS_PERSON_FIELDS = "names,emailAddresses"
+
+# Bornes de ``contacts_search`` : dix personnes par défaut, vingt-cinq au plus.
+CONTACTS_MAX_RESULTS_DEFAULT = 10
+CONTACTS_MAX_RESULTS_MAX = 25
+CONTACTS_MAX_RESULTS_MIN = 1
+
+# La sonde de démarrage ne retarde jamais l'activation plus de deux secondes.
+CONTACTS_PROBE_TIMEOUT = 2.0
+
+# Une recherche vocale ne pagine pas : on parcourt au plus quatre pages par
+# gisement, puis ``truncated`` dit au modèle de faire préciser le nom.
+CONTACTS_PAGE_SIZE = 500
+CONTACTS_MAX_PAGES = 4
 
 # -- Schémas des Tools --------------------------------------------------------
 
@@ -189,17 +214,22 @@ GMAIL_SEND_PARAMETERS: Mapping[str, object] = {
             "type": "array",
             "items": {"type": "string"},
             "minItems": 1,
-            "description": "Destinataires principaux, au moins un.",
+            "description": (
+                "Destinataires principaux, au moins un ; des adresses e-mail, "
+                "jamais des noms."
+            ),
         },
         "cc": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Destinataires en copie.",
+            "description": "Destinataires en copie ; des adresses e-mail.",
         },
         "bcc": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Destinataires en copie cachée.",
+            "description": (
+                "Destinataires en copie cachée ; des adresses e-mail."
+            ),
         },
         "subject": {
             "type": "string",
@@ -218,6 +248,34 @@ GMAIL_SEND_PARAMETERS: Mapping[str, object] = {
         },
     },
     "required": ["to", "subject", "body"],
+}
+
+CONTACTS_SEARCH_DESCRIPTION = (
+    "Cherche des personnes dans les contacts Google et rend leurs adresses."
+)
+
+CONTACTS_SEARCH_PARAMETERS: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": "Nom ou adresse à chercher dans les contacts Google.",
+        },
+        "account": {
+            "type": "string",
+            "description": (
+                "Clé du compte Google à utiliser ; le compte par défaut "
+                "quand il est absent."
+            ),
+        },
+        "max_results": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 25,
+            "description": "Nombre de personnes rendues, de 1 à 25. Défaut 10.",
+        },
+    },
+    "required": ["query"],
 }
 
 GMAIL_REPLY_DESCRIPTION = "Répond dans le fil d'un message Gmail."
@@ -468,8 +526,8 @@ CALENDAR_DELETE_EVENT_PARAMETERS: Mapping[str, object] = {
 # -- Instruction de plugin ----------------------------------------------------
 
 INSTRUCTION_TEMPLATE = (
-    "Tu disposes des Tools Google Workspace pour les mails Gmail et l'agenda "
-    "Google.\n"
+    "Tu disposes des Tools Google Workspace pour les mails Gmail, l'agenda "
+    "Google et les contacts.\n"
     "\n"
     "COMPTES:\n"
     "- Comptes disponibles : {accounts}. Compte par défaut : {default}.\n"
@@ -477,6 +535,16 @@ INSTRUCTION_TEMPLATE = (
     "- Si la demande peut viser plusieurs comptes et qu'aucun n'est nommé, "
     "demande lequel.\n"
     "- N'invente jamais un nom de compte.\n"
+    "\n"
+    "CONTACTS:\n"
+    "- `contacts_search` d'abord quand l'utilisateur nomme une personne ; "
+    "n'invente jamais une adresse.\n"
+    "- Une personne avec une seule adresse : annonce l'adresse trouvée.\n"
+    "- Une personne avec plusieurs adresses : lis-les à voix haute et demande "
+    "laquelle, sans choisir.\n"
+    "- Plusieurs personnes : lis les noms et les adresses, puis fais choisir.\n"
+    "- Aucun résultat : dis-le et propose de donner l'adresse exacte ; ne "
+    "cherche pas dans un autre compte sans le demander.\n"
     "\n"
     "MAILS:\n"
     "- `gmail_search` d'abord pour trouver un message ; n'invente jamais un "
@@ -486,6 +554,9 @@ INSTRUCTION_TEMPLATE = (
     "- `gmail_send` et `gmail_reply` : relis à voix haute destinataires, objet "
     "et corps, puis attends un « oui » explicite avant d'envoyer. N'envoie "
     "jamais de ta propre initiative.\n"
+    "- Quand l'adresse vient de `contacts_search`, la relecture d'envoi inclut "
+    "l'adresse résolue : ne demande pas une confirmation pour l'adresse puis "
+    "une autre pour le message.\n"
     "- Le corps est du texte brut. Pas de HTML, pas de pièce jointe ; si un "
     "message en a, tu peux nommer les pièces jointes mais pas les lire.\n"
     "- Après un envoi, confirme brièvement.\n"
@@ -671,6 +742,50 @@ _CALENDAR_WRITE_STATUS_REASONS = _StatusReasons(
     service="Agenda",
 )
 
+# Phrases propres aux contacts : le carnet vit sur l'API People (ADR-0022).
+_CONTACTS_PREFIX = "La recherche dans les contacts n'a pas abouti : "
+
+_CONTACTS_UNREACHABLE_MESSAGE = (
+    _CONTACTS_PREFIX
+    + "le service Contacts est injoignable. Réessaie dans un instant."
+)
+_CONTACTS_TIMEOUT_MESSAGE = (
+    _CONTACTS_PREFIX
+    + "le service Contacts n'a pas répondu à temps. "
+    "Réessaie dans un instant."
+)
+_CONTACTS_UNREADABLE_MESSAGE = (
+    _CONTACTS_PREFIX
+    + "le service Contacts a renvoyé une réponse illisible. "
+    "Réessaie dans un instant."
+)
+_CONTACTS_STATUS_REASONS = _StatusReasons(
+    validation="la requête a été refusée. Vérifie le nom cherché.",
+    forbidden="l'accès au carnet de ce compte est refusé.",
+    not_found="le carnet demandé est introuvable.",
+    service="Contacts",
+)
+
+# Raisons Google d'un 403 réparable par une réautorisation, jamais un texte
+# libre : seule cette liste devient une phrase dédiée.
+_CONTACTS_SCOPE_REASONS = frozenset(
+    {
+        "ACCESS_TOKEN_SCOPE_INSUFFICIENT",
+        "SERVICE_DISABLED",
+        "accessNotConfigured",
+        "insufficientPermissions",
+    }
+)
+
+
+def _contacts_scope_message(account: str) -> str:
+    """Phrase d'un carnet inaccessible faute de scope ou d'API activée."""
+    return (
+        _CONTACTS_PREFIX
+        + f"le carnet du compte « {account} » n'est pas accessible : "
+        "active l'API People et réautorise le compte, puis réessaie."
+    )
+
 
 class _TokenError(Exception):
     """Échec d'échange OAuth ; ``reason`` est sûre à tracer et à rendre."""
@@ -718,6 +833,7 @@ class _Settings:
     accounts: tuple[_Account, ...]
     default_account: str
     api_base_url: str
+    people_base_url: str
     token_url: str
 
     def account(self, key: str) -> _Account | None:
@@ -783,7 +899,7 @@ async def _prepare_account(
 ) -> bool:
     """Échange le refresh token d'un compte et trace son état de démarrage."""
     try:
-        await _access_token(settings, account, trace, force=True)
+        token = await _access_token(settings, account, trace, force=True)
     except asyncio.CancelledError:
         raise
     except _TokenError as exc:
@@ -801,6 +917,13 @@ async def _prepare_account(
         )
         return False
     trace("AccountReady", {"account": account.key})
+    try:
+        await asyncio.wait_for(
+            _probe_contacts(settings, account, trace, token),
+            timeout=CONTACTS_PROBE_TIMEOUT,
+        )
+    except TimeoutError:
+        pass
     return True
 
 
@@ -886,6 +1009,9 @@ def _settings(context: PluginContext) -> _Settings:
         accounts=tuple(accounts),
         default_account=default_account,
         api_base_url=text("api_base_url", DEFAULT_API_BASE_URL).rstrip("/"),
+        people_base_url=text(
+            "people_base_url", DEFAULT_PEOPLE_BASE_URL
+        ).rstrip("/"),
         token_url=text("token_url", DEFAULT_TOKEN_URL),
     )
 
@@ -902,17 +1028,21 @@ def _entries(name: str, raw: str) -> list[str]:
     return values
 
 
-def _account_key(label: str) -> str:
-    """Clé de compte : minuscules, accents retirés, non-alphanumériques en ``-``."""
-    folded = unicodedata.normalize("NFKD", label)
-    without_accents = "".join(
+def _folded(text: str) -> str:
+    """Retire les accents (NFKD) ; la casse reste à l'appelant."""
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(
         character
-        for character in folded
+        for character in decomposed
         if not unicodedata.combining(character)
     )
+
+
+def _account_key(label: str) -> str:
+    """Clé de compte : minuscules, accents retirés, non-alphanumériques en ``-``."""
     replaced = "".join(
         character if character.isalnum() else "-"
-        for character in without_accents.lower()
+        for character in _folded(label).lower()
     )
     return re.sub(r"-+", "-", replaced).strip("-")
 
@@ -1170,12 +1300,13 @@ def _read_status_error(status: int) -> str:
 def _tool_bindings(
     settings: _Settings, trace: Trace
 ) -> tuple[ToolBinding, ...]:
-    """Les huit Tools du plugin : quatre Gmail et quatre Calendar."""
+    """Les neuf Tools du plugin : quatre Gmail, un carnet, quatre Calendar."""
     return (
         _gmail_search_tool(settings, trace),
         _gmail_read_tool(settings, trace),
         _gmail_send_tool(settings, trace),
         _gmail_reply_tool(settings, trace),
+        _contacts_search_tool(settings, trace),
         _calendar_list_events_tool(settings, trace),
         _calendar_create_event_tool(settings, trace),
         _calendar_update_event_tool(settings, trace),
@@ -1418,6 +1549,16 @@ async def _gmail_send(
             "invalid_to",
             _SEND_PREFIX + "le destinataire est absent ou invalide.",
         )
+    named = next((value for value in to if not _address_like(value)), None)
+    if named is not None:
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            "invalid_to",
+            _SEND_PREFIX + _not_an_address_message(),
+        )
     if cc is None or bcc is None:
         return _fail(
             trace,
@@ -1426,6 +1567,24 @@ async def _gmail_send(
             started,
             "invalid_recipient",
             _SEND_PREFIX + "un destinataire en copie est invalide.",
+        )
+    copied = next(
+        (
+            value
+            for values in (cc, bcc)
+            for value in values
+            if not _address_like(value)
+        ),
+        None,
+    )
+    if copied is not None:
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            "invalid_recipient",
+            _SEND_PREFIX + _not_an_address_message(copy=True),
         )
     if not isinstance(subject, str):
         return _fail(
@@ -1824,6 +1983,36 @@ def _addresses(value: object) -> list[str] | None:
     return addresses
 
 
+def _address_like(value: str) -> bool:
+    """Vrai pour une adresse e-mail, éventuellement sous forme « Nom <adresse> ».
+
+    Un nom seul, une liste de plusieurs adresses ou une chaîne avec un espace
+    dans la partie adresse est refusé : le modèle doit d'abord résoudre la
+    personne avec ``contacts_search``.
+    """
+    try:
+        parsed = getaddresses([value])
+    except Exception:
+        return False
+    if len(parsed) != 1:
+        return False
+    _, address = parsed[0]
+    return (
+        bool(address)
+        and "@" in address
+        and not any(character.isspace() for character in address)
+    )
+
+
+def _not_an_address_message(*, copy: bool = False) -> str:
+    """Phrase d'un nom reçu à la place d'une adresse ; jamais la valeur."""
+    role = "en copie " if copy else ""
+    return (
+        f"un destinataire {role}n'est pas une adresse e-mail : utilise "
+        "`contacts_search` pour trouver l'adresse de la personne."
+    )
+
+
 async def _authorized_delivery(
     settings: _Settings,
     account: _Account,
@@ -1921,6 +2110,452 @@ def _unknown_account_failure(
         started,
         "invalid_account",
         _unknown_account_message(settings, shown),
+    )
+
+
+# -- Tool ``contacts_search`` -------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _Candidate:
+    """Une personne candidate, déjà réduite à son nom et à ses adresses."""
+
+    name: str
+    emails: tuple[tuple[str, str], ...]
+    source: str
+
+
+@dataclass(slots=True)
+class _Group:
+    """Personnes fusionnées autour d'une même adresse, noms par provenance."""
+
+    carnet_name: str = ""
+    other_name: str = ""
+    source: str = "autres"
+    emails: list[tuple[str, str]] = field(default_factory=list)
+    seen: set[str] = field(default_factory=set)
+
+    @property
+    def name(self) -> str:
+        """Le nom du carnet prime sur celui des autres contacts."""
+        return self.carnet_name or self.other_name
+
+    def add(self, candidate: _Candidate) -> None:
+        """Ajoute une personne au groupe sans répéter une adresse déjà vue."""
+        if candidate.source == "carnet":
+            self.source = "carnet"
+            self.carnet_name = self.carnet_name or candidate.name
+        else:
+            self.other_name = self.other_name or candidate.name
+        for address, kind in candidate.emails:
+            key = _normalized(address)
+            if key in self.seen:
+                continue
+            self.seen.add(key)
+            self.emails.append((address, kind))
+
+
+def _contacts_search_tool(settings: _Settings, trace: Trace) -> ToolBinding:
+    """Déclare ``contacts_search`` et son handler : un appel ne lève jamais."""
+
+    async def handle(arguments: Mapping[str, object]) -> Mapping[str, object]:
+        return await _contacts_search(settings, arguments, trace)
+
+    return ToolBinding(
+        spec=ToolSpec(
+            name="contacts_search",
+            description=CONTACTS_SEARCH_DESCRIPTION,
+            parameters=CONTACTS_SEARCH_PARAMETERS,
+        ),
+        handler=handle,
+    )
+
+
+async def _contacts_search(
+    settings: _Settings,
+    arguments: Mapping[str, object],
+    trace: Trace,
+) -> Mapping[str, object]:
+    """Cherche des personnes dans les deux gisements, sans jamais lever."""
+    tool = "contacts_search"
+    started = asyncio.get_running_loop().time()
+
+    account = _resolve_account(settings, arguments.get("account"))
+    if account is None:
+        return _unknown_account_failure(
+            settings, arguments, trace, tool, started
+        )
+
+    query = arguments.get("query")
+    tokens = _contact_tokens(query if isinstance(query, str) else "")
+    if not isinstance(query, str) or not query.strip() or not tokens:
+        message = _CONTACTS_PREFIX + "la requête est vide."
+        return _fail(trace, tool, account.key, started, "invalid_query", message)
+
+    max_results = _bounded_int(
+        arguments.get("max_results"),
+        default=CONTACTS_MAX_RESULTS_DEFAULT,
+        minimum=CONTACTS_MAX_RESULTS_MIN,
+        maximum=CONTACTS_MAX_RESULTS_MAX,
+    )
+
+    try:
+        (saved, cut_saved), (others, cut_others) = await asyncio.gather(
+            _fetch_people(
+                settings,
+                account,
+                trace,
+                path=PEOPLE_CONNECTIONS_PATH,
+                params={
+                    "personFields": CONTACTS_PERSON_FIELDS,
+                    "pageSize": CONTACTS_PAGE_SIZE,
+                },
+                key="connections",
+                source="carnet",
+            ),
+            _fetch_people(
+                settings,
+                account,
+                trace,
+                path=OTHER_CONTACTS_PATH,
+                params={
+                    "readMask": CONTACTS_PERSON_FIELDS,
+                    "pageSize": CONTACTS_PAGE_SIZE,
+                },
+                key="otherContacts",
+                source="autres",
+            ),
+        )
+    except asyncio.CancelledError:
+        raise
+    except _AccountUnavailable as exc:
+        return _fail(trace, tool, account.key, started, "unavailable", exc.message)
+    except _RequestFailure as exc:
+        return _fail(trace, tool, account.key, started, exc.status, exc.message)
+    except Exception as exc:  # défense : le handler ne lève jamais
+        return _fail(
+            trace,
+            tool,
+            account.key,
+            started,
+            type(exc).__name__,
+            _CONTACTS_UNREADABLE_MESSAGE,
+        )
+
+    people, truncated = _select_contacts(
+        saved, others, tokens, max_results
+    )
+    payload: dict[str, object] = {
+        "status": "ok",
+        "account": account.key,
+        "results": people,
+        "truncated": truncated or cut_saved or cut_others,
+    }
+    _trace_tool(trace, tool, account.key, started, "ok", len(people))
+    return payload
+
+
+async def _fetch_people(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    *,
+    path: str,
+    params: Mapping[str, object],
+    key: str,
+    source: str,
+) -> tuple[list[_Candidate], bool]:
+    """Lit un gisement page après page, borné par ``CONTACTS_MAX_PAGES``."""
+    url = settings.people_base_url + path
+    candidates: list[_Candidate] = []
+    page_token: str | None = None
+    pages = 0
+    truncated = False
+    while True:
+        query = dict(params)
+        if page_token is not None:
+            query["pageToken"] = page_token
+        response = await _contacts_get(settings, account, trace, url, query)
+        if response.status_code >= 400:
+            message, status = _contacts_status_error(response, account.key)
+            raise _RequestFailure(message, status)
+        body = _contacts_json_body(response)
+        items = body.get(key)
+        if isinstance(items, list):
+            for item in items:
+                candidate = _candidate(item, source)
+                if candidate is not None:
+                    candidates.append(candidate)
+        page_token = _optional_text(body.get("nextPageToken"))
+        pages += 1
+        if page_token is None:
+            break
+        if pages >= CONTACTS_MAX_PAGES:
+            truncated = True
+            break
+    return candidates, truncated
+
+
+def _candidate(item: object, source: str) -> _Candidate | None:
+    """Personne d'une réponse People, écartée si elle n'a aucune adresse."""
+    if not isinstance(item, dict):
+        return None
+    emails = _email_addresses(item.get("emailAddresses"))
+    if not emails:
+        return None
+    return _Candidate(
+        name=_primary_name(item.get("names")),
+        emails=tuple(emails),
+        source=source,
+    )
+
+
+def _primary_name(names: object) -> str:
+    """Nom principal d'une fiche People ; le premier non vide sinon."""
+    if not isinstance(names, list):
+        return ""
+    first = ""
+    for entry in names:
+        if not isinstance(entry, dict):
+            continue
+        display = _text(entry.get("displayName")).strip()
+        if not display:
+            continue
+        metadata = entry.get("metadata")
+        if isinstance(metadata, dict) and metadata.get("primary") is True:
+            return display
+        if not first:
+            first = display
+    return first
+
+
+def _email_addresses(raw: object) -> list[tuple[str, str]]:
+    """Adresses d'une fiche People, dédoublonnées sur la forme normalisée."""
+    if not isinstance(raw, list):
+        return []
+    addresses: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        address = _text(entry.get("value")).strip()
+        if not address:
+            continue
+        key = _normalized(address)
+        if key in seen:
+            continue
+        seen.add(key)
+        addresses.append((address, _text(entry.get("type")).strip()))
+    return addresses
+
+
+def _select_contacts(
+    saved: list[_Candidate],
+    others: list[_Candidate],
+    tokens: list[str],
+    max_results: int,
+) -> tuple[list[dict[str, object]], bool]:
+    """Fusionne, filtre, trie et borne les personnes pour le modèle."""
+    merged = _merged_contacts(saved + others)
+    matches = [
+        candidate
+        for candidate in merged
+        if _candidate_matches(candidate, tokens)
+    ]
+    matches.sort(key=_contact_order)
+    truncated = len(matches) > max_results
+    return [
+        {
+            "name": candidate.name,
+            "emails": [
+                {"address": address, "type": kind}
+                for address, kind in candidate.emails
+            ],
+            "source": candidate.source,
+        }
+        for candidate in matches[:max_results]
+    ], truncated
+
+
+def _merged_contacts(candidates: list[_Candidate]) -> list[_Candidate]:
+    """Fusionne les personnes qui partagent au moins une adresse (ADR-0022)."""
+    parent: dict[str, str] = {}
+
+    def find(key: str) -> str:
+        """Racine d'une adresse, avec compression de chemin."""
+        root = key
+        while parent[root] != root:
+            root = parent[root]
+        while parent[key] != root:
+            parent[key], key = root, parent[key]
+        return root
+
+    def union(left: str, right: str) -> None:
+        """Réunit deux adresses dans le même groupe."""
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for candidate in candidates:
+        keys = [_normalized(address) for address, _ in candidate.emails]
+        for key in keys:
+            parent.setdefault(key, key)
+        for key in keys[1:]:
+            union(keys[0], key)
+
+    groups: dict[str, _Group] = {}
+    order: list[str] = []
+    for candidate in candidates:
+        root = find(_normalized(candidate.emails[0][0]))
+        group = groups.get(root)
+        if group is None:
+            group = _Group()
+            groups[root] = group
+            order.append(root)
+        group.add(candidate)
+
+    return [
+        _Candidate(
+            name=groups[root].name,
+            emails=tuple(groups[root].emails),
+            source=groups[root].source,
+        )
+        for root in order
+    ]
+
+
+def _normalized(text: str) -> str:
+    """Forme de comparaison : accents retirés, casse ignorée."""
+    return _folded(text).casefold().strip()
+
+
+def _contact_tokens(query: str) -> list[str]:
+    """Mots normalisés d'une recherche ; vide pour une requête sans mot."""
+    return [token for token in _normalized(query).split() if token]
+
+
+def _candidate_matches(candidate: _Candidate, tokens: list[str]) -> bool:
+    """Vrai si chaque mot de la requête apparaît dans le nom ou une adresse."""
+    haystack = _normalized(
+        " ".join(
+            [candidate.name]
+            + [address for address, _ in candidate.emails]
+        )
+    )
+    return all(token in haystack for token in tokens)
+
+
+def _contact_order(candidate: _Candidate) -> tuple[str, str]:
+    """Tri stable : nom, puis première adresse."""
+    return (
+        _normalized(candidate.name),
+        _normalized(candidate.emails[0][0]),
+    )
+
+
+async def _contacts_get(
+    settings: _Settings,
+    account: _Account,
+    trace: Trace,
+    url: str,
+    params: Mapping[str, object],
+) -> httpx2.Response:
+    """GET réutilisant le socle (jeton, 401) avec les phrases du carnet."""
+    try:
+        return await _authorized_get(
+            settings, account, trace, url, params
+        )
+    except _RequestFailure as exc:
+        raise _RequestFailure(
+            _contacts_transport_message(exc.status), exc.status
+        ) from exc
+
+
+def _contacts_transport_message(status: str) -> str:
+    """Phrase du carnet pour une panne de transport, jamais un détail brut."""
+    if status == "timeout":
+        return _CONTACTS_TIMEOUT_MESSAGE
+    if status == "unreadable":
+        return _CONTACTS_UNREADABLE_MESSAGE
+    return _CONTACTS_UNREACHABLE_MESSAGE
+
+
+def _contacts_json_body(response: httpx2.Response) -> Mapping[str, Any]:
+    """Corps JSON objet, relu avec la phrase d'illisibilité du carnet."""
+    try:
+        return _json_body(response)
+    except _RequestFailure as exc:
+        raise _RequestFailure(
+            _CONTACTS_UNREADABLE_MESSAGE, exc.status
+        ) from exc
+
+
+def _contacts_status_error(
+    response: httpx2.Response, account: str
+) -> tuple[str, str]:
+    """Phrase et statut d'un refus People, scope manquant reconnu à part."""
+    if response.status_code == 403:
+        reason = _scope_reason(response)
+        if reason is not None:
+            return _contacts_scope_message(account), "insufficient_scope"
+    return (
+        _status_message(
+            response.status_code, _CONTACTS_PREFIX, _CONTACTS_STATUS_REASONS
+        ),
+        f"HTTP {response.status_code}",
+    )
+
+
+def _scope_reason(response: httpx2.Response) -> str | None:
+    """Raison Google connue d'un 403 réparable, ou ``None``."""
+    try:
+        body = response.json()
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return None
+    reasons: list[str] = []
+    status = error.get("status")
+    if isinstance(status, str):
+        reasons.append(status)
+    for field, key in (("errors", "reason"), ("details", "reason")):
+        entries = error.get(field)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict):
+                reason = entry.get(key)
+                if isinstance(reason, str):
+                    reasons.append(reason)
+    for reason in reasons:
+        if reason in _CONTACTS_SCOPE_REASONS:
+            return reason
+    return None
+
+
+async def _probe_contacts(
+    settings: _Settings, account: _Account, trace: Trace, token: str
+) -> None:
+    """Sonde non bloquante : un scope manquant devient un avertissement."""
+    url = settings.people_base_url + PEOPLE_ME_PATH
+    try:
+        response = await _get(url, token, {"personFields": "names"})
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return
+    if response.status_code != 403:
+        return
+    reason = _scope_reason(response)
+    if reason is None:
+        return
+    trace(
+        "ContactsScopeMissing",
+        {"account": account.key, "reason": reason},
+        level="warning",
     )
 
 
