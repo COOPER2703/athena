@@ -20,5 +20,4 @@ remplit à chaque déménagement (spec #147, tickets #149 à #154).
 
 | Ancien ADR central | Nouvel ADR local | Ticket |
 | ------------------ | ---------------- | ------ |
-
-Aucune ligne pour l'instant : le premier déménagement la remplit.
+| `0015` | `plugins/homeassistant/docs/adr/0001-home-assistant-via-mcp.md` | #149 |

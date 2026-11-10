@@ -17,7 +17,7 @@ plugins/<nom>/
 ├── GLOSSARY.md        le vocabulaire propre au plugin
 ├── tests/
 │   ├── conftest.py    rend les modules d'aide du dossier importables
-│   ├── <nom>_stub.py  faux serveur externe (Tavily, Home Assistant, Notion, Google…)
+│   ├── <nom>_stub.py  faux serveur externe (Tavily, serveur MCP, Notion, Google…)
 │   └── test_plugins_<nom>.py
 └── docs/
     ├── smoke-test.md  la recette manuelle, lue à côté du code qu'elle vérifie
@@ -61,6 +61,6 @@ ATHENA_PLUGIN_<NOM>_<CLE>
 ```
 
 en majuscules, tout caractère non alphanumérique remplacé par `_`. Exemples :
-`ATHENA_PLUGIN_WEBSEARCH_API_KEY`, `ATHENA_PLUGIN_HOMEASSISTANT_TOKEN`,
+`ATHENA_PLUGIN_WEBSEARCH_API_KEY`, `ATHENA_PLUGIN_NOTION_TOKEN`,
 `ATHENA_PLUGIN_GOOGLE_WORKSPACE_CLIENT_ID`. Un secret obligatoire absent fait échouer le
 démarrage en nommant la variable (code de sortie 2) ; il n'est jamais tracé.

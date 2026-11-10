@@ -36,7 +36,7 @@ from server.app.root import App
 from server.app.secrets import EnvSecretResolver
 from server.core.plugins import PluginRegistry
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 PLUGIN_DIR = REPO_ROOT / "plugins" / "homeassistant"
 TOKEN = "ha-long-lived-test-token"
 TOKEN_VARIABLE = "ATHENA_PLUGIN_HOMEASSISTANT_TOKEN"

@@ -44,7 +44,7 @@ authority that decides the details.
 9. **Tests prove observable behaviour.** Fake the external platform locally; exercise the full
    path App → Gemini → registry → plugin → platform; assert on the requests emitted, the
    payload returned to the model, and the Traces. Do not test private helpers directly.
-   Authority: ADR-0018, `server/tests/test_plugins_homeassistant.py`,
+   Authority: ADR-0018, `plugins/homeassistant/tests/test_plugins_homeassistant.py`,
    `server/tests/test_plugins_websearch.py`.
 
 10. **The contract test must stay green.** No `server` import, an exact manifest, and a pure
