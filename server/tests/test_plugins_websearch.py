@@ -75,7 +75,7 @@ def test_absent_api_key_fails_the_start_and_names_the_variable(
 
 
 # ---------------------------------------------------------------------------
-# Faux Gemini et transport : mêmes formes que ``test_plugins_homeassistant``.
+# Faux Gemini et transport : mêmes formes que les autres tests de plugin.
 # ---------------------------------------------------------------------------
 
 

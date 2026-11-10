@@ -75,6 +75,12 @@ Les deux mécanismes de credential (ADR-0017) :
 - **Client desktop** : lit son Jeton dans `ATHENA_ACCESS_TOKEN` (variable de processus
   uniquement, pas de `.env` client) et refuse de démarrer s'il manque.
 
+### Home Assistant
+
+Le plugin `plugins/homeassistant/` pilote la domotique via le serveur MCP natif de Home Assistant.
+Activation, secret, configuration et démarrage dégradé : `plugins/homeassistant/README.md` ; décisions
+et vocabulaire : `plugins/homeassistant/docs/adr/0001-home-assistant-via-mcp.md`, `plugins/homeassistant/GLOSSARY.md`.
+
 ### Créer un plugin
 
 La forme obligatoire d'un dossier de plugin — manifeste, entrypoint, README, glossaire,

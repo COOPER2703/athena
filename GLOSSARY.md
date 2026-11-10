@@ -5,9 +5,9 @@ Gemini Live via un serveur. L'assistant lit et envoie des messages Matrix, contr
 domotique, cherche sur le web, mémorise durablement des informations et assiste à
 distance le développement logiciel mené par opencode.
 
-Ce glossaire fixe le vocabulaire du domaine. Il porte désormais deux espaces : le
-**noyau** (session, mémoire) et les **adaptateurs** qui le relient au monde
-(transport, Gemini, Matrix, Home Assistant, console).
+Ce glossaire fixe le vocabulaire du **noyau** (session, mémoire) et du **contrat des
+plugins**. Le vocabulaire propre à un plugin vit dans le glossaire de son dossier :
+`GLOSSARY-MAP.md` dit où le trouver.
 
 ## Language
 
@@ -38,9 +38,8 @@ _Avoid_: Session Gemini, session serveur, session interne, session cachée
 _Avoid_: Idle, inactif, état vide
 
 **Tool**:
-Une fonction que Gemini peut appeler pendant une Session. Peut être côté serveur (Matrix,
-Home Assistant) ou côté client (shell, URL). Chaque Tool appartient à un plugin ou au
-noyau.
+Une fonction que Gemini peut appeler pendant une Session. Peut être côté serveur (plugin)
+ou côté client (shell, URL). Chaque Tool appartient à un plugin ou au noyau.
 _Avoid_: Function, capability, skill
 
 **Tool du noyau**:
@@ -191,26 +190,10 @@ _Avoid_: Silencieux, muet
 ### Domotique
 
 **Intent**:
-Une commande sémantique Assist de Home Assistant (`HassTurnOn`, `HassLightSet`, …). La
-résolution des noms, zones et alias se fait dans Home Assistant, jamais dans le plugin.
+Une commande sémantique adressée à une plateforme de domotique (`HassTurnOn`,
+`HassLightSet`, …). La résolution des noms, zones et alias se fait dans la plateforme,
+jamais dans le plugin.
 _Avoid_: Command, action, service, appel REST
-
-**Tool Assist**:
-Un Tool exposé par l'API Assist de Home Assistant. La plupart sont des Intents ; d'autres
-lisent l'état de la maison (`GetLiveContext`, `HassGetState`) ou lancent un script. Le
-plugin `homeassistant` les expose tels quels : Athena ne filtre pas les Tools Assist aux
-seuls Intents et ne les renomme pas.
-_Avoid_: Tool HA, outil domotique, function
-
-**Exposition Assist**:
-Le périmètre des entités pilotables par Athena, défini dans Home Assistant par son
-exposition à Assist. Une entité non exposée est invisible pour Gemini.
-_Avoid_: Allow-list, périmètre du plugin, permissions
-
-**Serveur MCP HA**:
-Le serveur MCP natif de Home Assistant. Le plugin `homeassistant` en est client : c'est
-Athena qui se connecte, jamais Gemini.
-_Avoid_: `ha-mcp` (serveur tiers), MCP connecté côté Gemini, API REST HA
 
 ### Identité
 
