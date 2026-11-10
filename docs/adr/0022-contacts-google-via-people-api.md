@@ -7,6 +7,9 @@ accepted
 Précise l'ADR-0021 : le plugin `google-workspace` ajoute `contacts_search`, qui lit le carnet
 d'un **Compte Google** par l'API People. Ne modifie aucun autre ADR.
 
+Amendé ensuite : `contacts_search` ajoute une passe tolérante de secours pour une requête mal
+entendue ; le reste de la décision est inchangé.
+
 ## Contexte
 
 Pour envoyer un mail à la voix, l'utilisateur nomme une personne (« envoie un message à
@@ -26,6 +29,15 @@ d'entreprise n'est pas lu. Aucun résultat n'est mis en cache ; seuls les access
 sont, comme avant. L'API People est jointe par une clé de configuration séparée,
 `people_base_url` (défaut `https://people.googleapis.com`).
 
+La requête est comparée **localement**, sur la liste déjà téléchargée. Une **passe exacte**
+(sous-chaîne par mot, accents et casse ignorés) fait foi ; une **passe tolérante** ne joue
+que si elle ne rend rien, et le retour porte alors `approximate: true`. La passe tolérante
+rapproche chaque mot d'une **distance d'édition bornée** des mots du nom et des fragments de
+la partie locale des adresses (jamais du domaine) : une faute jusqu'à sept lettres, deux à
+partir de huit, rien en dessous de quatre, et une distance non nulle exige la **même
+initiale**. Elle rend au plus cinq personnes, triées par distance puis par nom. Une
+correspondance approximative est relue à voix haute et confirmée avant tout envoi.
+
 ## Pourquoi
 
 - **Deux gisements** : le carnet seul rate les personnes qu'on n'a jamais enregistrées mais
@@ -40,6 +52,13 @@ sont, comme avant. L'API People est jointe par une clé de configuration sépar�
   introduirait un état à invalider sans gain mesurable.
 - **Hôte séparé** : réécrire l'URL de `www.googleapis.com` en `people.googleapis.com` serait
   fragile derrière un proxy ; une clé explicite suit le modèle des deux autres.
+- **Tolérance locale, pas `people:searchContacts`** : la requête vient de la reconnaissance
+  vocale et arrive parfois à une lettre près (« Aubagne » pour « Aubane »). `searchContacts`
+  fait du préfixe, pas de la distance d'édition, et ajouterait un appel réseau pour un carnet
+  déjà téléchargé ; la comparaison locale est gratuite et vérifiable en test.
+- **Passe tolérante en secours seulement** : la jouer toujours ferait remonter des homonymes
+  approximatifs dans les cas où la recherche exacte marchait déjà. Un retour n'est donc jamais
+  mélangé : il est exact, ou entièrement approximatif et marqué.
 
 ## Conséquences
 
@@ -55,3 +74,7 @@ sont, comme avant. L'API People est jointe par une clé de configuration sépar�
 - Ni un nom, ni une adresse, ni la requête cherchée n'apparaissent dans une Trace, le
   journal, l'instantané ou une phrase d'erreur ; seuls le compte, le statut et le nombre de
   résultats sont tracés.
+- La tolérance est **figée dans le code**, pas réglable par `plugins.json` : un carnet qui
+  chercherait bizarrement à cause d'un seuil oublié serait coûteux à diagnostiquer.
+- Une correspondance approximative reste une **proposition** : le drapeau `approximate` et
+  l'instruction obligent à relire le nom et l'adresse avant d'envoyer.

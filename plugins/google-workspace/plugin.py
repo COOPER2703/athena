@@ -134,6 +134,16 @@ CONTACTS_PROBE_TIMEOUT = 2.0
 CONTACTS_PAGE_SIZE = 500
 CONTACTS_MAX_PAGES = 4
 
+# Passe tolérante, jouée seulement quand la passe exacte ne rend rien : une
+# faute de reconnaissance vocale reste réparable, sans transformer la recherche
+# en devinette. Un mot plus court que la borne est comparé exactement (sinon
+# « an » rapprocherait tout), et une distance non nulle exige la même initiale.
+CONTACTS_APPROXIMATE_MAX_RESULTS = 5
+CONTACTS_APPROXIMATE_SHORTEST = 4
+CONTACTS_APPROXIMATE_NEAR_LENGTH = 7
+CONTACTS_APPROXIMATE_NEAR_DISTANCE = 1
+CONTACTS_APPROXIMATE_FAR_DISTANCE = 2
+
 # -- Schémas des Tools --------------------------------------------------------
 
 GMAIL_SEARCH_DESCRIPTION = (
@@ -251,7 +261,8 @@ GMAIL_SEND_PARAMETERS: Mapping[str, object] = {
 }
 
 CONTACTS_SEARCH_DESCRIPTION = (
-    "Cherche des personnes dans les contacts Google et rend leurs adresses."
+    "Cherche des personnes dans les contacts Google et rend leurs adresses ; "
+    "une faute d'orthographe légère est tolérée."
 )
 
 CONTACTS_SEARCH_PARAMETERS: Mapping[str, object] = {
@@ -543,8 +554,11 @@ INSTRUCTION_TEMPLATE = (
     "- Une personne avec plusieurs adresses : lis-les à voix haute et demande "
     "laquelle, sans choisir.\n"
     "- Plusieurs personnes : lis les noms et les adresses, puis fais choisir.\n"
-    "- Aucun résultat : dis-le et propose de donner l'adresse exacte ; ne "
-    "cherche pas dans un autre compte sans le demander.\n"
+    "- Un retour avec `approximate: true` : le nom a été rapproché d'une "
+    "orthographe voisine ; lis à voix haute le nom et l'adresse trouvés, puis "
+    "fais confirmer avant d'envoyer.\n"
+    "- Aucun résultat : dis-le et propose de donner l'adresse exacte ou "
+    "d'épeler le nom ; ne cherche pas dans un autre compte sans le demander.\n"
     "\n"
     "MAILS:\n"
     "- `gmail_search` d'abord pour trouver un message ; n'invente jamais un "
@@ -2242,16 +2256,16 @@ async def _contacts_search(
             _CONTACTS_UNREADABLE_MESSAGE,
         )
 
-    people, truncated = _select_contacts(
-        saved, others, tokens, max_results
-    )
+    matches = _select_contacts(saved, others, tokens, max_results)
     payload: dict[str, object] = {
         "status": "ok",
         "account": account.key,
-        "results": people,
-        "truncated": truncated or cut_saved or cut_others,
+        "results": matches.people,
+        "truncated": matches.truncated or cut_saved or cut_others,
     }
-    _trace_tool(trace, tool, account.key, started, "ok", len(people))
+    if matches.approximate:
+        payload["approximate"] = True
+    _trace_tool(trace, tool, account.key, started, "ok", len(matches.people))
     return payload
 
 
@@ -2349,21 +2363,67 @@ def _email_addresses(raw: object) -> list[tuple[str, str]]:
     return addresses
 
 
+@dataclass(frozen=True, slots=True)
+class _ContactMatches:
+    """Ce que la sélection rend : personnes, borne atteinte, passe employée."""
+
+    people: list[dict[str, object]]
+    truncated: bool
+    approximate: bool
+
+
 def _select_contacts(
     saved: list[_Candidate],
     others: list[_Candidate],
     tokens: list[str],
     max_results: int,
-) -> tuple[list[dict[str, object]], bool]:
-    """Fusionne, filtre, trie et borne les personnes pour le modèle."""
+) -> _ContactMatches:
+    """Fusionne, filtre, trie et borne les personnes pour le modèle.
+
+    La passe exacte fait foi ; la passe tolérante ne remplace qu'un retour vide,
+    si bien qu'un résultat exact n'est jamais noyé sous des voisins
+    approximatifs.
+    """
     merged = _merged_contacts(saved + others)
-    matches = [
+    exact = [
         candidate
         for candidate in merged
         if _candidate_matches(candidate, tokens)
     ]
-    matches.sort(key=_contact_order)
-    truncated = len(matches) > max_results
+    if exact:
+        exact.sort(key=_contact_order)
+        return _ContactMatches(
+            people=_people_payload(exact[:max_results]),
+            truncated=len(exact) > max_results,
+            approximate=False,
+        )
+
+    limit = min(max_results, CONTACTS_APPROXIMATE_MAX_RESULTS)
+    scored = _approximate_contacts(merged, tokens)
+    return _ContactMatches(
+        people=_people_payload(
+            [candidate for _, candidate in scored[:limit]]
+        ),
+        truncated=len(scored) > limit,
+        approximate=bool(scored),
+    )
+
+
+def _approximate_contacts(
+    merged: list[_Candidate], tokens: list[str]
+) -> list[tuple[int, _Candidate]]:
+    """Personnes atteignables à une distance bornée, la plus proche d'abord."""
+    scored: list[tuple[int, _Candidate]] = []
+    for candidate in merged:
+        distance = _approximate_distance(candidate, tokens)
+        if distance is not None:
+            scored.append((distance, candidate))
+    scored.sort(key=lambda entry: (entry[0], _contact_order(entry[1])))
+    return scored
+
+
+def _people_payload(candidates: list[_Candidate]) -> list[dict[str, object]]:
+    """Forme rendue au modèle : nom, adresses typées et provenance."""
     return [
         {
             "name": candidate.name,
@@ -2373,8 +2433,8 @@ def _select_contacts(
             ],
             "source": candidate.source,
         }
-        for candidate in matches[:max_results]
-    ], truncated
+        for candidate in candidates
+    ]
 
 
 def _merged_contacts(candidates: list[_Candidate]) -> list[_Candidate]:
@@ -2443,6 +2503,96 @@ def _candidate_matches(candidate: _Candidate, tokens: list[str]) -> bool:
         )
     )
     return all(token in haystack for token in tokens)
+
+
+# Un nom ou une partie locale se découpe sur tout ce qui n'est pas une lettre :
+# point, tiret, souligné, chiffre. Les accents sont déjà retirés en amont, et
+# les lettres non latines restent intactes.
+_FREEFORM_SEPARATORS = re.compile(r"[\W\d_]+")
+
+
+def _approximate_distance(
+    candidate: _Candidate, tokens: list[str]
+) -> int | None:
+    """Somme des meilleures distances par mot ; ``None`` si un mot reste loin."""
+    fragments = _comparable_fragments(candidate)
+    total = 0
+    for token in tokens:
+        best: int | None = None
+        for fragment in fragments:
+            distance = _fragment_distance(token, fragment)
+            if distance is None:
+                continue
+            if best is None or distance < best:
+                best = distance
+                if best == 0:
+                    break
+        if best is None:
+            return None
+        total += best
+    return total
+
+
+def _comparable_fragments(candidate: _Candidate) -> list[str]:
+    """Mots du nom et fragments de la partie locale des adresses.
+
+    Le domaine est exclu : « gmail » à une faute près ne désigne personne. La
+    partie locale, elle, est indispensable — une entrée ``otherContacts`` peut
+    n'avoir aucun nom et n'exister que par son adresse.
+    """
+    fragments = _fragments(candidate.name)
+    for address, _ in candidate.emails:
+        fragments.extend(_fragments(address.rsplit("@", 1)[0]))
+    return fragments
+
+
+def _fragments(text: str) -> list[str]:
+    """Fragments normalisés d'un texte libre, découpés sur tout séparateur."""
+    return [
+        fragment
+        for fragment in _FREEFORM_SEPARATORS.split(_normalized(text))
+        if fragment
+    ]
+
+
+def _fragment_distance(token: str, fragment: str) -> int | None:
+    """Distance d'un mot de requête à un fragment, ``None`` si trop loin."""
+    if token in fragment:
+        return 0
+    limit = _approximate_limit(token)
+    if limit == 0 or fragment[:1] != token[:1]:
+        return None
+    return _bounded_distance(token, fragment, limit)
+
+
+def _approximate_limit(token: str) -> int:
+    """Fautes tolérées pour un mot de requête, selon sa longueur."""
+    if len(token) < CONTACTS_APPROXIMATE_SHORTEST:
+        return 0
+    if len(token) <= CONTACTS_APPROXIMATE_NEAR_LENGTH:
+        return CONTACTS_APPROXIMATE_NEAR_DISTANCE
+    return CONTACTS_APPROXIMATE_FAR_DISTANCE
+
+
+def _bounded_distance(left: str, right: str, limit: int) -> int | None:
+    """Distance de Levenshtein, ``None`` dès qu'elle dépasse ``limit``."""
+    if abs(len(left) - len(right)) > limit:
+        return None
+    previous = list(range(len(right) + 1))
+    for row, left_character in enumerate(left, start=1):
+        current = [row]
+        for column, right_character in enumerate(right, start=1):
+            current.append(
+                min(
+                    previous[column] + 1,
+                    current[column - 1] + 1,
+                    previous[column - 1] + (left_character != right_character),
+                )
+            )
+        if min(current) > limit:
+            return None
+        previous = current
+    return previous[-1] if previous[-1] <= limit else None
 
 
 def _contact_order(candidate: _Candidate) -> tuple[str, str]:

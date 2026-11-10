@@ -368,7 +368,8 @@ ENCODED_SENDER = (
 MALFORMED_SUBJECT = "=?utf-8?Q?=FF?="
 
 CONTACTS_SEARCH_DESCRIPTION = (
-    "Cherche des personnes dans les contacts Google et rend leurs adresses."
+    "Cherche des personnes dans les contacts Google et rend leurs adresses ; "
+    "une faute d'orthographe légère est tolérée."
 )
 
 CONTACTS_SEARCH_PARAMETERS: dict[str, Any] = {
@@ -413,8 +414,11 @@ INSTRUCTION_TEMPLATE = (
     "- Une personne avec plusieurs adresses : lis-les à voix haute et demande "
     "laquelle, sans choisir.\n"
     "- Plusieurs personnes : lis les noms et les adresses, puis fais choisir.\n"
-    "- Aucun résultat : dis-le et propose de donner l'adresse exacte ; ne "
-    "cherche pas dans un autre compte sans le demander.\n"
+    "- Un retour avec `approximate: true` : le nom a été rapproché d'une "
+    "orthographe voisine ; lis à voix haute le nom et l'adresse trouvés, puis "
+    "fais confirmer avant d'envoyer.\n"
+    "- Aucun résultat : dis-le et propose de donner l'adresse exacte ou "
+    "d'épeler le nom ; ne cherche pas dans un autre compte sans le demander.\n"
     "\n"
     "MAILS:\n"
     "- `gmail_search` d'abord pour trouver un message ; n'invente jamais un "
@@ -4641,6 +4645,390 @@ def test_contacts_search_matches_every_token_in_the_name_or_an_address(
     asyncio.run(scenario())
 
 
+def test_contacts_search_forgives_one_misheard_letter_in_a_name(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "GET",
+                PEOPLE_CONNECTIONS_PATH,
+                body=people_connections(
+                    people_person(
+                        "people/c1",
+                        name="Aubane Cros",
+                        emails=(("aubane.crs@gmail.com", "home"),),
+                    )
+                ),
+            )
+            stub.route("GET", PEOPLE_OTHER_PATH, body=other_contacts())
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                # « Aubagne » est ce que la reconnaissance vocale a compris.
+                payload = await call_tool(
+                    session, "contacts_search", {"query": "aubagne"}
+                )
+                assert payload == {
+                    "status": "ok",
+                    "account": "perso",
+                    "results": [
+                        {
+                            "name": "Aubane Cros",
+                            "emails": [
+                                {
+                                    "address": "aubane.crs@gmail.com",
+                                    "type": "home",
+                                }
+                            ],
+                            "source": "carnet",
+                        }
+                    ],
+                    "truncated": False,
+                    "approximate": True,
+                }
+
+    asyncio.run(scenario())
+
+
+def test_contacts_search_reads_the_local_part_of_an_unnamed_contact(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route("GET", PEOPLE_CONNECTIONS_PATH, body=people_connections())
+            stub.route(
+                "GET",
+                PEOPLE_OTHER_PATH,
+                body=other_contacts(
+                    # Une entrée ``otherContacts`` sans nom n'existe que par
+                    # son adresse : la partie locale est le seul indice.
+                    people_person(
+                        "otherContacts/c1",
+                        name=None,
+                        emails=(("aubane.crs@gmail.com", "other"),),
+                    )
+                ),
+            )
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session, "contacts_search", {"query": "aubagne"}
+                )
+                assert payload == {
+                    "status": "ok",
+                    "account": "perso",
+                    "results": [
+                        {
+                            "name": "",
+                            "emails": [
+                                {
+                                    "address": "aubane.crs@gmail.com",
+                                    "type": "other",
+                                }
+                            ],
+                            "source": "autres",
+                        }
+                    ],
+                    "truncated": False,
+                    "approximate": True,
+                }
+
+    asyncio.run(scenario())
+
+
+def test_contacts_search_keeps_an_exact_result_free_of_approximate_neighbours(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "GET",
+                PEOPLE_CONNECTIONS_PATH,
+                body=people_connections(
+                    people_person(
+                        "people/c1",
+                        name="Aubane Cros",
+                        emails=(("aubane.crs@gmail.com", "home"),),
+                    ),
+                    # La passe tolérante l'aurait rapproché de « aubane » ; il
+                    # ne doit jamais s'inviter dans un retour exact.
+                    people_person(
+                        "people/c2",
+                        name="Aubagne Martin",
+                        emails=(("aubagne.martin@example.test", "work"),),
+                    ),
+                ),
+            )
+            stub.route("GET", PEOPLE_OTHER_PATH, body=other_contacts())
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session, "contacts_search", {"query": "aubane"}
+                )
+                assert [person["name"] for person in payload["results"]] == [
+                    "Aubane Cros"
+                ]
+                assert "approximate" not in payload
+
+    asyncio.run(scenario())
+
+
+def test_contacts_search_bounds_its_approximations(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "GET",
+                PEOPLE_CONNECTIONS_PATH,
+                body=people_connections(
+                    people_person(
+                        "people/c1",
+                        name="Anna",
+                        emails=(("anna@example.test", "home"),),
+                    ),
+                    people_person(
+                        "people/c2",
+                        name="Bernard",
+                        emails=(("bernard@example.test", "home"),),
+                    ),
+                    people_person(
+                        "people/c3",
+                        name="Martine",
+                        emails=(("martine@example.test", "home"),),
+                    ),
+                    people_person(
+                        "people/c4",
+                        name="Bruno",
+                        emails=(("bruno@gmail.com", "home"),),
+                    ),
+                    people_person(
+                        "people/c5",
+                        name="Alexandre",
+                        emails=(("alexandre@example.test", "home"),),
+                    ),
+                    people_person(
+                        "people/c6",
+                        name="Bertrand",
+                        emails=(("bertrand@example.test", "home"),),
+                    ),
+                ),
+            )
+            stub.route("GET", PEOPLE_OTHER_PATH, body=other_contacts())
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                for query in (
+                    # Trois lettres : trop court pour ne pas désigner tout le
+                    # monde à une faute près.
+                    "ana",
+                    # Une faute, mais l'initiale change.
+                    "ennard",
+                    # Deux fautes sur un mot de sept lettres.
+                    "martena",
+                    # Le domaine d'une adresse n'est jamais comparé.
+                    "gmiel",
+                ):
+                    payload = await call_tool(
+                        session, "contacts_search", {"query": query}
+                    )
+                    assert payload["results"] == []
+                    assert "approximate" not in payload
+
+                # Deux fautes passent à partir de huit lettres.
+                payload = await call_tool(
+                    session, "contacts_search", {"query": "alexanora"}
+                )
+                assert [person["name"] for person in payload["results"]] == [
+                    "Alexandre"
+                ]
+                assert payload["approximate"] is True
+
+                # Huit lettres : la seconde faute est déjà tolérée.
+                payload = await call_tool(
+                    session, "contacts_search", {"query": "bertrent"}
+                )
+                assert [person["name"] for person in payload["results"]] == [
+                    "Bertrand"
+                ]
+                assert payload["approximate"] is True
+
+    asyncio.run(scenario())
+
+
+def test_contacts_search_tolerates_a_typo_on_every_token(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "GET",
+                PEOPLE_CONNECTIONS_PATH,
+                body=people_connections(
+                    people_person(
+                        "people/c1",
+                        name="Aubane Cros",
+                        emails=(("aubane.crs@gmail.com", "home"),),
+                    ),
+                    people_person(
+                        "people/c2",
+                        name="Aubane Martin",
+                        emails=(("aubane.martin@example.test", "work"),),
+                    ),
+                ),
+            )
+            stub.route("GET", PEOPLE_OTHER_PATH, body=other_contacts())
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                # Les deux mots sont mal entendus : pas d'ancrage exact.
+                payload = await call_tool(
+                    session, "contacts_search", {"query": "aubagne croz"}
+                )
+                assert [person["name"] for person in payload["results"]] == [
+                    "Aubane Cros"
+                ]
+                assert payload["approximate"] is True
+
+    asyncio.run(scenario())
+
+
+def test_contacts_search_orders_approximate_results_by_distance_then_name(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "GET",
+                PEOPLE_CONNECTIONS_PATH,
+                body=people_connections(
+                    people_person(
+                        "people/c1",
+                        name="Aubane Cros",
+                        emails=(("aubane.crs@gmail.com", "home"),),
+                    ),
+                    people_person(
+                        "people/c2",
+                        name="Aubagne Cros",
+                        emails=(("aubagne.cros@example.test", "work"),),
+                    ),
+                ),
+            )
+            stub.route("GET", PEOPLE_OTHER_PATH, body=other_contacts())
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session, "contacts_search", {"query": "aubagne croz"}
+                )
+                # « Aubagne Cros » n'a qu'une faute (« croz »), « Aubane Cros »
+                # en a deux : la meilleure correspondance passe devant.
+                assert [person["name"] for person in payload["results"]] == [
+                    "Aubagne Cros",
+                    "Aubane Cros",
+                ]
+
+    asyncio.run(scenario())
+
+
+def test_contacts_search_caps_approximate_results_at_five(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with GoogleStub() as stub:
+            program_tokens(stub)
+            stub.route(
+                "GET",
+                PEOPLE_CONNECTIONS_PATH,
+                body=people_connections(
+                    *(
+                        people_person(
+                            f"people/c{index}",
+                            name=f"Aubane {surname}",
+                            emails=((f"aubane.{index}@example.test", "home"),),
+                        )
+                        for index, surname in enumerate(
+                            (
+                                "Cros",
+                                "Dupont",
+                                "Fournier",
+                                "Girard",
+                                "Martin",
+                                "Petit",
+                            )
+                        )
+                    )
+                ),
+            )
+            stub.route("GET", PEOPLE_OTHER_PATH, body=other_contacts())
+            async with google_workspace_session(tmp_path, stub) as (
+                _,
+                _,
+                session,
+                _,
+                _,
+            ):
+                payload = await call_tool(
+                    session, "contacts_search", {"query": "aubagne"}
+                )
+                # Cinq au plus : au-delà, le modèle devrait lire trop de noms
+                # à voix haute pour une simple confirmation.
+                assert [person["name"] for person in payload["results"]] == [
+                    "Aubane Cros",
+                    "Aubane Dupont",
+                    "Aubane Fournier",
+                    "Aubane Girard",
+                    "Aubane Martin",
+                ]
+                assert payload["truncated"] is True
+
+                narrower = await call_tool(
+                    session,
+                    "contacts_search",
+                    {"query": "aubagne", "max_results": 2},
+                )
+                assert [person["name"] for person in narrower["results"]] == [
+                    "Aubane Cros",
+                    "Aubane Dupont",
+                ]
+                assert narrower["truncated"] is True
+
+    asyncio.run(scenario())
+
+
 def test_contacts_search_sorts_and_caps_results_with_a_truncated_flag(
     tmp_path: Path,
 ) -> None:
@@ -5095,19 +5483,28 @@ def test_contacts_traces_never_carry_a_name_address_query_or_url(
                 )
                 assert payload["status"] == "ok"
 
-                [called] = sink.of_kind("ToolCalled")
-                assert called.payload["tool"] == "contacts_search"
-                assert called.payload["account"] == "perso"
-                assert called.payload["status"] == "ok"
-                assert called.payload["result_count"] == 1
-                assert set(called.payload) == {
-                    "plugin",
-                    "tool",
-                    "account",
-                    "duration_ms",
-                    "status",
-                    "result_count",
-                }
+                # La passe tolérante ne trace pas davantage que l'exacte.
+                approximate = await call_tool(
+                    session, "contacts_search", {"query": "aubagne"}
+                )
+                assert approximate["status"] == "ok"
+                assert approximate["approximate"] is True
+
+                called = sink.of_kind("ToolCalled")
+                assert len(called) == 2
+                for entry in called:
+                    assert entry.payload["tool"] == "contacts_search"
+                    assert entry.payload["account"] == "perso"
+                    assert entry.payload["status"] == "ok"
+                    assert entry.payload["result_count"] == 1
+                    assert set(entry.payload) == {
+                        "plugin",
+                        "tool",
+                        "account",
+                        "duration_ms",
+                        "status",
+                        "result_count",
+                    }
 
                 rendered = _traces_json(sink)
                 for forbidden in (
@@ -5115,6 +5512,7 @@ def test_contacts_traces_never_carry_a_name_address_query_or_url(
                     ACCESS_TOKEN_PERSO,
                     "Aubane",
                     "aubane",
+                    "aubagne",
                     "aubane.crs@gmail.com",
                     PEOPLE_CONNECTIONS_PATH,
                     PEOPLE_OTHER_PATH,

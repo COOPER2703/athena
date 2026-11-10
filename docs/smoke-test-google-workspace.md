@@ -233,7 +233,13 @@ changement d'état, ouvrez une nouvelle Session (Entrée).
 5. « Envoie à aubane.crs@gmail.com » → aucune recherche : une adresse explicite
    est utilisée telle quelle.
 6. Un nom introuvable → phrase qui le dit, puis proposition de donner l'adresse
-   exacte ; Athena n'interroge pas un autre compte sans le demander.
+   exacte ou d'épeler le nom ; Athena n'interroge pas un autre compte sans le
+   demander.
+7. « Envoie un message à Aubagne… » alors que le carnet contient « Aubane » :
+   `contacts_search` rend `approximate: true`, Athena annonce « Aubane Cros,
+   aubane.crs@gmail.com, c'est bien elle ? » et n'envoie qu'après le « oui ».
+8. Un nom mal entendu qui ne ressemble à rien de proche (mot de trois lettres,
+   initiale différente) → toujours aucun résultat, jamais une devinette.
 
 ### 4.4 Comptes
 
@@ -370,9 +376,13 @@ Le module `server/tests/test_plugins_google_workspace.py` couvre notamment :
   activation sans redémarrage ;
 - ligne exacte de l'instantané de Console et Tools déclarés à la Session ;
 - `contacts_search` : fusion carnet + autres contacts par adresse, nom du
-  carnet prioritaire, fiches sans adresse écartées, correspondance par mots
-  (accents et casse ignorés), tri, borne et `truncated`, pagination bornée,
-  phrase dédiée au scope manquant, sonde `ContactsScopeMissing` non bloquante ;
+  carnet prioritaire, fiches sans adresse écartées, correspondance exacte par
+  mots (accents et casse ignorés), passe tolérante de secours (une faute
+  jusqu'à sept lettres, deux à partir de huit, même initiale, mots de moins de
+  quatre lettres intouchés, domaine jamais comparé, partie locale d'un contact
+  sans nom), drapeau `approximate`, ordre par distance puis nom, plafond à cinq,
+  tri, borne et `truncated`, pagination bornée, phrase dédiée au scope manquant,
+  sonde `ContactsScopeMissing` non bloquante ;
 - `gmail_send` refuse un nom et renvoie vers `contacts_search` ;
 - `ToolCalled` puis `ToolFailed` sur chaque échec, aucun `ToolFailed` sur un
   succès ;

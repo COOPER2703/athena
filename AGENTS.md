@@ -165,11 +165,17 @@ proactif n'est poussé en v1.
 
 `contacts_search` interroge les contacts **enregistrés** (`people/me/connections`) et les
 **autres contacts** que Gmail a mémorisés (`otherContacts`), fusionnés sur une adresse
-identique ; il ne voit ni l'annuaire du domaine, ni les fiches sans adresse. Un nom seul
-n'est jamais une adresse : `gmail_send` refuse un destinataire qui n'y ressemble pas et
-renvoie vers le Tool. Quand plusieurs adresses ou plusieurs personnes correspondent,
-l'instruction impose de les lire et de faire choisir, jamais de trancher. Le carnet n'est
-pas mis en cache : chaque recherche refait ses appels.
+identique ; il ne voit ni l'annuaire du domaine, ni les fiches sans adresse. La comparaison
+est locale : une passe exacte d'abord, puis — seulement si elle ne rend rien — une passe
+tolérante qui rapproche chaque mot du nom ou de la partie locale d'une adresse à une faute
+près jusqu'à sept lettres, deux à partir de huit, jamais sous quatre lettres et jamais sans
+la même initiale (« Aubagne » retrouve « Aubane »). Elle est marquée `approximate: true`
+dans le retour, plafonnée à cinq personnes et triée par distance. Le domaine d'une adresse
+n'est jamais comparé, et une approximation est relue à voix haute puis confirmée avant tout
+envoi. Un nom seul n'est jamais une adresse : `gmail_send` refuse un destinataire qui n'y
+ressemble pas et renvoie vers le Tool. Quand plusieurs adresses ou plusieurs personnes
+correspondent, l'instruction impose de les lire et de faire choisir, jamais de trancher. Le
+carnet n'est pas mis en cache : chaque recherche refait ses appels.
 
 Pour l'activer, ajoutez `google-workspace` à la liste `enabled` de `plugins.json` avec les
 libellés de comptes sous `config.google-workspace`, et fournissez les trois secrets requis

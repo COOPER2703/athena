@@ -393,6 +393,14 @@ adresses e-mail. Un nom seul ne la résout pas, et elle peut porter plusieurs ad
 c'est une recherche, pas une clé. Se distingue du **Contact** (Matrix).
 _Avoid_: contact (seul), fiche, répertoire, annuaire
 
+**Correspondance approximative**:
+Le résultat d'une **recherche de contacts** dont la requête ne se retrouve telle quelle
+dans aucun nom ni aucune adresse, mais s'en approche à une ou deux fautes d'orthographe
+près, sur le nom ou la partie locale d'une adresse. Une telle correspondance est marquée
+`approximate` dans le retour et se confirme à l'oral avant tout envoi ; elle ne se mélange
+jamais à des correspondances exactes.
+_Avoid_: recherche floue, fuzzy, correspondance partielle
+
 ### Développement assisté
 
 Athena relaie vocalement le travail qu'opencode mène sur un projet : elle présente les
