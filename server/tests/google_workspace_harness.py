@@ -8,8 +8,8 @@ vivent ici, une seule fois, pour tous les tests du plugin.
 
 Points d'extension des tickets suivants : ``install_google_workspace`` accepte
 une configuration et des secrets arbitraires, ``patched_constant`` réduit un
-budget du module copié, et les fabriques ``gmail_*`` / ``calendar_*`` rendent
-les objets que les nouveaux Tools liront.
+budget du module copié, et les fabriques ``gmail_*`` / ``calendar_*`` /
+``people_*`` rendent les objets que les nouveaux Tools liront.
 """
 
 from __future__ import annotations
@@ -225,6 +225,7 @@ def install_google_workspace(
     plugin_config: dict[str, str] = {
         "accounts": accounts,
         "api_base_url": base_url,
+        "people_base_url": base_url,
         "token_url": token_url if token_url is not None else base_url + "/token",
     }
     if default_account is not None:
@@ -547,6 +548,51 @@ def calendar_event_list(
 ) -> dict[str, Any]:
     """Objet Calendar rendu par ``GET /calendar/v3/.../events``."""
     body: dict[str, Any] = {"items": list(events)}
+    if next_page_token is not None:
+        body["nextPageToken"] = next_page_token
+    return body
+
+
+def people_person(
+    resource_name: str,
+    *,
+    name: str | None = None,
+    emails: Sequence[tuple[str, str]] = (),
+) -> dict[str, Any]:
+    """Personne People API : nom d'affichage et adresses typées.
+
+    ``name=None`` imite une entrée ``otherContacts`` sans nom ; ``emails`` vide
+    imite une fiche sans adresse, que le plugin écarte.
+    """
+    person: dict[str, Any] = {"resourceName": resource_name}
+    if name is not None:
+        person["names"] = [
+            {"displayName": name, "metadata": {"primary": True}}
+        ]
+    if emails:
+        person["emailAddresses"] = [
+            {"value": address, "type": kind} for address, kind in emails
+        ]
+    return person
+
+
+def people_connections(
+    *people: Mapping[str, Any], next_page_token: str | None = None
+) -> dict[str, Any]:
+    """Objet rendu par ``GET /v1/people/me/connections``."""
+    body: dict[str, Any] = {"connections": [dict(person) for person in people]}
+    if next_page_token is not None:
+        body["nextPageToken"] = next_page_token
+    return body
+
+
+def other_contacts(
+    *people: Mapping[str, Any], next_page_token: str | None = None
+) -> dict[str, Any]:
+    """Objet rendu par ``GET /v1/otherContacts``."""
+    body: dict[str, Any] = {
+        "otherContacts": [dict(person) for person in people]
+    }
     if next_page_token is not None:
         body["nextPageToken"] = next_page_token
     return body

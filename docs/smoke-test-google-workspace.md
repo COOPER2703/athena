@@ -1,9 +1,10 @@
-# Smoke test — Plugin Google Workspace (mails et agenda en voix)
+# Smoke test — Plugin Google Workspace (mails, agenda et contacts en voix)
 
 Vérification manuelle de bout en bout du plugin serveur `google-workspace`
-(spec #135, ADR-0021) : créer un client OAuth par organisation, obtenir un
-refresh token hors bande avec le Playground, activer un ou plusieurs Comptes
-Google dans Athena, puis dérouler les parcours Gmail et Agenda à la voix.
+(spec #135, ADR-0021, ADR-0022) : créer un client OAuth par organisation,
+obtenir un refresh token hors bande avec le Playground, activer un ou plusieurs
+Comptes Google dans Athena, puis dérouler les parcours Gmail, Agenda et
+Contacts à la voix.
 
 Le plugin échange des refresh tokens statiques contre des access tokens d'une
 heure, gardés **en mémoire seulement**. Il n'exécute aucun flow OAuth, ne
@@ -27,7 +28,7 @@ venv locale s'écrit donc `.venv/bin/python`.
   pour `python -m client`.
 - Un projet Google Cloud et, par organisation, un **client OAuth de type
   « Web application »** (étape 1).
-- Les APIs **Gmail** et **Google Calendar** activées sur ce projet.
+- Les APIs **Gmail**, **Google Calendar** et **People** activées sur ce projet.
 - Un **Compte Google** par libellé voulu, avec un refresh token chacun.
 - La Console web est utile pour vérifier l'état du plugin et de ses Tools ;
   elle est activée par défaut sur `127.0.0.1:8767` et demande un Ticket Console.
@@ -49,14 +50,14 @@ un client ; les listes de secrets restent parallèles aux comptes.
 
 1. Ouvrez <https://console.cloud.google.com/> et sélectionnez (ou créez) le
    projet qui portera Athena.
-2. **APIs et services** → **Bibliothèque** : activez **Gmail API** et
-   **Google Calendar API**.
+2. **APIs et services** → **Bibliothèque** : activez **Gmail API**,
+   **Google Calendar API** et **People API**.
 3. **APIs et services** → **Écran de consentement OAuth** :
    - **Type d'utilisateur** : **Interne** pour un domaine Workspace, sinon
      **Externe** ;
    - renseignez le nom de l'application, l'adresse d'assistance et les
      coordonnées du développeur ;
-   - ajoutez les trois scopes de l'étape 2 ;
+   - ajoutez les cinq scopes de l'étape 2 ;
    - pour un type **Externe**, publiez l'application **En production**
      (voir « Consentement » plus bas).
 4. **APIs et services** → **Identifiants** → **Créer des identifiants** →
@@ -94,21 +95,26 @@ libellés : les trois listes de secrets suivent cet ordre.
 2. Cliquez sur la **roue dentée** (en haut à droite), cochez **Use your own
    OAuth credentials**, puis collez l'**ID client** et le **code secret** du
    client créé à l'étape 1.
-3. Dans **Step 1 — Select & authorize APIs**, saisissez les trois scopes, un
+3. Dans **Step 1 — Select & authorize APIs**, saisissez les cinq scopes, un
    par ligne :
 
    ```text
    https://www.googleapis.com/auth/gmail.readonly
    https://www.googleapis.com/auth/gmail.send
    https://www.googleapis.com/auth/calendar.events
+   https://www.googleapis.com/auth/contacts.readonly
+   https://www.googleapis.com/auth/contacts.other.readonly
    ```
 
    - `gmail.readonly` : chercher et lire les messages ;
    - `gmail.send` : envoyer et répondre ;
-   - `calendar.events` : lire et écrire les événements d'agenda.
+   - `calendar.events` : lire et écrire les événements d'agenda ;
+   - `contacts.readonly` : chercher dans les contacts enregistrés ;
+   - `contacts.other.readonly` : chercher dans les autres contacts Gmail.
 
    Aucun autre scope n'est nécessaire : le plugin ne gère ni brouillons, ni
-   étiquettes, ni pièces jointes, ni calendriers secondaires.
+   étiquettes, ni pièces jointes, ni calendriers secondaires, ni annuaire du
+   domaine Workspace.
 4. **Authorize APIs**, puis choisissez le Compte Google voulu et acceptez.
 5. **Step 2 — Exchange authorization code for tokens** :
    **Exchange authorization code for tokens**.
@@ -146,9 +152,9 @@ activés et leur configuration **non secrète** :
   Tools reçoivent `pro` et `perso`.
 - `default_account` : facultatif ; absent, le premier compte fait foi. Un
   libellé inconnu est un défaut **fatal**.
-- `api_base_url` et `token_url` : facultatifs, réservés aux tests ou à un
-  proxy ; les défauts sont `https://www.googleapis.com` et
-  `https://oauth2.googleapis.com/token`.
+- `api_base_url`, `people_base_url` et `token_url` : facultatifs, réservés aux
+  tests ou à un proxy ; les défauts sont `https://www.googleapis.com`,
+  `https://people.googleapis.com` et `https://oauth2.googleapis.com/token`.
 
 ### 3.2 `.env`
 
@@ -180,10 +186,10 @@ Attendez la Trace d'activation puis ouvrez la Console :
   `INFO [plugins] AccountReady {"account": "pro", "plugin": "google-workspace"}` ;
 - `PluginState` activé :
   `INFO [plugins] PluginState {"plugin": "google-workspace", "state": "activated", "tools": N}` ;
-- la Console montre `google-workspace` **Activé** avec ses Tools (huit dans la
+- la Console montre `google-workspace` **Activé** avec ses Tools (neuf dans la
   cible de la spec : `gmail_search`, `gmail_read`, `gmail_send`, `gmail_reply`,
   `calendar_list_events`, `calendar_create_event`, `calendar_update_event`,
-  `calendar_delete_event`).
+  `calendar_delete_event`, `contacts_search`).
 
 Les Tools ne sont **déclarés qu'à l'ouverture d'une Session** : après un
 changement d'état, ouvrez une nouvelle Session (Entrée).
@@ -213,7 +219,29 @@ changement d'état, ouvrez une nouvelle Session (Entrée).
 4. « Supprime-le. » → `calendar_delete_event` seulement après confirmation
    explicite, avec `confirm=true`.
 
-### 4.3 Comptes
+### 4.3 Contacts
+
+1. « Envoie un message à Aubane pour dire que je serai en retard. » →
+   `contacts_search` d'abord ; si une seule adresse correspond, Athena relit
+   l'adresse résolue avec l'objet et le corps, puis attend le « oui ».
+2. Si Aubane a plusieurs adresses (perso et pro), Athena lit les adresses et
+   demande laquelle ; elle n'en choisit jamais une seule de sa propre initiative.
+3. Si plusieurs personnes portent le nom, Athena lit les noms et les adresses,
+   puis fait choisir.
+4. Après le choix, `gmail_send` part avec l'adresse exacte : la confirmation
+   d'envoi n'est pas redemandée uniquement pour l'adresse.
+5. « Envoie à aubane.crs@gmail.com » → aucune recherche : une adresse explicite
+   est utilisée telle quelle.
+6. Un nom introuvable → phrase qui le dit, puis proposition de donner l'adresse
+   exacte ou d'épeler le nom ; Athena n'interroge pas un autre compte sans le
+   demander.
+7. « Envoie un message à Aubagne… » alors que le carnet contient « Aubane » :
+   `contacts_search` rend `approximate: true`, Athena annonce « Aubane Cros,
+   aubane.crs@gmail.com, c'est bien elle ? » et n'envoie qu'après le « oui ».
+8. Un nom mal entendu qui ne ressemble à rien de proche (mot de trois lettres,
+   initiale différente) → toujours aucun résultat, jamais une devinette.
+
+### 4.4 Comptes
 
 - Un compte nommé (« sur le compte perso ») est utilisé ; sinon le compte par
   défaut.
@@ -263,6 +291,18 @@ quand un compte revient, l'état passe `activated` sans redémarrage :
 INFO [plugins] PluginState {"plugin": "google-workspace", "retry": true, "state": "activated", "tools": N}
 ```
 
+Un scope Contacts manquant ne dégrade jamais le plugin. Chaque compte sain sonde
+son carnet au démarrage et, si Google refuse pour un scope ou une API absente,
+trace un avertissement :
+
+```text
+WARNING [plugins] ContactsScopeMissing {"account": "perso", "plugin": "google-workspace", "reason": "ACCESS_TOKEN_SCOPE_INSUFFICIENT"}
+```
+
+Le premier appel réel à `contacts_search` rend alors une phrase qui nomme
+l'API People et la réautorisation. Gmail et l'agenda continuent de répondre
+normalement.
+
 Aucun secret, aucune adresse e-mail, aucun objet, aucun corps, aucune requête
 Gmail et aucune URL complète n'apparaissent dans une Trace, le journal
 `logs/server.log`, l'instantané de la Console ou une phrase d'erreur. Seuls les
@@ -277,7 +317,7 @@ Un refresh token peut être révoqué par l'utilisateur, par un administrateur,
 par un changement de mot de passe (les scopes Gmail sont invalidés) ou par
 l'expiration d'une application restée en mode Test.
 
-1. Rejouez l'étape 2 pour le Compte concerné (Playground, mêmes trois scopes,
+1. Rejouez l'étape 2 pour le Compte concerné (Playground, mêmes cinq scopes,
    même client OAuth) et copiez le **nouveau** refresh token.
 2. Remplacez **seulement** son entrée dans la liste
    `ATHENA_PLUGIN_GOOGLE_WORKSPACE_REFRESH_TOKEN`, à la même position. Ne
@@ -300,9 +340,11 @@ secret différent) ou l'application est repassée en mode Test.
 | `default_account` inconnu | Libellé absent ou mal orthographié | Utiliser une clé de la liste `accounts` (ou retirer la clé pour prendre le premier compte). |
 | `invalid_grant` sur un compte | Token révoqué, mot de passe changé, application en Test | Réautoriser (étape 6) et remplacer le refresh token. |
 | `invalid_client` | ID ou secret faux, ou token d'un autre client | Reprendre l'étape 1 et vérifier les deux listes au même index. C'est un défaut de configuration **du compte** : il reste `AccountUnavailable` ; si tous les comptes échouent, le plugin reste `failed` et retente toutes les 5 s, sans refuser le démarrage. |
-| `invalid_scope` ou `access_denied` | Scope manquant ou consentement refusé | Refaire l'étape 2 avec les trois scopes exacts. |
+| `invalid_scope` ou `access_denied` | Scope manquant ou consentement refusé | Refaire l'étape 2 avec les cinq scopes exacts. |
 | Le compte meurt au bout de 7 jours | Application **Externe + Test** | Publier l'écran de consentement **En production**. |
-| Phrase 403 « l'accès à ce compte est refusé » | API Gmail ou Calendar désactivée, ou scope absent | Activer les APIs et réautoriser avec les trois scopes. |
+| Phrase 403 « l'accès à ce compte est refusé » | API Gmail ou Calendar désactivée, ou scope absent | Activer les APIs et réautoriser avec les cinq scopes. |
+| Phrase « le carnet du compte … n'est pas accessible » | API People désactivée, ou scopes `contacts.*` absents | Activer **People API**, puis réautoriser le compte (étape 6). |
+| `ContactsScopeMissing` au démarrage | Même cause, détectée sans casser Gmail ni l'agenda | Réautoriser ; le plugin reste activé entre-temps. |
 | Phrase 429 « trop de requêtes » | Quota Google atteint | Attendre ; **aucun retry automatique** sur `403`, `429` ou `5xx`. |
 | État `failed`, aucun Tool Google | Aucun compte n'a pu être rafraîchi | Voir les Traces `AccountUnavailable`, corriger, laisser la retente de 5 s agir. |
 | La Console montre `Activé` mais un compte échoue | Dégradation partielle attendue | Utiliser un autre compte ; réautoriser celui qui rend `AccountUnavailable`. |
@@ -318,8 +360,9 @@ make generate
 ```
 
 Aucun test ne contacte le vrai Google : un **faux serveur en processus** imite
-le point d'échange OAuth (`POST /token` en formulaire), Gmail et Calendar,
-enregistre chaque requête et programme les réponses par refresh token.
+le point d'échange OAuth (`POST /token` en formulaire), Gmail, Calendar et
+l'API People, enregistre chaque requête et programme les réponses par refresh
+token.
 
 Le module `server/tests/test_plugins_google_workspace.py` couvre notamment :
 
@@ -332,6 +375,15 @@ Le module `server/tests/test_plugins_google_workspace.py` couvre notamment :
 - tous les comptes en échec : état `failed`, aucun Tool, retente globale, puis
   activation sans redémarrage ;
 - ligne exacte de l'instantané de Console et Tools déclarés à la Session ;
+- `contacts_search` : fusion carnet + autres contacts par adresse, nom du
+  carnet prioritaire, fiches sans adresse écartées, correspondance exacte par
+  mots (accents et casse ignorés), passe tolérante de secours (une faute
+  jusqu'à sept lettres, deux à partir de huit, même initiale, mots de moins de
+  quatre lettres intouchés, domaine jamais comparé, partie locale d'un contact
+  sans nom), drapeau `approximate`, ordre par distance puis nom, plafond à cinq,
+  tri, borne et `truncated`, pagination bornée, phrase dédiée au scope manquant,
+  sonde `ContactsScopeMissing` non bloquante ;
+- `gmail_send` refuse un nom et renvoie vers `contacts_search` ;
 - `ToolCalled` puis `ToolFailed` sur chaque échec, aucun `ToolFailed` sur un
   succès ;
 - absence de secret, d'adresse, d'objet, de corps, de requête et d'URL dans les

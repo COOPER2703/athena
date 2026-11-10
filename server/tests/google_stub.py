@@ -1,8 +1,8 @@
 """Faux serveur Google en processus, pour les tests du plugin ``google-workspace``.
 
 Le serveur imite les routes que le plugin utilise : le point d'échange OAuth
-(``POST /token``, corps ``application/x-www-form-urlencoded``), Gmail et
-Calendar. Il tourne sous uvicorn sur une socket éphémère de la même
+(``POST /token``, corps ``application/x-www-form-urlencoded``), Gmail,
+Calendar et People API. Il tourne sous uvicorn sur une socket éphémère de la même
 boucle que le test, enregistre chaque requête (méthode, chemin, requête
 décodée, en-tête ``Authorization``, formulaire ou corps JSON) et laisse le test
 programmer les réponses, y compris une erreur, un corps brut ou un retard.
@@ -109,6 +109,15 @@ class GoogleStub:
             request
             for request in self.requests
             if request["path"].startswith("/calendar/")
+        ]
+
+    @property
+    def people_requests(self) -> list[dict[str, Any]]:
+        """Toute requête People API reçue, dans l'ordre d'arrivée."""
+        return [
+            request
+            for request in self.requests
+            if request["path"].startswith("/v1/")
         ]
 
     def route(
