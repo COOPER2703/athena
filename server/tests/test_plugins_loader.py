@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Mapping
 
 import pytest
-from conftest import RecordingTraceSink
+from testkit import RecordingTraceSink
 
 from server.adapters.plugins import PluginLoadError, PluginLoader
 from server.app.secrets import EnvSecretResolver

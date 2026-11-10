@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from conftest import RecordingTraceSink
+from testkit import RecordingTraceSink
 from server.adapters.gemini import GeminiEventJudge
 from server.core.ports import Judgment
 

@@ -18,15 +18,8 @@ import websockets
 from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response
 
-from conftest import (
-    FakeClock,
-    RecordingTraceSink,
-    _url,
-    console_session,
-    install_console,
-    register,
-    running_transport,
-)
+from conftest import FakeClock, console_session, install_console, running_transport
+from testkit import RecordingTraceSink, register, url
 from protocol import Ping, Pong, Register, Registered, decode, encode
 from server.adapters.auth import SqliteAuthStore
 from server.app.config import (
@@ -85,7 +78,7 @@ def test_handshake_refuses_source_unknown_revoked_and_malformed_tokens(
         assert await store.revoke_token(revoked.token.id) is not None
 
         async with running_transport(auth=store) as transport:
-            url = _url(transport)
+            base_url = url(transport)
             for headers in (
                 {"Authorization": f"Bearer {source.secret}"},
                 {"Authorization": "Bearer ath_unknown_secret"},
@@ -95,7 +88,7 @@ def test_handshake_refuses_source_unknown_revoked_and_malformed_tokens(
                 {"Authorization": "Basic ath_whatever"},
                 {"Authorization": "Bearer two words"},
             ):
-                refusal = await _connect_refused(url, headers=headers)
+                refusal = await _connect_refused(base_url, headers=headers)
                 _assert_unauthorized(refusal)
             assert transport.clients == {}
 
@@ -113,7 +106,7 @@ def test_a_valid_client_token_registers_and_is_acknowledged(
         async with running_transport(sink=sink, auth=store) as transport:
             headers = {"Authorization": f"Bearer {issued.secret}"}
             async with websockets.connect(
-                _url(transport), additional_headers=headers
+                url(transport), additional_headers=headers
             ) as ws:
                 response = await register(ws, transport, client_name="desktop")
                 assert isinstance(response, Registered)
@@ -135,7 +128,7 @@ def test_last_use_is_recorded_at_the_handshake_not_per_frame(
 
         async with running_transport(auth=store) as transport:
             async with websockets.connect(
-                _url(transport), additional_headers=headers
+                url(transport), additional_headers=headers
             ) as ws:
                 await register(ws, transport)
                 first_use = clock.value
@@ -152,7 +145,7 @@ def test_last_use_is_recorded_at_the_handshake_not_per_frame(
 
             # Le handshake suivant, lui, enregistre la nouvelle utilisation.
             async with websockets.connect(
-                _url(transport), additional_headers=headers
+                url(transport), additional_headers=headers
             ):
                 pass
             assert (await store.list_tokens())[0].last_used_at == clock.value
@@ -168,13 +161,13 @@ def test_revocation_takes_effect_on_the_next_handshake(tmp_path: Path) -> None:
 
         async with running_transport(auth=store) as transport:
             async with websockets.connect(
-                _url(transport), additional_headers=headers
+                url(transport), additional_headers=headers
             ) as ws:
                 await register(ws, transport)
 
             assert await store.revoke_token(issued.token.id) is not None
 
-            refusal = await _connect_refused(_url(transport), headers=headers)
+            refusal = await _connect_refused(url(transport), headers=headers)
             _assert_unauthorized(refusal)
 
     asyncio.run(scenario())
@@ -262,7 +255,7 @@ def test_handshake_without_authorization_is_refused_before_any_frame(
         sink = RecordingTraceSink()
         store = _store(tmp_path)
         async with running_transport(sink=sink, auth=store) as transport:
-            refusal = await _connect_refused(_url(transport), headers={})
+            refusal = await _connect_refused(url(transport), headers={})
             _assert_unauthorized(refusal)
 
             # Rien n'a été décodé ni enregistré : la connexion n'a jamais existé.

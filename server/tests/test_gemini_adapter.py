@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from conftest import RecordingTraceSink
+from testkit import RecordingTraceSink
 from server.adapters.gemini import GeminiLiveAdapter
 from server.core.commands import (
     CloseLiveConnection,

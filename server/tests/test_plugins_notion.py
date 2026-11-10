@@ -21,7 +21,7 @@ from typing import Any, AsyncIterator
 import pytest
 import websockets
 
-from conftest import FakeJudge, RecordingTraceSink, _url, register, wait_until
+from testkit import FakeJudge, RecordingTraceSink, register, url, wait_until
 from notion_harness import (
     DEFAULT_PARENT,
     PLUGIN_DIR,
@@ -1065,7 +1065,7 @@ def test_an_announcement_session_declares_no_notion_tool(
                 # l'Annonce, pas une absence de plugin, qui le retire.
                 assert app.tools.owner_of("search_pages") == "notion"
 
-                async with websockets.connect(_url(transport)) as ws:
+                async with websockets.connect(url(transport)) as ws:
                     await register(
                         ws, transport, client_name="desktop", drain=False
                     )
@@ -5162,7 +5162,7 @@ def test_an_announcement_carries_the_instruction_without_any_tool(
                 # Les Tools existent : c'est le gate de l'Annonce qui les retire.
                 assert app.tools.owner_of("search_pages") == "notion"
 
-                async with websockets.connect(_url(transport)) as ws:
+                async with websockets.connect(url(transport)) as ws:
                     await register(
                         ws, transport, client_name="desktop", drain=False
                     )

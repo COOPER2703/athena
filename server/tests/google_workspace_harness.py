@@ -29,7 +29,7 @@ from types import SimpleNamespace
 
 import websockets
 
-from conftest import RecordingTraceSink, _url, register, wait_until
+from testkit import RecordingTraceSink, register, url, wait_until
 from protocol import SessionStart, encode
 from server.adapters.gemini import GeminiLiveAdapter
 from server.adapters.plugins import PluginLoader
@@ -187,7 +187,7 @@ async def live_session(
     transport: WebSocketTransport, live: ToolLiveConnect
 ) -> AsyncIterator[ScriptedSession]:
     """Ouvre une vraie Connexion Live, enregistre le client, démarre la Session."""
-    async with websockets.connect(_url(transport)) as ws:
+    async with websockets.connect(url(transport)) as ws:
         await register(ws, transport, drain=False)
         await ws.send(encode(SessionStart()))
         await wait_until(lambda: bool(live.sessions))

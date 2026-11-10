@@ -5,7 +5,8 @@ import asyncio
 import pytest
 import websockets
 
-from conftest import RecordingTraceSink, _url, register, running_transport, wait_until
+from conftest import running_transport
+from testkit import RecordingTraceSink, register, url, wait_until
 from protocol import (
     Audio,
     Error,
@@ -30,7 +31,7 @@ def test_register_returns_registered_and_enqueues_event() -> None:
     async def scenario() -> None:
         sink = RecordingTraceSink()
         async with running_transport(sink=sink, server_tools=["memory"]) as transport:
-            async with websockets.connect(_url(transport)) as ws:
+            async with websockets.connect(url(transport)) as ws:
                 response = await register(
                     ws, transport, client_name="desktop", platform="linux"
                 )
@@ -48,8 +49,8 @@ def test_server_tools_provider_is_read_at_each_registration() -> None:
         names = ["save_memory"]
         async with running_transport(server_tools=lambda: list(names)) as transport:
             async with (
-                websockets.connect(_url(transport)) as first_ws,
-                websockets.connect(_url(transport)) as second_ws,
+                websockets.connect(url(transport)) as first_ws,
+                websockets.connect(url(transport)) as second_ws,
             ):
                 first = await register(
                     first_ws, transport, client_name="desktop"
@@ -69,7 +70,7 @@ def test_server_tools_provider_is_read_at_each_registration() -> None:
 def test_register_falls_back_to_client_id_and_unknown_platform() -> None:
     async def scenario() -> None:
         async with running_transport() as transport:
-            async with websockets.connect(_url(transport)) as ws:
+            async with websockets.connect(url(transport)) as ws:
                 await ws.send(encode(Register()))
                 response = decode(await asyncio.wait_for(ws.recv(), 1.0))
                 assert isinstance(response, Registered)
@@ -84,7 +85,7 @@ def test_register_falls_back_to_client_id_and_unknown_platform() -> None:
 def test_register_accepts_and_ignores_client_tools() -> None:
     async def scenario() -> None:
         async with running_transport() as transport:
-            async with websockets.connect(_url(transport)) as ws:
+            async with websockets.connect(url(transport)) as ws:
                 response = await register(
                     ws,
                     transport,
@@ -100,8 +101,8 @@ def test_duplicate_client_name_is_refused_with_error_and_1008() -> None:
     async def scenario() -> None:
         async with running_transport() as transport:
             async with (
-                websockets.connect(_url(transport)) as first,
-                websockets.connect(_url(transport)) as second,
+                websockets.connect(url(transport)) as first,
+                websockets.connect(url(transport)) as second,
             ):
                 registered = await register(first, transport, client_name="desktop")
 
@@ -124,7 +125,7 @@ def test_duplicate_client_name_is_refused_with_error_and_1008() -> None:
 def test_ping_gets_pong_and_is_not_enqueued_to_core() -> None:
     async def scenario() -> None:
         async with running_transport() as transport:
-            async with websockets.connect(_url(transport)) as ws:
+            async with websockets.connect(url(transport)) as ws:
                 await register(ws, transport)
 
                 await ws.send(encode(Ping()))
@@ -141,7 +142,7 @@ def test_client_pong_is_traced_and_not_enqueued_to_core() -> None:
     async def scenario() -> None:
         sink = RecordingTraceSink()
         async with running_transport(sink=sink) as transport:
-            async with websockets.connect(_url(transport)) as ws:
+            async with websockets.connect(url(transport)) as ws:
                 await register(ws, transport)
 
                 await ws.send(encode(Pong()))
@@ -157,7 +158,7 @@ def test_invalid_frame_is_traced_ignored_and_connection_stays_open() -> None:
     async def scenario() -> None:
         sink = RecordingTraceSink()
         async with running_transport(sink=sink) as transport:
-            async with websockets.connect(_url(transport)) as ws:
+            async with websockets.connect(url(transport)) as ws:
                 await ws.send(b"\xff\xff not protobuf")
                 await ws.send(encode(Register(client_name="desktop")))
                 response = decode(await asyncio.wait_for(ws.recv(), 1.0))
@@ -172,7 +173,7 @@ def test_disconnect_removes_client_and_traces() -> None:
     async def scenario() -> None:
         sink = RecordingTraceSink()
         async with running_transport(sink=sink) as transport:
-            async with websockets.connect(_url(transport)) as ws:
+            async with websockets.connect(url(transport)) as ws:
                 response = await register(ws, transport)
                 assert response.client_id in transport.clients
 
@@ -185,7 +186,7 @@ def test_disconnect_removes_client_and_traces() -> None:
 def test_disconnect_enqueues_client_disconnected_for_the_core() -> None:
     async def scenario() -> None:
         async with running_transport() as transport:
-            async with websockets.connect(_url(transport)) as ws:
+            async with websockets.connect(url(transport)) as ws:
                 response = await register(ws, transport)
 
             event = await asyncio.wait_for(transport.recv(), 1.0)
@@ -198,7 +199,7 @@ def test_disconnect_enqueues_client_disconnected_for_the_core() -> None:
 def test_send_audio_seam_targets_the_client() -> None:
     async def scenario() -> None:
         async with running_transport() as transport:
-            async with websockets.connect(_url(transport)) as ws:
+            async with websockets.connect(url(transport)) as ws:
                 response = await register(ws, transport)
 
                 await transport.send_audio(response.client_id, b"pcm")
@@ -229,7 +230,7 @@ def test_command_for_unknown_client_is_dropped_and_traced() -> None:
 def test_non_transport_command_is_ignored_without_crashing() -> None:
     async def scenario() -> None:
         async with running_transport() as transport:
-            async with websockets.connect(_url(transport)) as ws:
+            async with websockets.connect(url(transport)) as ws:
                 response = await register(ws, transport)
 
                 # Reserved seams: T1 core emits none of these, and the adapter
