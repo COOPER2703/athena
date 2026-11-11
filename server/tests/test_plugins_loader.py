@@ -10,7 +10,13 @@ from testkit import RecordingTraceSink
 
 from server.adapters.plugins import PluginLoadError, PluginLoader
 from server.app.secrets import EnvSecretResolver
-from server.core.plugins import ConfigField, PluginRegistry, SecretField
+from server.core.plugins import (
+    ConfigField,
+    ConfigValue,
+    PluginRegistry,
+    SecretField,
+    SecretPresence,
+)
 
 FIXTURE_NAME = "fixture"
 
@@ -935,3 +941,159 @@ def test_startup_traces_every_plugin_state_in_one_deterministic_pass(
         "beta": "failed",
         "delta": "inactive",
     }
+
+
+# -- Réglages observés et diagnostic (#158) ----------------------------------
+
+
+def test_an_inactive_plugin_exposes_its_settings_without_being_imported(
+    tmp_path: Path,
+) -> None:
+    """Valeurs effectives et présence des secrets, sans jamais importer le code."""
+    secret = "unique-secret-value-158"
+    _write_plugin(
+        tmp_path,
+        code=EXPLODING_CODE,
+        manifest=_manifest(
+            config=[
+                {"key": "base_url", "type": "url"},
+                {"key": "parent_page_id", "type": "string", "required": True},
+            ],
+            secrets=[{"key": "api_key", "required": True}],
+        ),
+    )
+    _write_state(
+        tmp_path,
+        enabled=[],
+        config={FIXTURE_NAME: {"base_url": "http://tavily.local"}},
+    )
+    sink = RecordingTraceSink()
+
+    registry = _load(
+        _loader(
+            tmp_path,
+            sink,
+            env={"ATHENA_PLUGIN_FIXTURE_API_KEY": secret},
+        )
+    )
+
+    observation = registry.observation_of(FIXTURE_NAME)
+    assert observation is not None
+    # La clé requise absente vaut ``None`` (défaut du plugin), jamais ``""``.
+    assert observation.config == (
+        ConfigValue(key="base_url", value="http://tavily.local"),
+        ConfigValue(key="parent_page_id", value=None),
+    )
+    assert observation.secrets == (
+        SecretPresence(
+            key="api_key",
+            variable="ATHENA_PLUGIN_FIXTURE_API_KEY",
+            present=True,
+        ),
+    )
+    assert secret not in repr(observation)
+    assert not (tmp_path / "plugins" / FIXTURE_NAME / "imported.txt").exists()
+
+
+def test_a_gap_in_the_settings_of_an_inactive_plugin_never_stops_the_scan(
+    tmp_path: Path,
+) -> None:
+    """Clé requise absente, URL invalide et secret manquant ne lèvent jamais."""
+    _write_plugin(
+        tmp_path,
+        manifest=_manifest(
+            config=[
+                {"key": "url", "type": "url", "required": True},
+                {"key": "parent_page_id", "type": "string", "required": True},
+            ],
+            secrets=[{"key": "token", "required": True}],
+        ),
+    )
+    _write_state(
+        tmp_path,
+        enabled=[],
+        config={FIXTURE_NAME: {"url": "homeassistant.local:8123"}},
+    )
+
+    registry = _load(_loader(tmp_path, RecordingTraceSink()))
+
+    assert registry.state_of(FIXTURE_NAME) == "inactive"
+    observation = registry.observation_of(FIXTURE_NAME)
+    assert observation is not None
+    assert observation.config == (
+        ConfigValue(key="url", value="homeassistant.local:8123"),
+        ConfigValue(key="parent_page_id", value=None),
+    )
+    assert observation.secrets == (
+        SecretPresence(
+            key="token",
+            variable="ATHENA_PLUGIN_FIXTURE_TOKEN",
+            present=False,
+        ),
+    )
+
+
+def test_every_installed_directory_is_observed_including_unsupported_and_invalid(
+    tmp_path: Path,
+) -> None:
+    """Le balayage sonde les réglages de tous les dossiers, retenus ou non."""
+    _write_plugin(
+        tmp_path,
+        "mobile",
+        manifest=_manifest(
+            "mobile",
+            platform="desktop",
+            config=[{"key": "room", "type": "string"}],
+            secrets=[{"key": "device_token", "required": True}],
+        ),
+        code=EXPLODING_CODE,
+    )
+    _write_plugin(
+        tmp_path,
+        "broken",
+        manifest=_manifest(
+            "broken",
+            api_version=2,
+            secrets=[{"key": "api_key", "required": True}],
+        ),
+        code=EXPLODING_CODE,
+    )
+    _write_state(
+        tmp_path,
+        enabled=[],
+        config={"mobile": {"room": "salon"}},
+    )
+
+    registry = _load(_loader(tmp_path, RecordingTraceSink()))
+
+    # Non supporté : identité, réglages et présence sont lisibles.
+    assert registry.state_of("mobile") == "unsupported"
+    mobile = registry.observation_of("mobile")
+    assert mobile is not None
+    assert mobile.config == (ConfigValue(key="room", value="salon"),)
+    assert mobile.secrets == (
+        SecretPresence(
+            key="device_token",
+            variable="ATHENA_PLUGIN_MOBILE_DEVICE_TOKEN",
+            present=False,
+        ),
+    )
+
+    # Invalide : seules les exigences que le manifeste permet encore de lire
+    # sont exposées, et elles sont sondées comme les autres.
+    assert registry.state_of("broken") == "invalid"
+    declaration = registry.declaration_of("broken")
+    assert declaration is not None
+    assert declaration.invalid_reason is not None
+    assert declaration.secrets == (SecretField(key="api_key", required=True),)
+    broken = registry.observation_of("broken")
+    assert broken is not None
+    assert broken.secrets == (
+        SecretPresence(
+            key="api_key",
+            variable="ATHENA_PLUGIN_BROKEN_API_KEY",
+            present=False,
+        ),
+    )
+    assert not (tmp_path / "plugins" / "mobile" / "imported.txt").exists()
+    assert not (tmp_path / "plugins" / "broken" / "imported.txt").exists()
