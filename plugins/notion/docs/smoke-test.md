@@ -6,7 +6,8 @@ dérouler le parcours vocal complet — chercher une page, la lire, la modifier,
 corbeille et la restaurer. Le plugin parle directement à la **REST Notion** avec un jeton
 d'intégration statique : Gemini ne voit jamais Notion, seulement six Tools de page.
 
-Voir `docs/smoke-test-t4-plugins.md` pour le contrat des plugins et `websearch`,
+Voir `docs/smoke-test-t4-plugins.md` pour le contrat du système de plugins,
+`plugins/websearch/docs/smoke-test.md` pour le parcours websearch,
 `docs/smoke-test-t5-console.md` pour la Console, `docs/smoke-test-t3-evenements.md` pour les
 Événements, `docs/smoke-test-t2-memoire.md` pour la mémoire et
 `docs/smoke-test-t1-composition.md` pour la boucle serveur/client d'origine.
