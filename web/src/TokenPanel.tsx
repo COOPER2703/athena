@@ -320,7 +320,7 @@ export function TokenPanel({
                   className={
                     token.revokedAt === null
                       ? "badge"
-                      : "badge badge--plugin-disabled"
+                      : "badge badge--muted"
                   }
                 >
                   {tokenStatusLabel(token)}
