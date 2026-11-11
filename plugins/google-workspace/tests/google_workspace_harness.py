@@ -40,7 +40,7 @@ from server.app.secrets import EnvSecretResolver
 from server.app.trace import FanOutTraceSink
 from server.core.plugins import PluginRegistry
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 PLUGIN_DIR = REPO_ROOT / "plugins" / "google-workspace"
 
 # -- Secrets de test, trois listes parallèles à ``accounts`` -----------------

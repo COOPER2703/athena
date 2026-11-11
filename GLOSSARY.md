@@ -212,7 +212,8 @@ _Avoid_: User, device, utilisateur
 **Compte**:
 L'identité d'accès de l'administrateur d'une instance : un nom d'utilisateur et un mot de
 passe haché en Argon2id. Unique en v1, sans inscription publique ni rôle. Se distingue de
-l'**Utilisateur** (`User` : la personne dont Athena se souvient) et du **Client** (l'appareil).
+l'**Utilisateur** (`User` : la personne dont Athena se souvient), du **Client** (l'appareil)
+et du **Compte Google** (compte de messagerie relié au plugin `google-workspace`).
 _Avoid_: user, compte utilisateur, profil, login
 
 **Ticket Console**:
@@ -330,39 +331,6 @@ plateforme que le plugin relie ; Athena ne les renomme pas et ne leur ajoute auc
 Le noyau l'exécute par le même round-trip qu'un Tool du noyau, mais l'exécution sort du
 serveur, vers la plateforme.
 _Avoid_: Tool externe, tool intégré, wrapper
-
-### Google Workspace
-
-**Compte Google**:
-Un compte Google dont Athena lit les mails et l'agenda, relié au plugin `google-workspace` par
-un libellé stable (`perso`, `pro`). Se distingue du **Compte** (identité d'accès à la Console),
-de l'**Utilisateur** (personne dont Athena se souvient) et du **Client** (appareil).
-_Avoid_: compte Workspace, compte Gmail, profil Google
-
-**Événement d'agenda**:
-Une entrée de l'agenda Google d'un Compte Google : début, fin, titre, lieu et participants
-éventuels. Se distingue de l'**Événement** (fait externe poussé vers Athena).
-_Avoid_: événement (seul), meeting, créneau
-
-**Carnet de contacts**:
-L'ensemble des **Contacts Google** d'un Compte Google, contacts enregistrés et contacts
-mémorisés par Gmail réunis. N'est pas un annuaire : l'annuaire du domaine Workspace n'en
-fait pas partie.
-_Avoid_: répertoire, annuaire, contacts (seul)
-
-**Contact Google**:
-Une personne du carnet d'un **Compte Google**, réduite à un nom d'affichage et à ses
-adresses e-mail. Un nom seul ne la résout pas, et elle peut porter plusieurs adresses :
-c'est une recherche, pas une clé. Se distingue du **Contact** (Matrix).
-_Avoid_: contact (seul), fiche, répertoire, annuaire
-
-**Correspondance approximative**:
-Le résultat d'une **recherche de contacts** dont la requête ne se retrouve telle quelle
-dans aucun nom ni aucune adresse, mais s'en approche à une ou deux fautes d'orthographe
-près, sur le nom ou la partie locale d'une adresse. Une telle correspondance est marquée
-`approximate` dans le retour et se confirme à l'oral avant tout envoi ; elle ne se mélange
-jamais à des correspondances exactes.
-_Avoid_: recherche floue, fuzzy, correspondance partielle
 
 ### Développement assisté
 

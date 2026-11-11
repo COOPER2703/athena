@@ -4,8 +4,9 @@
 
 accepted
 
-Précise l'ADR-0021 : le plugin `google-workspace` ajoute `contacts_search`, qui lit le carnet
-d'un **Compte Google** par l'API People. Ne modifie aucun autre ADR.
+Précise l'ADR local [0001](0001-google-workspace-par-refresh-tokens.md) : le plugin
+`google-workspace` ajoute `contacts_search`, qui lit le carnet d'un **Compte Google** par
+l'API People. Ne modifie aucun autre ADR.
 
 Amendé ensuite : `contacts_search` ajoute une passe tolérante de secours pour une requête mal
 entendue ; le reste de la décision est inchangé.

@@ -1,7 +1,7 @@
 # Smoke test — Plugin Google Workspace (mails, agenda et contacts en voix)
 
 Vérification manuelle de bout en bout du plugin serveur `google-workspace`
-(spec #135, ADR-0021, ADR-0022) : créer un client OAuth par organisation,
+(spec #135, ADR local 0001, ADR local 0002) : créer un client OAuth par organisation,
 obtenir un refresh token hors bande avec le Playground, activer un ou plusieurs
 Comptes Google dans Athena, puis dérouler les parcours Gmail, Agenda et
 Contacts à la voix.
@@ -10,9 +10,9 @@ Le plugin échange des refresh tokens statiques contre des access tokens d'une
 heure, gardés **en mémoire seulement**. Il n'exécute aucun flow OAuth, ne
 persiste aucun token et ne pousse aucun Événement (ni Source ni Watcher en v1).
 
-Voir `plugins/notion/docs/smoke-test.md` pour la forme générale d'un smoke test de
-plugin, `docs/smoke-test-t4-plugins.md` pour le contrat des plugins et
-`docs/smoke-test-t5-console.md` pour la Console.
+Voir le [smoke test du plugin notion](../../notion/docs/smoke-test.md) pour la forme générale
+d'un smoke test de plugin, le [contrat des plugins](../../../docs/smoke-test-t4-plugins.md)
+et la [Console](../../../docs/smoke-test-t5-console.md).
 
 ## Prérequis
 
@@ -356,7 +356,7 @@ secret différent) ou l'application est repassée en mode Test.
 
 ```sh
 make generate
-.venv/bin/python -m pytest server/tests/test_plugins_google_workspace.py -q
+.venv/bin/python -m pytest plugins/google-workspace/tests/test_plugins_google_workspace.py -q
 ```
 
 Aucun test ne contacte le vrai Google : un **faux serveur en processus** imite
@@ -364,7 +364,7 @@ le point d'échange OAuth (`POST /token` en formulaire), Gmail, Calendar et
 l'API People, enregistre chaque requête et programme les réponses par refresh
 token.
 
-Le module `server/tests/test_plugins_google_workspace.py` couvre notamment :
+Le module `plugins/google-workspace/tests/test_plugins_google_workspace.py` couvre notamment :
 
 - manifeste exact, secrets requis, défauts de configuration fatals avant tout
   appel réseau ;
