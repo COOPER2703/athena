@@ -1092,6 +1092,13 @@ def test_build_app_serves_plugins_and_safe_config_in_the_snapshot(
                     "reason": None,
                     "retry": False,
                     "instruction": "Utilise fixture__echo pour répéter.",
+                    "config": [],
+                    "secrets": [],
+                    "ready": {
+                        "manifest": True,
+                        "config": True,
+                        "secrets": True,
+                    },
                 }
             ]
             assert "disabled" not in json.dumps(snapshot)
@@ -1193,9 +1200,19 @@ def test_build_app_serves_the_six_service_states_without_disabled(
                 "directory": str(plugins_dir / "broken"),
                 "invalid_reason": broken["reason"],
             }
+            assert broken["reason"] is not None
             assert "manifest is not valid JSON" in broken["reason"]
             assert broken["retry"] is False
             assert broken["instruction"] == ""
+            # Un manifeste illisible n'invente aucune exigence : listes vides,
+            # diagnostic borné au marqueur du manifeste.
+            assert broken["config"] == []
+            assert broken["secrets"] == []
+            assert broken["ready"] == {
+                "manifest": False,
+                "config": True,
+                "secrets": True,
+            }
 
             dormant = by_name["dormant"]
             assert dormant["declaration"]["description"] == "Plugin dormant"
@@ -1220,6 +1237,15 @@ def test_build_app_serves_the_six_service_states_without_disabled(
             assert ghost["declaration"] is None
             assert ghost["reason"] is None
             assert ghost["instruction"] == ""
+            # Sans Déclaration, aucune exigence n'est connue : listes vides et
+            # marqueurs de configuration/secrets vrais faute d'exigence.
+            assert ghost["config"] == []
+            assert ghost["secrets"] == []
+            assert ghost["ready"] == {
+                "manifest": False,
+                "config": True,
+                "secrets": True,
+            }
 
             mobile = by_name["mobile"]
             assert mobile["declaration"]["platform"] == "desktop"
@@ -1234,6 +1260,225 @@ def test_build_app_serves_the_six_service_states_without_disabled(
             # dossiers ne le change pas, aucune I/O n'a lieu à sa construction.
             shutil.rmtree(plugins_dir)
             assert app.snapshot()["plugins"] == snapshot["plugins"]
+        finally:
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+
+    asyncio.run(scenario())
+
+
+def test_build_app_serves_plugin_settings_and_readiness_without_secret_values(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Câblage réel : réglages effectifs, présence des secrets et trois marqueurs."""
+
+    async def scenario() -> None:
+        plugins_dir = tmp_path / "plugins"
+        secret = "unique-websearch-secret-158"
+        websearch = plugins_dir / "websearch"
+        websearch.mkdir(parents=True)
+        (websearch / "plugin.json").write_text(
+            json.dumps(
+                {
+                    "api_version": 1,
+                    "name": "websearch",
+                    "version": "1.0.0",
+                    "description": "Cherche sur le web via Tavily",
+                    "platform": "server",
+                    "entrypoint": "plugin.py",
+                    "config": [
+                        {"key": "base_url", "type": "url"},
+                        {"key": "search_depth", "type": "string"},
+                    ],
+                    "secrets": [{"key": "api_key", "required": True}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (websearch / "plugin.py").write_text(
+            "raise RuntimeError('jamais importé')", encoding="utf-8"
+        )
+
+        notion = plugins_dir / "notion"
+        notion.mkdir(parents=True)
+        (notion / "plugin.json").write_text(
+            json.dumps(
+                {
+                    "api_version": 1,
+                    "name": "notion",
+                    "version": "0.1.0",
+                    "description": "Pages Notion",
+                    "platform": "server",
+                    "entrypoint": "plugin.py",
+                    "config": [
+                        {"key": "parent_page_id", "type": "string", "required": True},
+                        {"key": "base_url", "type": "url"},
+                    ],
+                    "secrets": [{"key": "token", "required": True}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (notion / "plugin.py").write_text(
+            "raise RuntimeError('jamais importé')", encoding="utf-8"
+        )
+
+        broken = plugins_dir / "broken"
+        broken.mkdir()
+        (broken / "plugin.json").write_text("{pas du json", encoding="utf-8")
+
+        state_path = tmp_path / "plugins.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    # Seul un dossier disparu est retenu : les trois autres
+                    # restent des dossiers installés à diagnostiquer.
+                    "enabled": ["ghost"],
+                    "config": {
+                        "websearch": {
+                            "base_url": "http://tavily.local",
+                            "search_depth": "",
+                        },
+                        "notion": {"base_url": "pas-une-url"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(
+            "server.app.root.SentenceTransformerEmbedder", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            "server.app.root.SqliteMemoryStore", lambda *a, **k: FakeMemory()
+        )
+        port = _free_port()
+        console_port = _free_port()
+        config = AppConfig(
+            gemini=GeminiConfig(api_key="test-key"),
+            server=ServerConfig(host="127.0.0.1", port=port),
+            console=ConsoleConfig(port=console_port),
+            webhook=WebhookConfig(enabled=False),
+            plugins=PluginsConfig(
+                directory=str(plugins_dir), state_path=str(state_path)
+            ),
+            log_dir=str(tmp_path),
+            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
+        )
+        app = build_app(
+            config,
+            secrets=EnvSecretResolver({"ATHENA_PLUGIN_WEBSEARCH_API_KEY": secret}),
+            env={},
+            env_file=None,
+        )
+        runner = asyncio.create_task(app.run())
+        try:
+            base_url = f"http://127.0.0.1:{console_port}"
+            async with console_session(base_url) as http:
+                await install_console(http, base_url, tmp_path / "server.log")
+                snapshot = await _snapshot_when_ready(
+                    http, f"{base_url}/api/status"
+                )
+
+            by_name = {plugin["name"]: plugin for plugin in snapshot["plugins"]}
+            assert set(by_name) == {"broken", "ghost", "notion", "websearch"}
+
+            # Renseignée contre défaut : une valeur vide vaut ``null``.
+            websearch_entry = by_name["websearch"]
+            assert websearch_entry["config"] == [
+                {
+                    "key": "base_url",
+                    "type": "url",
+                    "required": False,
+                    "value": "http://tavily.local",
+                },
+                {
+                    "key": "search_depth",
+                    "type": "string",
+                    "required": False,
+                    "value": None,
+                },
+            ]
+            assert websearch_entry["secrets"] == [
+                {
+                    "key": "api_key",
+                    "variable": "ATHENA_PLUGIN_WEBSEARCH_API_KEY",
+                    "required": True,
+                    "present": True,
+                }
+            ]
+            assert websearch_entry["ready"] == {
+                "manifest": True,
+                "config": True,
+                "secrets": True,
+            }
+
+            # Clé requise absente et URL invalide : la configuration n'est pas
+            # prête, et le secret requis manque.
+            notion_entry = by_name["notion"]
+            assert notion_entry["config"] == [
+                {
+                    "key": "parent_page_id",
+                    "type": "string",
+                    "required": True,
+                    "value": None,
+                },
+                {
+                    "key": "base_url",
+                    "type": "url",
+                    "required": False,
+                    "value": "pas-une-url",
+                },
+            ]
+            assert notion_entry["secrets"] == [
+                {
+                    "key": "token",
+                    "variable": "ATHENA_PLUGIN_NOTION_TOKEN",
+                    "required": True,
+                    "present": False,
+                }
+            ]
+            assert notion_entry["ready"] == {
+                "manifest": True,
+                "config": False,
+                "secrets": False,
+            }
+
+            # Ni manifeste lisible ni exigences connues : aucune liste inventée,
+            # et les deux marqueurs sans exigence restent vrais.
+            ghost_entry = by_name["ghost"]
+            assert ghost_entry["declaration"] is None
+            assert ghost_entry["config"] == []
+            assert ghost_entry["secrets"] == []
+            assert ghost_entry["ready"] == {
+                "manifest": False,
+                "config": True,
+                "secrets": True,
+            }
+
+            broken_entry = by_name["broken"]
+            assert broken_entry["declaration"]["invalid_reason"] is not None
+            assert broken_entry["config"] == []
+            assert broken_entry["secrets"] == []
+            assert broken_entry["ready"] == {
+                "manifest": False,
+                "config": True,
+                "secrets": True,
+            }
+
+            # Une entrée secret ne porte jamais de valeur, et la valeur de
+            # l'environnement de test n'apparaît nulle part dans l'instantané.
+            for entry in snapshot["plugins"]:
+                for secret_entry in entry["secrets"]:
+                    assert set(secret_entry) == {
+                        "key",
+                        "variable",
+                        "required",
+                        "present",
+                    }
+            serialized = json.dumps(snapshot)
+            assert secret not in serialized
+            assert "test-key" not in serialized
         finally:
             app.request_shutdown()
             await asyncio.wait_for(runner, 1.0)
