@@ -15,13 +15,16 @@ from server.core.plugins import (
     KNOWN_PLATFORMS,
     SERVER_PLATFORM,
     ConfigField,
+    ConfigValue,
     PluginBinding,
     PluginContext,
     PluginDeclaration,
     PluginManifest,
+    PluginObservation,
     PluginRegistry,
     PluginUnavailable,
     SecretField,
+    SecretPresence,
 )
 from server.core.ports import MissingSecretError, SecretResolver, TraceSink
 from server.core.tools import ToolNameConflict
@@ -133,7 +136,7 @@ class PluginLoader:
         # Le balayage ne lit que les manifestes : aucun module d'un plugin non
         # retenu n'est importé, donc déposer un dossier n'exécute rien.
         for name in sorted(self._on_disk() - set(enabled)):
-            self._scan_installed(name, registry)
+            self._scan_installed(name, registry, configs.get(name, {}))
 
     # -- État d'activation ---------------------------------------------------
 
@@ -201,6 +204,10 @@ class PluginLoader:
             return
         manifest = self._read_manifest(name, plugin_dir)
         registry.declare(name, _declaration(manifest, plugin_dir))
+        registry.observe(
+            name,
+            self._observe(name, manifest.config, manifest.secrets, raw_config),
+        )
         if manifest.platform != SERVER_PLATFORM:
             # Une plateforme cliente n'est jamais chargée par le serveur : le
             # plugin reste inerte ici, sans faire échouer le démarrage.
@@ -385,22 +392,28 @@ class PluginLoader:
             secrets=self._read_secret_fields(name, data.get("secrets", [])),
         )
 
-    def _scan_installed(self, name: str, registry: PluginRegistry) -> None:
+    def _scan_installed(
+        self, name: str, registry: PluginRegistry, raw_config: Mapping[str, object]
+    ) -> None:
         """Classe un dossier non retenu en lisant son manifeste, sans l'importer.
 
         La plateforme est lue avant la validation complète : un manifeste qui
         annonce ``desktop`` reste ``unsupported`` même s'il lui manque un champ
         serveur. Tout autre défaut donne ``invalid`` avec une raison expurgée,
         sans interrompre le démarrage ; un manifeste sain donne ``inactive``.
+        Les réglages observables le sont dans tous les cas : une valeur de
+        configuration vient du fichier d'état même pour un dossier non retenu,
+        et la présence des secrets est sondée sans jamais les stocker.
         """
         plugin_dir = self._directory / name
         try:
             data = self._read_manifest_data(name, plugin_dir)
         except PluginLoadError as exc:
             reason = _redact(str(exc), ())
-            registry.declare(
-                name, _raw_declaration(plugin_dir, {}, invalid_reason=reason)
+            declaration = self._raw_declaration(
+                name, plugin_dir, {}, invalid_reason=reason
             )
+            self._declare(registry, name, declaration, raw_config)
             self._record_state(registry, name, "invalid", reason=reason)
             return
         platform = data.get("platform")
@@ -410,7 +423,7 @@ class PluginLoader:
             and platform != SERVER_PLATFORM
         ):
             declaration = self._declaration_or_raw(name, plugin_dir, data)
-            registry.declare(name, declaration)
+            self._declare(registry, name, declaration, raw_config)
             self._record_state(
                 registry, name, "unsupported", platform=declaration.platform
             )
@@ -419,13 +432,35 @@ class PluginLoader:
             manifest = self._parse_manifest(name, plugin_dir, data)
         except PluginLoadError as exc:
             reason = _redact(str(exc), ())
-            registry.declare(
-                name, _raw_declaration(plugin_dir, data, invalid_reason=reason)
+            declaration = self._raw_declaration(
+                name, plugin_dir, data, invalid_reason=reason
             )
+            self._declare(registry, name, declaration, raw_config)
             self._record_state(registry, name, "invalid", reason=reason)
             return
-        registry.declare(name, _declaration(manifest, plugin_dir))
+        self._declare(registry, name, _declaration(manifest, plugin_dir), raw_config)
         self._record_state(registry, name, "inactive")
+
+    def _declare(
+        self,
+        registry: PluginRegistry,
+        name: str,
+        declaration: PluginDeclaration,
+        raw_config: Mapping[str, object],
+    ) -> None:
+        """Publie une Déclaration et les réglages qu'elle permet d'observer.
+
+        Un manifeste invalide peut n'avoir qu'une Déclaration partielle : on ne
+        sonde alors que les exigences qu'il permet encore de lire, jamais celles
+        qu'on suppose.
+        """
+        registry.declare(name, declaration)
+        registry.observe(
+            name,
+            self._observe(
+                name, declaration.config, declaration.secrets, raw_config
+            ),
+        )
 
     def _declaration_or_raw(
         self, name: str, plugin_dir: Path, data: dict
@@ -434,13 +469,91 @@ class PluginLoader:
 
         Un plugin d'une autre plateforme n'est jamais chargé, donc un défaut qui
         ne concerne que le serveur (entrypoint absent) ne doit pas masquer son
-        identité dans le registre.
+        identité dans le registre. Les exigences encore lisibles sont conservées
+        telles quelles, sans compléter ce que le manifeste ne permet pas de lire.
         """
         try:
             manifest = self._parse_manifest(name, plugin_dir, data)
         except PluginLoadError:
-            return _raw_declaration(plugin_dir, data)
+            return self._raw_declaration(name, plugin_dir, data)
         return _declaration(manifest, plugin_dir)
+
+    def _raw_declaration(
+        self,
+        name: str,
+        plugin_dir: Path,
+        data: dict,
+        *,
+        invalid_reason: str | None = None,
+    ) -> PluginDeclaration:
+        """Identité lisible d'un manifeste invalide, sans inventer le reste.
+
+        Le registre doit pouvoir nommer un dossier au manifeste cassé ; les
+        champs qu'on ne sait pas valider restent vides plutôt que d'être
+        devinés. Les listes de configuration et de secrets ne sont reprises que
+        si leur forme tient encore : une entrée malformée fait perdre la liste
+        entière, car une exigence à moitié lue vaudrait mieux comme inconnue.
+        """
+
+        def text(key: str) -> str:
+            value = data.get(key)
+            return value.strip() if isinstance(value, str) else ""
+
+        try:
+            config = self._read_config_fields(name, data.get("config", []))
+        except PluginLoadError:
+            config = ()
+        try:
+            secrets = self._read_secret_fields(name, data.get("secrets", []))
+        except PluginLoadError:
+            secrets = ()
+        api_version = data.get("api_version")
+        return PluginDeclaration(
+            description=text("description"),
+            version=text("version"),
+            api_version=api_version if isinstance(api_version, int) else 0,
+            platform=text("platform"),
+            directory=str(plugin_dir),
+            config=config,
+            secrets=secrets,
+            invalid_reason=invalid_reason,
+        )
+
+    def _observe(
+        self,
+        name: str,
+        config_fields: tuple[ConfigField, ...],
+        secret_fields: tuple[SecretField, ...],
+        raw_config: Mapping[str, object],
+    ) -> PluginObservation:
+        """Observe les réglages sans jamais lever ni stocker un secret.
+
+        Une clé laissée vide ou absente du fichier d'état vaut ``None`` : elle
+        est au défaut du plugin. Une URL invalide est conservée telle quelle,
+        pour que le diagnostic la nomme ; c'est la résolution stricte d'un
+        plugin retenu qui refusera le démarrage. Un résolveur qui échoue autre
+        chose que ``MissingSecretError`` est traité comme « absent » : ce
+        balayage ne doit jamais interrompre le démarrage pour un dossier non
+        retenu.
+        """
+        config: list[ConfigValue] = []
+        for field in config_fields:
+            raw = raw_config.get(field.key)
+            text = "" if raw is None else str(raw).strip()
+            config.append(ConfigValue(key=field.key, value=text or None))
+        secrets: list[SecretPresence] = []
+        for field in secret_fields:
+            variable = secret_variable(name, field.key)
+            try:
+                self._secrets.resolve(variable)
+            except Exception:
+                present = False
+            else:
+                present = True
+            secrets.append(
+                SecretPresence(key=field.key, variable=variable, present=present)
+            )
+        return PluginObservation(config=tuple(config), secrets=tuple(secrets))
 
     @staticmethod
     def _read_entries(
@@ -522,7 +635,7 @@ class PluginLoader:
                         f"{field.key!r} is missing from the plugins state file"
                     )
                 continue
-            if field.type == "url" and not _is_http_url(text):
+            if field.type == "url" and not is_http_url(text):
                 raise PluginLoadError(
                     f"plugin {manifest.name!r}: config key {field.key!r} must be "
                     "an http(s) URL with a host"
@@ -704,32 +817,12 @@ def _declaration(manifest: PluginManifest, plugin_dir: Path) -> PluginDeclaratio
     )
 
 
-def _raw_declaration(
-    plugin_dir: Path, data: dict, *, invalid_reason: str | None = None
-) -> PluginDeclaration:
-    """Identité lisible d'un manifeste invalide, sans inventer le reste.
+def is_http_url(text: str) -> bool:
+    """Vrai si ``text`` est une URL ``http``/``https`` avec un hôte non vide.
 
-    Le registre doit pouvoir nommer un dossier au manifeste cassé ; les champs
-    qu'on ne sait pas valider restent vides plutôt que d'être devinés.
+    Même règle que la résolution stricte d'un plugin retenu, exposée pour que
+    l'instantané juge une URL déclarée sans réimporter la logique du chargeur.
     """
-
-    def text(key: str) -> str:
-        value = data.get(key)
-        return value.strip() if isinstance(value, str) else ""
-
-    api_version = data.get("api_version")
-    return PluginDeclaration(
-        description=text("description"),
-        version=text("version"),
-        api_version=api_version if isinstance(api_version, int) else 0,
-        platform=text("platform"),
-        directory=str(plugin_dir),
-        invalid_reason=invalid_reason,
-    )
-
-
-def _is_http_url(text: str) -> bool:
-    """Vrai si ``text`` est une URL ``http``/``https`` avec un hôte non vide."""
     try:
         parts = urlsplit(text)
         return parts.scheme in ("http", "https") and bool(parts.hostname)

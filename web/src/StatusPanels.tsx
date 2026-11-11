@@ -1,9 +1,11 @@
 import {
+  formatMarkerState,
   formatPluginState,
   instructionNotice,
   pluginSheet,
   pluginStateClass,
   type PluginInfo,
+  type PluginMarker,
 } from "./plugins";
 import {
   clientDisplayName,
@@ -62,7 +64,34 @@ export function ClientsPanel({
   );
 }
 
-/** Fiche dépliée d'un plugin : identité, Tools, Instruction et panne. */
+/** Un marqueur du diagnostic : état lisible, note ou manques nommés. */
+function DiagnosticMarker({ marker }: { marker: PluginMarker }) {
+  // Le manifeste invalide affiche déjà sa raison plus haut : on ne la répète
+  // pas dans la liste des manques, la note du marqueur suffit.
+  const gaps = marker.key === "manifest" ? [] : marker.gaps;
+  return (
+    <li className={`plugin__marker plugin__marker--${marker.state}`}>
+      <span className="plugin__marker-label">{marker.label}</span>
+      <span className="plugin__marker-state">
+        {formatMarkerState(marker.state)}
+      </span>
+      {marker.note !== null ? (
+        <p className="plugin__marker-note">{marker.note}</p>
+      ) : null}
+      {gaps.length > 0 ? (
+        <ul className="plugin__gaps">
+          {gaps.map((gap) => (
+            <li className="plugin__gap mono" key={gap}>
+              {gap}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </li>
+  );
+}
+
+/** Fiche dépliée d'un plugin : identité, réglages, diagnostic, Tools et panne. */
 function PluginSheet({ plugin }: { plugin: PluginInfo }) {
   const sheet = pluginSheet(plugin);
   const notice = instructionNotice(plugin);
@@ -109,6 +138,82 @@ function PluginSheet({ plugin }: { plugin: PluginInfo }) {
           <p className="plugin__message mono">{failure}</p>
         </div>
       ) : null}
+
+      <div className="plugin__section">
+        <h3 className="plugin__section-title">Configuration</h3>
+        {sheet.config.length > 0 ? (
+          <ul className="plugin__settings">
+            {sheet.config.map((field) => (
+              <li className="plugin__setting" key={field.key}>
+                <span className="plugin__setting-key mono">{field.key}</span>
+                <span className="plugin__setting-meta">
+                  {field.type}
+                  {field.required ? " · requis" : ""}
+                </span>
+                <span
+                  className={`plugin__setting-value mono${
+                    field.isDefault ? " plugin__setting-value--default" : ""
+                  }`}
+                >
+                  {field.valueLabel}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="notice">
+            {sheet.declarationMissing
+              ? "Réglages inconnus : aucune Déclaration lue."
+              : "Aucun champ de configuration déclaré."}
+          </p>
+        )}
+      </div>
+
+      <div className="plugin__section">
+        <h3 className="plugin__section-title">Secrets</h3>
+        {sheet.secrets.length > 0 ? (
+          <ul className="plugin__settings">
+            {sheet.secrets.map((secret) => (
+              <li className="plugin__setting plugin__setting--secret" key={secret.key}>
+                <span className="plugin__setting-key mono">{secret.key}</span>
+                <span className="plugin__setting-meta">
+                  {secret.required ? "requis" : "optionnel"}
+                </span>
+                <span className="plugin__setting-variable mono">
+                  {secret.variable || "—"}
+                </span>
+                <span
+                  className={`plugin__setting-presence plugin__setting-presence--${
+                    secret.present ? "present" : "absent"
+                  }`}
+                >
+                  {secret.presenceLabel}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="notice">
+            {sheet.declarationMissing
+              ? "Secrets inconnus : aucune Déclaration lue."
+              : "Aucun secret déclaré."}
+          </p>
+        )}
+      </div>
+
+      <div className="plugin__section">
+        <h3 className="plugin__section-title">Prêt à activer</h3>
+        <ul className="plugin__diagnostic">
+          <DiagnosticMarker marker={sheet.diagnostic.manifest} />
+          <DiagnosticMarker marker={sheet.diagnostic.config} />
+          <DiagnosticMarker marker={sheet.diagnostic.secrets} />
+        </ul>
+        {sheet.diagnostic.unknown ? (
+          <p className="notice">
+            Diagnostic partiel : des exigences restent illisibles.
+          </p>
+        ) : null}
+      </div>
 
       <div className="plugin__section">
         <h3 className="plugin__section-title">Tools</h3>

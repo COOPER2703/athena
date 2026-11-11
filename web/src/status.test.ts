@@ -29,6 +29,18 @@ const snapshot = {
       reason: null,
       retry: false,
       instruction: "Domotique.",
+      config: [
+        { key: "url", type: "url", required: true, value: "http://ha.local" },
+      ],
+      secrets: [
+        {
+          key: "token",
+          variable: "ATHENA_PLUGIN_HOMEASSISTANT_TOKEN",
+          required: true,
+          present: true,
+        },
+      ],
+      ready: { manifest: true, config: true, secrets: true },
     },
     {
       name: "calendar",
@@ -38,6 +50,9 @@ const snapshot = {
       reason: "PluginUnavailable: calendrier injoignable",
       retry: true,
       instruction: "",
+      config: [],
+      secrets: [],
+      ready: { manifest: false, config: true, secrets: true },
     },
   ],
   config: {
@@ -68,6 +83,18 @@ const normalized = {
       reason: null,
       retry: false,
       instruction: "Domotique.",
+      config: [
+        { key: "url", type: "url", required: true, value: "http://ha.local" },
+      ],
+      secrets: [
+        {
+          key: "token",
+          variable: "ATHENA_PLUGIN_HOMEASSISTANT_TOKEN",
+          required: true,
+          present: true,
+        },
+      ],
+      ready: { manifest: true, config: true, secrets: true },
     },
     {
       name: "calendar",
@@ -77,6 +104,9 @@ const normalized = {
       reason: "PluginUnavailable: calendrier injoignable",
       retry: true,
       instruction: "",
+      config: [],
+      secrets: [],
+      ready: { manifest: false, config: true, secrets: true },
     },
   ],
 };
@@ -119,6 +149,9 @@ describe("normalizeStatus", () => {
         reason: null,
         retry: false,
         instruction: "",
+        config: [],
+        secrets: [],
+        ready: null,
       },
     ]);
     expect(status.config).toEqual({ model: "gemini-live" });
