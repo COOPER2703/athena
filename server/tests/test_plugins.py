@@ -5,7 +5,14 @@ from typing import Mapping
 
 import pytest
 
-from server.core.plugins import PluginBinding, PluginRegistry, ToolBinding
+from server.core.plugins import (
+    ConfigField,
+    PluginBinding,
+    PluginDeclaration,
+    PluginRegistry,
+    SecretField,
+    ToolBinding,
+)
 from server.core.ports import ToolSpec
 from server.core.session_tools import END_SESSION, register_session_tools
 from server.core.tools import ToolNameConflict
@@ -96,14 +103,14 @@ def test_instruction_is_empty_when_no_plugin_provides_one() -> None:
     assert registry.instruction() == ""
 
 
-def test_instruction_disappears_with_the_disabled_plugin() -> None:
+def test_instruction_disappears_when_the_registry_is_rebuilt_without_the_plugin() -> None:
     enabled = _binding("alpha", "alpha__ping", instruction="Instruction alpha.")
     registry = PluginRegistry()
     registry.add(enabled)
     assert registry.instruction() == "Instruction alpha."
 
-    # Désactiver un plugin, c'est reconstruire le registre sans son binding :
-    # ses Tools et son instruction disparaissent ensemble.
+    # Reconstruire le registre sans le binding d'un plugin (parce qu'il n'est
+    # pas retenu) fait disparaître ses Tools et son instruction ensemble.
     rebuilt = PluginRegistry()
     assert rebuilt.tools.specs() == ()
     assert rebuilt.instruction() == ""
@@ -155,3 +162,50 @@ def test_registry_refuses_an_unknown_plugin_state() -> None:
         registry.mark_state("alpha", "activatd")
 
     assert "activatd" in str(excinfo.value)
+
+
+def test_registry_knows_the_six_service_states_and_no_disabled_one() -> None:
+    """Les six États de service du glossaire ; ``disabled`` n'en fait plus partie."""
+    registry = PluginRegistry()
+
+    for state in (
+        "activated",
+        "failed",
+        "missing",
+        "inactive",
+        "unsupported",
+        "invalid",
+    ):
+        registry.mark_state(f"plugin-{state}", state)
+
+    assert set(registry.states.values()) == {
+        "activated",
+        "failed",
+        "missing",
+        "inactive",
+        "unsupported",
+        "invalid",
+    }
+    with pytest.raises(ValueError):
+        registry.mark_state("legacy", "disabled")
+
+
+def test_registry_keeps_the_declaration_alongside_the_service_state() -> None:
+    """Tout dossier installé est observable par sa Déclaration, même non chargé."""
+    declaration = PluginDeclaration(
+        description="Cherche sur le web via Tavily",
+        version="1.0.0",
+        api_version=1,
+        platform="server",
+        directory="plugins/websearch",
+        config=(ConfigField(key="base_url", type="url", required=False),),
+        secrets=(SecretField(key="api_key", required=True),),
+    )
+    registry = PluginRegistry()
+    registry.declare("websearch", declaration)
+    registry.mark_state("websearch", "inactive")
+
+    assert registry.declaration_of("websearch") is declaration
+    assert registry.declaration_of("absent") is None
+    assert dict(registry.declarations) == {"websearch": declaration}
+    assert registry.state_of("websearch") == "inactive"

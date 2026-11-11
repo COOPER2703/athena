@@ -10,6 +10,7 @@
   --accent: #8fbcbb;
   --danger: #bf616a;
   --warning: #ebcb8b;
+  --info: #81a1c1;
   --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas,
     monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -200,10 +201,21 @@ code,
   color: var(--accent);
 }
 
-.badge--plugin-disabled,
-.badge--plugin-unknown {
+.badge--plugin-inactive,
+.badge--plugin-unknown,
+.badge--muted {
   border-color: var(--border);
   color: var(--muted);
+}
+
+.badge--plugin-unsupported {
+  border-color: var(--info);
+  color: var(--info);
+}
+
+.badge--plugin-invalid {
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 .badge--plugin-missing {

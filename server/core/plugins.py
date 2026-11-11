@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
 
@@ -19,7 +20,8 @@ from server.core.tools import ToolRegistry
 
 # Le contrat public vit dans ``plugin_api`` (aucun import de ``server``) ; ce
 # module le ré-exporte pour que les imports existants du noyau continuent de
-# marcher. Seul ``PluginRegistry`` appartient au noyau.
+# marcher. Seuls ``PluginDeclaration`` et ``PluginRegistry`` appartiennent au
+# noyau.
 
 __all__ = [
     "KNOWN_PLATFORMS",
@@ -28,6 +30,7 @@ __all__ = [
     "ConfigField",
     "PluginBinding",
     "PluginContext",
+    "PluginDeclaration",
     "PluginManifest",
     "PluginRegistry",
     "PluginUnavailable",
@@ -36,9 +39,38 @@ __all__ = [
     "ToolSpec",
 ]
 
-# États de chargement observables d'un plugin (GLOSSARY, section Plugins) :
-# activé, désactivé, dossier manquant, ou en échec de chargement.
-PLUGIN_STATES = ("activated", "disabled", "missing", "failed")
+# États de service observables d'un plugin installé (GLOSSARY, section
+# Plugins) : activé, en échec, dossier manquant, inactif, non supporté, ou
+# manifeste invalide. ``disabled`` confondait trois situations distinctes.
+PLUGIN_STATES = (
+    "activated",
+    "failed",
+    "missing",
+    "inactive",
+    "unsupported",
+    "invalid",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PluginDeclaration:
+    """Ce qu'un manifeste annonce, lu sans importer ni exécuter le plugin.
+
+    Identité, configuration attendue et noms des secrets requis : c'est la
+    matière que le registre porte pour **tous** les dossiers installés, y
+    compris ceux qui ne tourneront jamais. ``invalid_reason`` est renseignée
+    quand le manifeste ne tient pas debout ; l'identité vaut alors ce qui a pu
+    être lu. Aucune valeur de secret n'entre ici, seulement des clés.
+    """
+
+    description: str = ""
+    version: str = ""
+    api_version: int = 0
+    platform: str = ""
+    directory: str = ""
+    config: tuple[ConfigField, ...] = ()
+    secrets: tuple[SecretField, ...] = ()
+    invalid_reason: str | None = None
 
 
 class PluginRegistry:
@@ -50,15 +82,17 @@ class PluginRegistry:
     plugins, dans un ordre déterministe, pour que le prompt système reste
     reproductible.
 
-    Il porte aussi l'**état de chargement** de chaque plugin, pour qu'il soit
-    lisible sans relire la trace : c'est le catalogue décrit par le glossaire.
-    Le chargeur l'entretient ; la trace reste émise par l'adaptateur.
+    Il porte aussi l'**état de service** et la **Déclaration** de chaque plugin
+    installé, pour qu'ils soient lisibles sans relire la trace : c'est le
+    Plugin Registry décrit par le glossaire. Le chargeur l'entretient au
+    démarrage ; l'instantané ne fait ensuite que lire le cache.
     """
 
     def __init__(self) -> None:
         self._tools = ToolRegistry()
         self._instructions: dict[str, str] = {}
         self._states: dict[str, str] = {}
+        self._declarations: dict[str, PluginDeclaration] = {}
 
     @property
     def tools(self) -> ToolRegistry:
@@ -69,12 +103,28 @@ class PluginRegistry:
         """États connus des plugins, en lecture seule."""
         return MappingProxyType(self._states)
 
+    @property
+    def declarations(self) -> Mapping[str, PluginDeclaration]:
+        """Déclarations connues des plugins installés, en lecture seule."""
+        return MappingProxyType(self._declarations)
+
     def state_of(self, plugin: str) -> str | None:
-        """État de chargement d'un plugin, ``None`` s'il n'a jamais été vu."""
+        """État de service d'un plugin, ``None`` s'il n'a jamais été vu."""
         return self._states.get(plugin)
 
+    def declaration_of(self, plugin: str) -> PluginDeclaration | None:
+        """Déclaration d'un plugin installé, ``None`` si aucun manifeste lu."""
+        return self._declarations.get(plugin)
+
+    def declare(self, plugin: str, declaration: PluginDeclaration) -> None:
+        """Enregistre la Déclaration lue d'un dossier installé."""
+        name = plugin.strip()
+        if not name:
+            raise ValueError("plugin name is required")
+        self._declarations[name] = declaration
+
     def mark_state(self, plugin: str, state: str) -> None:
-        """Enregistre l'état de chargement d'un plugin.
+        """Enregistre l'état de service d'un plugin.
 
         Les états sont ceux du glossaire ; une valeur inconnue signale une
         dérive du chargeur, pas une donnée utilisateur.

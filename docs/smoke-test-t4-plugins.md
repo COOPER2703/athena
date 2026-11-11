@@ -117,7 +117,7 @@ asynchrone. Le contrat public est `plugin_api` ; un plugin n'importe jamais `ser
 
 À ce stade, **ne créez pas** le fichier d'état.
 
-## 2. Démarrer sans fichier d'état : découverte et `disabled`
+## 2. Démarrer sans fichier d'état : découverte et `inactive`
 
 Lancez :
 
@@ -128,13 +128,13 @@ Lancez :
 Attendu, avant `started` :
 
 ```
-INFO [plugins] PluginState {"plugin": "fixture", "state": "disabled"}
+INFO [plugins] PluginState {"plugin": "fixture", "state": "inactive"}
 INFO [app] started {"state": "Idle"}
 ```
 
 - Un fichier d'état **absent** signifie « aucun plugin activé », jamais une erreur.
-- Le dossier est bien **découvert**, mais il n'est **pas importé** : aucune ligne
-  `PluginCreated`, aucun Tool dans le registre.
+- Le dossier est bien **découvert** et son manifeste lu, mais il n'est **pas importé** :
+  aucune ligne `PluginCreated`, aucun Tool dans le registre.
 - Aucune activation à chaud : le fichier d'état n'est lu qu'au démarrage.
 - Si ni le fichier d'état ni le dossier de plugins n'existent, aucune ligne `PluginState`
   n'est émise : l'instantané porte `"plugins": []`.
@@ -157,11 +157,11 @@ Attendu : `200`, `authenticated: true`, et un cookie `athena_ticket` dans la jar
 démarrages suivants, le Compte existe : passez par `POST /api/login` si la jar a expiré.
 
 Ouvrez la Console (`http://127.0.0.1:8767/`) : le panneau **Plugins** affiche `fixture`
-avec le badge **Désactivé** et « Aucun Tool ». L'instantané correspondant est :
+avec le badge **Inactif** et « Aucun Tool ». L'instantané correspondant est :
 
 ```json
 "plugins": [
-  { "name": "fixture", "state": "disabled", "tools": [] }
+  { "name": "fixture", "state": "inactive", "tools": [] }
 ]
 ```
 
@@ -406,7 +406,7 @@ Arrêtez le serveur, supprimez `$ATHENA_PLUGINS_DIR/duplicate` et remettez
 ## 7. Lire l'instantané de la Console
 
 Le panneau **Plugins** et `GET /api/status` lisent le **même** registre. Chaque entrée
-porte le nom, l'état de chargement et les Tools attribués au propriétaire, triés par nom :
+porte le nom, l'État de service et les Tools attribués au propriétaire, triés par nom :
 
 ```json
 "plugins": [
@@ -414,14 +414,16 @@ porte le nom, l'état de chargement et les Tools attribués au propriétaire, tr
 ]
 ```
 
-Les quatre états sont rendus par le front :
+Les six états sont rendus par le front :
 
 | État brut | Badge de la Console | Sens |
 | --- | --- | --- |
 | `activated` | **Activé** | importé, Tools publiés |
-| `disabled` | **Désactivé** | dossier découvert, non listé (ou plateforme cliente) |
-| `missing` | **Manquant** | listé, dossier absent ; ligne d'état conservée |
 | `failed` | **En échec** | panne réparable en attente, ou défaut tracé puis oublié |
+| `missing` | **Manquant** | listé, dossier absent ; ligne d'état conservée |
+| `inactive` | **Inactif** | dossier présent au manifeste sain, absent de la liste d'activation |
+| `unsupported` | **Non supporté** | plateforme autre que `server`, donc jamais chargé |
+| `invalid` | **Invalide** | manifeste absent, illisible ou incohérent, raison dans la trace |
 
 Pour lire l'API avec le Ticket Console :
 
@@ -457,7 +459,8 @@ make test PYTHON=.venv/bin/python
 
 Les comportements de ce document sont couverts par :
 
-- `server/tests/test_plugins_loader.py` — découverte et `disabled` sans import,
+- `server/tests/test_plugins_loader.py` — découverte et `inactive` / `unsupported` /
+  `invalid` sans import,
   activation et Tools, `missing`, état et dossier absents, manifeste invalide,
   `api_version`, `entrypoint`, configuration et secret requis, `create()` fatal, collision,
   panne `PluginUnavailable` puis relance, relance toujours en échec, défaut structurel

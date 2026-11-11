@@ -66,7 +66,7 @@ The `PluginLoader` owns all the I/O of loading:
 7. Register the binding in the `PluginRegistry`: each Tool is attributed to its plugin, and a
    name collision is fatal. The registry also composes the plugins' instructions in a
    deterministic order.
-8. Record the plugin state (`activated`, `disabled`, `missing`, `failed`) in the registry and
+8. Record the plugin state (`activated`, `failed`, `missing`, `inactive`, `unsupported`, `invalid`) in the registry and
    emit `PluginState`.
 
 Plugins are loaded **before** the transport and before the `started` trace: a broken enabled

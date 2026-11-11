@@ -106,13 +106,21 @@ export function statusFromHello(frame: HelloLike): StatusData {
 }
 
 /** États connus du Plugin Registry, et leur présentation française. */
-export type PluginState = "activated" | "disabled" | "missing" | "failed";
+export type PluginState =
+  | "activated"
+  | "failed"
+  | "missing"
+  | "inactive"
+  | "unsupported"
+  | "invalid";
 
 const PLUGIN_STATES: Readonly<Record<PluginState, { label: string }>> = {
   activated: { label: "Activé" },
-  disabled: { label: "Désactivé" },
-  missing: { label: "Manquant" },
   failed: { label: "En échec" },
+  missing: { label: "Manquant" },
+  inactive: { label: "Inactif" },
+  unsupported: { label: "Non supporté" },
+  invalid: { label: "Invalide" },
 };
 
 /** Vrai si l'état est un état connu du Plugin Registry. */

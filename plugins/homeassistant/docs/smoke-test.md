@@ -246,7 +246,7 @@ gardez la configuration pour pouvoir le réactiver :
 Relancez `.venv/bin/python -m server`. Attendu :
 
 ```
-INFO [plugins] PluginState {"plugin": "homeassistant", "state": "disabled"}
+INFO [plugins] PluginState {"plugin": "homeassistant", "state": "inactive"}
 INFO [app] started {"state": "Idle"}
 ```
 
@@ -464,8 +464,8 @@ Les scénarios ci-dessus s'appuient sur :
   redémarrage de HA entre deux appels, jeton jamais tracé ;
 - `server/tests/test_plugins.py` — agrégation du registre, collision de noms, attribution du
   propriétaire, composition de l'instruction ;
-- `server/tests/test_plugins_loader.py` — états `activated` / `disabled` / `missing` /
-  `failed`, retente, cas fatals, expurgation des secrets ;
+- `server/tests/test_plugins_loader.py` — états `activated` / `failed` / `missing` / `inactive` /
+  `unsupported` / `invalid`, retente, cas fatals, expurgation des secrets ;
 - `server/tests/test_plugins_instruction.py` — instruction dans les Sessions ordinaires et
   les Annonces, et taille (jamais le texte) dans `Activation` ;
 - `server/tests/test_app_integration.py` — couture application : `server_tools` peuplé, Tools

@@ -81,11 +81,18 @@ describe("statusFromHello", () => {
 });
 
 describe("plugin state labels", () => {
-  it("traduit les états du Plugin Registry", () => {
+  it("traduit les six états du Plugin Registry", () => {
     expect(formatPluginState("activated")).toBe("Activé");
-    expect(formatPluginState("disabled")).toBe("Désactivé");
-    expect(formatPluginState("missing")).toBe("Manquant");
     expect(formatPluginState("failed")).toBe("En échec");
+    expect(formatPluginState("missing")).toBe("Manquant");
+    expect(formatPluginState("inactive")).toBe("Inactif");
+    expect(formatPluginState("unsupported")).toBe("Non supporté");
+    expect(formatPluginState("invalid")).toBe("Invalide");
+  });
+
+  it("ne reconnaît plus l'ancien état disabled", () => {
+    expect(isPluginState("disabled")).toBe(false);
+    expect(formatPluginState("disabled")).toBe("disabled");
   });
 
   it("retombe sur l'état brut puis « Inconnu »", () => {
@@ -96,11 +103,14 @@ describe("plugin state labels", () => {
   it("donne une classe CSS bornée pour les états connus", () => {
     expect(pluginStateClass("activated")).toBe("activated");
     expect(pluginStateClass("failed")).toBe("failed");
+    expect(pluginStateClass("unsupported")).toBe("unsupported");
+    expect(pluginStateClass("disabled")).toBe("unknown");
     expect(pluginStateClass("paused")).toBe("unknown");
   });
 
   it("reconnaît les seuls états du Plugin Registry", () => {
     expect(isPluginState("missing")).toBe(true);
+    expect(isPluginState("invalid")).toBe(true);
     expect(isPluginState("paused")).toBe(false);
     expect(isPluginState("__proto__")).toBe(false);
   });
