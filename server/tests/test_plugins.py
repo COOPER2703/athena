@@ -190,6 +190,40 @@ def test_registry_knows_the_six_service_states_and_no_disabled_one() -> None:
         registry.mark_state("legacy", "disabled")
 
 
+def test_registry_keeps_the_failure_reason_and_retry_beside_the_state() -> None:
+    """La raison et la retente vivent à côté de l'état, lisibles sans relire la Trace."""
+    registry = PluginRegistry()
+    registry.mark_state(
+        "websearch",
+        "failed",
+        reason="PluginUnavailable: Tavily ne répond pas",
+        retry=True,
+    )
+
+    assert registry.state_of("websearch") == "failed"
+    assert registry.reason_of("websearch") == "PluginUnavailable: Tavily ne répond pas"
+    assert registry.retry_of("websearch") is True
+    assert registry.reason_of("absent") is None
+    assert registry.retry_of("absent") is False
+
+    # Une transition qui n'échoue plus efface la raison et la retente : sinon
+    # la fiche continuerait d'afficher une panne réparée.
+    registry.mark_state("websearch", "activated")
+
+    assert registry.reason_of("websearch") is None
+    assert registry.retry_of("websearch") is False
+
+
+def test_registry_exposes_the_instruction_of_a_loaded_plugin() -> None:
+    """L'Instruction se lit par plugin ; un plugin non chargé n'en a pas."""
+    registry = PluginRegistry()
+    registry.add(_binding("websearch", "websearch__search", instruction="Cherche."))
+
+    assert registry.instruction_of("websearch") == "Cherche."
+    assert registry.instruction_of("notion") == ""
+    assert registry.instruction() == "Cherche."
+
+
 def test_registry_keeps_the_declaration_alongside_the_service_state() -> None:
     """Tout dossier installé est observable par sa Déclaration, même non chargé."""
     declaration = PluginDeclaration(

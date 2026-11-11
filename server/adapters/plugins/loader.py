@@ -643,19 +643,31 @@ class PluginLoader:
         state: str,
         *,
         level: str = "info",
+        reason: str | None = None,
+        retry: bool | None = None,
         **extra: object,
     ) -> None:
         """Met à jour l'état du plugin dans le registre, puis le trace.
 
-        Le registre porte l'état lisible (glossaire) ; la trace reste le flux
-        d'observabilité, avec les mêmes payloads qu'avant.
+        Le registre porte l'état lisible (glossaire), la raison expurgée et
+        l'attente de retente ; la trace reste le flux d'observabilité, avec les
+        mêmes payloads qu'avant. La retente du registre suit ``_pending`` :
+        seule une tentative encore à venir est annoncée, pas une tentative qui
+        vient d'échouer définitivement.
         """
-        registry.mark_state(plugin, state)
+        registry.mark_state(
+            plugin, state, reason=reason, retry=plugin in self._pending
+        )
+        payload: dict[str, object] = {"plugin": plugin, "state": state, **extra}
+        if reason is not None:
+            payload["reason"] = reason
+        if retry is not None:
+            payload["retry"] = retry
         emit(
             self._trace_sink,
             _TRACE_SOURCE,
             "PluginState",
-            payload={"plugin": plugin, "state": state, **extra},
+            payload=payload,
             level=level,
         )
 
