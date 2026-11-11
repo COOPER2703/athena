@@ -114,6 +114,39 @@ def _trace_consolidation(
     )
 
 
+def _plugin_summary(
+    plugins: PluginRegistry, name: str, state: str, tools: list[str]
+) -> Mapping[str, object]:
+    """Une entrée du registre : ce que le plugin est et ce qu'il devient.
+
+    ``tools`` reste une liste de noms, sans description ni schéma. ``reason``
+    n'est renseignée que pour un échec, ``retry`` dit qu'une retente de fond est
+    encore attendue, et ``instruction`` vaut la chaîne vide pour un plugin non
+    chargé — la Console en fait une absence explicite.
+    """
+    declaration = plugins.declaration_of(name)
+    return {
+        "name": name,
+        "state": state,
+        "tools": sorted(tools),
+        "declaration": (
+            None
+            if declaration is None
+            else {
+                "description": declaration.description,
+                "version": declaration.version,
+                "api_version": declaration.api_version,
+                "platform": declaration.platform,
+                "directory": declaration.directory,
+                "invalid_reason": declaration.invalid_reason,
+            }
+        ),
+        "reason": plugins.reason_of(name),
+        "retry": plugins.retry_of(name),
+        "instruction": plugins.instruction_of(name),
+    }
+
+
 class WebhookServer(Protocol):
     """Couture de l'adaptateur Webhook : sert la surface HTTP et pousse dans le Canal.
 
@@ -287,7 +320,12 @@ class App:
         }
 
     def _plugin_summaries(self) -> list[Mapping[str, object]]:
-        """Plugins connus, état de chargement et Tools attribués au propriétaire."""
+        """Registre lisible : état, Déclaration, panne, retente et Instruction.
+
+        L'instantané ne fait aucune I/O : tout a été observé au démarrage par
+        le chargeur. Un dossier ``missing`` n'a pas de Déclaration lue, donc
+        ``declaration`` vaut ``None`` plutôt qu'une identité inventée.
+        """
         plugins = self._plugins
         if plugins is None:
             return []
@@ -297,11 +335,7 @@ class App:
             if owner is not None:
                 tools_by_owner.setdefault(owner, []).append(spec.name)
         return [
-            {
-                "name": name,
-                "state": state,
-                "tools": sorted(tools_by_owner.get(name, [])),
-            }
+            _plugin_summary(plugins, name, state, tools_by_owner.get(name, []))
             for name, state in sorted(plugins.states.items())
         ]
 

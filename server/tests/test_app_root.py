@@ -1081,8 +1081,20 @@ def test_build_app_serves_plugins_and_safe_config_in_the_snapshot(
                     "name": "fixture",
                     "state": "activated",
                     "tools": ["fixture__echo"],
+                    "declaration": {
+                        "description": "Plugin de fixture",
+                        "version": "0.1.0",
+                        "api_version": 1,
+                        "platform": "server",
+                        "directory": str(plugins_dir / "fixture"),
+                        "invalid_reason": None,
+                    },
+                    "reason": None,
+                    "retry": False,
+                    "instruction": "Utilise fixture__echo pour répéter.",
                 }
             ]
+            assert "disabled" not in json.dumps(snapshot)
             assert snapshot["config"] == {
                 "model": "gemini-live",
                 "voice": "Aoede",
@@ -1156,15 +1168,68 @@ def test_build_app_serves_the_six_service_states_without_disabled(
                     http, f"{base_url}/api/status"
                 )
 
-            assert snapshot["plugins"] == [
-                {"name": "broken", "state": "invalid", "tools": []},
-                {"name": "dormant", "state": "inactive", "tools": []},
-                {"name": "failing", "state": "failed", "tools": []},
-                {"name": "fixture", "state": "activated", "tools": ["fixture__echo"]},
-                {"name": "ghost", "state": "missing", "tools": []},
-                {"name": "mobile", "state": "unsupported", "tools": []},
+            plugins = snapshot["plugins"]
+            assert [
+                (plugin["name"], plugin["state"], plugin["tools"])
+                for plugin in plugins
+            ] == [
+                ("broken", "invalid", []),
+                ("dormant", "inactive", []),
+                ("failing", "failed", []),
+                ("fixture", "activated", ["fixture__echo"]),
+                ("ghost", "missing", []),
+                ("mobile", "unsupported", []),
             ]
+
+            by_name = {plugin["name"]: plugin for plugin in plugins}
+            # Un dossier dont le manifeste est cassé garde une identité vide
+            # plutôt qu'inventée, et la raison expurgée qui l'explique.
+            broken = by_name["broken"]
+            assert broken["declaration"] == {
+                "description": "",
+                "version": "",
+                "api_version": 0,
+                "platform": "",
+                "directory": str(plugins_dir / "broken"),
+                "invalid_reason": broken["reason"],
+            }
+            assert "manifest is not valid JSON" in broken["reason"]
+            assert broken["retry"] is False
+            assert broken["instruction"] == ""
+
+            dormant = by_name["dormant"]
+            assert dormant["declaration"]["description"] == "Plugin dormant"
+            assert dormant["declaration"]["platform"] == "server"
+            assert dormant["declaration"]["invalid_reason"] is None
+            assert dormant["reason"] is None
+            assert dormant["instruction"] == ""
+
+            failing = by_name["failing"]
+            assert failing["declaration"]["version"] == "0.1.0"
+            assert "home assistant injoignable" in failing["reason"]
+            assert failing["retry"] is True
+
+            assert by_name["fixture"]["declaration"]["api_version"] == 1
+            assert by_name["fixture"]["instruction"] == (
+                "Utilise fixture__echo pour répéter."
+            )
+
+            # Dossier retenu mais disparu : rien n'a pu être lu, donc aucune
+            # Déclaration, et la Console devra le dire sans inventer.
+            ghost = by_name["ghost"]
+            assert ghost["declaration"] is None
+            assert ghost["reason"] is None
+            assert ghost["instruction"] == ""
+
+            mobile = by_name["mobile"]
+            assert mobile["declaration"]["platform"] == "desktop"
+            assert mobile["reason"] is None
+
             assert "disabled" not in json.dumps(snapshot)
+            # Aucun secret, aucun en-tête ni corps de requête dans l'instantané.
+            assert "test-key" not in json.dumps(snapshot)
+            for forbidden in ("Authorization", "headers", "body"):
+                assert forbidden not in json.dumps(snapshot)
             # L'instantané sert un état observé au démarrage : supprimer les
             # dossiers ne le change pas, aucune I/O n'a lieu à sa construction.
             shutil.rmtree(plugins_dir)

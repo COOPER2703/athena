@@ -216,6 +216,67 @@ def test_a_reconnecting_client_starts_from_the_current_state() -> None:
     asyncio.run(scenario())
 
 
+def test_a_plugin_declaration_or_failure_change_pushes_a_status_frame() -> None:
+    """L'empreinte porte sur tout l'instantané : la fiche se rafraîchit seule."""
+
+    async def scenario() -> None:
+        state = _state()
+        plugin: dict[str, object] = {
+            "name": "websearch",
+            "state": "inactive",
+            "tools": [],
+            "declaration": {
+                "description": "Cherche sur le web via Tavily",
+                "version": "1.0.0",
+                "api_version": 1,
+                "platform": "server",
+                "directory": "plugins/websearch",
+                "invalid_reason": None,
+            },
+            "reason": None,
+            "retry": False,
+            "instruction": "",
+        }
+        state["plugins"] = [plugin]
+        adapter = ConsoleAdapter(port=0, status_interval=TICK)
+        await adapter.start(lambda: state)
+        try:
+            async with aiohttp.ClientSession() as http:
+                async with http.ws_connect(_ws_url(adapter)) as ws:
+                    hello = await _receive(ws)
+                    assert hello["data"]["snapshot"]["plugins"] == [plugin]
+                    await _expect_silence(ws)
+
+                    declaration = plugin["declaration"]
+                    assert isinstance(declaration, dict)
+                    declaration["version"] = "1.1.0"
+                    frame = await _receive(ws)
+                    assert frame["data"]["plugins"][0]["declaration"]["version"] == (
+                        "1.1.0"
+                    )
+                    await _expect_silence(ws)
+
+                    plugin["state"] = "failed"
+                    plugin["reason"] = "PluginUnavailable: Tavily ne répond pas"
+                    plugin["retry"] = True
+                    frame = await _receive(ws)
+                    [entry] = frame["data"]["plugins"]
+                    assert entry["state"] == "failed"
+                    assert "Tavily" in entry["reason"]
+                    assert entry["retry"] is True
+                    await _expect_silence(ws)
+
+                    plugin["instruction"] = "Cherche avant de répondre."
+                    frame = await _receive(ws)
+                    assert frame["data"]["plugins"][0]["instruction"] == (
+                        "Cherche avant de répondre."
+                    )
+        finally:
+            await adapter.stop()
+
+    asyncio.run(scenario())
+
+
 def test_status_and_trace_frames_share_the_stream() -> None:
     """Un changement d'état et une Trace vivante arrivent tous deux, sans se perdre."""
 
