@@ -331,19 +331,6 @@ Le noyau l'exécute par le même round-trip qu'un Tool du noyau, mais l'exécuti
 serveur, vers la plateforme.
 _Avoid_: Tool externe, tool intégré, wrapper
 
-### Recherche web
-
-**Recherche web**:
-L'interrogation d'un moteur externe par Athena pour répondre à une question factuelle ou
-d'actualité. C'est un Tool de plugin : elle n'existe qu'en Session, jamais pendant une
-Annonce proactive.
-_Avoid_: Recherche internet, browsing, navigation, surf
-
-**Extrait de recherche**:
-Le fragment de page renvoyé pour un résultat, accompagné de son titre et de son URL. Se
-distingue d'une page lue en entier : c'est une matière à synthèse, pas une source complète.
-_Avoid_: Snippet, résumé, contenu, page
-
 ### Notion
 
 **Page Notion**:
