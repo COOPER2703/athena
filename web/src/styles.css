@@ -266,10 +266,41 @@ code,
 }
 
 .plugin {
-  display: grid;
-  gap: 0.25rem;
-  padding: 0.5rem 1rem;
+  padding: 0;
   border-bottom: 1px solid var(--border);
+}
+
+.plugin__details {
+  display: block;
+}
+
+.plugin__summary {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.plugin__summary::-webkit-details-marker {
+  display: none;
+}
+
+.plugin__summary::before {
+  content: "▸";
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.plugin__details[open] .plugin__summary::before {
+  content: "▾";
+}
+
+.plugin__summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .plugin__head {
@@ -284,9 +315,61 @@ code,
   font-weight: 600;
 }
 
-.plugin__tools {
+.plugin__sheet {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.25rem 1rem 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.plugin__facts {
+  border-top: 1px solid var(--border);
+  border-left: 1px solid var(--border);
+}
+
+.plugin__section-title {
+  margin: 0 0 0.25rem;
   color: var(--muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.plugin__failure {
+  padding: 0.5rem 0.75rem;
+  border-left: 2px solid var(--danger);
+  background: var(--surface);
+}
+
+.plugin__message {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.8125rem;
   overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.plugin__instruction {
+  margin: 0;
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.plugin__tool-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plugin__tool {
+  padding: 0.1rem 0.4rem;
+  border: 1px solid var(--border);
+  font-size: 0.75rem;
 }
 
 .facts {
@@ -330,6 +413,11 @@ code,
 .notice--warning {
   color: var(--warning);
   border-bottom: 1px solid var(--border);
+}
+
+.notice--retry {
+  color: var(--warning);
+  font-size: 0.8125rem;
 }
 
 .trace-panel__controls {

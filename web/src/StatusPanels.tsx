@@ -1,15 +1,17 @@
 import {
+  formatPluginState,
+  instructionNotice,
+  pluginSheet,
+  pluginStateClass,
+  type PluginInfo,
+} from "./plugins";
+import {
   clientDisplayName,
   isActiveClient,
   shortClientId,
   type ClientInfo,
 } from "./session";
-import {
-  formatPluginState,
-  pluginStateClass,
-  type ConsoleConfig,
-  type PluginInfo,
-} from "./status";
+import type { ConsoleConfig } from "./status";
 
 /** Panneau des Clients branchés, avec le badge du Client actif. */
 export function ClientsPanel({
@@ -60,7 +62,82 @@ export function ClientsPanel({
   );
 }
 
-/** Panneau des Plugins connus, de leur état et de leurs Tools exposés. */
+/** Fiche dépliée d'un plugin : identité, Tools, Instruction et panne. */
+function PluginSheet({ plugin }: { plugin: PluginInfo }) {
+  const sheet = pluginSheet(plugin);
+  const notice = instructionNotice(plugin);
+  // Un manifeste invalide porte la même raison dans `invalid_reason` et dans
+  // `reason` : on ne l'affiche qu'une fois, sous l'onglet qui l'explique.
+  const failure =
+    sheet.failure !== null && sheet.failure !== sheet.invalidReason
+      ? sheet.failure
+      : null;
+
+  return (
+    <div className="plugin__sheet">
+      {sheet.retry ? (
+        <p className="notice notice--retry" role="status">
+          Retente en cours : le serveur réessaiera le chargement.
+        </p>
+      ) : null}
+
+      {sheet.declarationMissing ? (
+        <p className="notice">
+          Aucune Déclaration lue : le dossier n'a pas pu être inspecté.
+        </p>
+      ) : (
+        <dl className="facts plugin__facts">
+          {sheet.identity.map((fact) => (
+            <div className="fact" key={fact.label}>
+              <dt>{fact.label}</dt>
+              <dd className={fact.mono ? "mono" : undefined}>{fact.value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+
+      {sheet.invalidReason !== null ? (
+        <div className="plugin__failure">
+          <h3 className="plugin__section-title">Manifeste invalide</h3>
+          <p className="plugin__message mono">{sheet.invalidReason}</p>
+        </div>
+      ) : null}
+
+      {failure !== null ? (
+        <div className="plugin__failure">
+          <h3 className="plugin__section-title">Raison de l'échec</h3>
+          <p className="plugin__message mono">{failure}</p>
+        </div>
+      ) : null}
+
+      <div className="plugin__section">
+        <h3 className="plugin__section-title">Tools</h3>
+        {sheet.tools.length > 0 ? (
+          <ul className="plugin__tool-list">
+            {sheet.tools.map((tool) => (
+              <li className="plugin__tool mono" key={tool}>
+                {tool}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="notice">Aucun Tool exposé.</p>
+        )}
+      </div>
+
+      <div className="plugin__section">
+        <h3 className="plugin__section-title">Instruction</h3>
+        {notice !== null ? (
+          <p className="notice">{notice}</p>
+        ) : (
+          <p className="plugin__instruction">{sheet.instruction}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Registre des Plugins connus : une ligne dépliable par plugin installé. */
 export function PluginsPanel({ plugins }: { plugins: readonly PluginInfo[] }) {
   return (
     <section className="panel" aria-labelledby="plugins-title">
@@ -72,26 +149,26 @@ export function PluginsPanel({ plugins }: { plugins: readonly PluginInfo[] }) {
       </div>
 
       {plugins.length === 0 ? (
-        <p className="notice">Aucun Plugin chargé.</p>
+        <p className="notice">Aucun Plugin installé.</p>
       ) : (
         <ul className="plugin-list">
-          {plugins.map((plugin) => (
-            <li className="plugin" key={plugin.name}>
-              <div className="plugin__head">
-                <span className="plugin__name">{plugin.name}</span>
-                <span
-                  className={`badge badge--plugin-${pluginStateClass(
-                    plugin.state,
-                  )}`}
-                >
-                  {formatPluginState(plugin.state)}
-                </span>
-              </div>
-              <span className="plugin__tools mono">
-                {plugin.tools.length > 0
-                  ? plugin.tools.join(", ")
-                  : "Aucun Tool"}
-              </span>
+          {plugins.map((plugin, index) => (
+            <li className="plugin" key={plugin.name || `plugin-${index}`}>
+              <details className="plugin__details">
+                <summary className="plugin__head plugin__summary">
+                  <span className="plugin__name">
+                    {plugin.name || "(sans nom)"}
+                  </span>
+                  <span
+                    className={`badge badge--plugin-${pluginStateClass(
+                      plugin.state,
+                    )}`}
+                  >
+                    {formatPluginState(plugin.state)}
+                  </span>
+                </summary>
+                <PluginSheet plugin={plugin} />
+              </details>
             </li>
           ))}
         </ul>

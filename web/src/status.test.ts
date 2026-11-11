@@ -1,12 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  formatPluginState,
-  isPluginState,
-  normalizeStatus,
-  pluginStateClass,
-  statusFromHello,
-} from "./status";
+import { normalizeStatus, statusFromHello } from "./status";
 import type { HelloFrame } from "./trace";
 
 const snapshot = {
@@ -20,8 +14,31 @@ const snapshot = {
     { client_id: "client-1", client_name: "desktop", platform: "linux" },
   ],
   plugins: [
-    { name: "homeassistant", state: "activated", tools: ["ha__turn_on"] },
-    { name: "calendar", state: "failed", tools: [] },
+    {
+      name: "homeassistant",
+      state: "activated",
+      tools: ["ha__turn_on"],
+      declaration: {
+        description: "Pilote la domotique",
+        version: "0.2.0",
+        api_version: 1,
+        platform: "server",
+        directory: "plugins/homeassistant",
+        invalid_reason: null,
+      },
+      reason: null,
+      retry: false,
+      instruction: "Domotique.",
+    },
+    {
+      name: "calendar",
+      state: "failed",
+      tools: [],
+      declaration: null,
+      reason: "PluginUnavailable: calendrier injoignable",
+      retry: true,
+      instruction: "",
+    },
   ],
   config: {
     model: "gemini-live",
@@ -33,9 +50,40 @@ const snapshot = {
   },
 };
 
+const normalized = {
+  ...snapshot,
+  plugins: [
+    {
+      name: "homeassistant",
+      state: "activated",
+      tools: ["ha__turn_on"],
+      declaration: {
+        description: "Pilote la domotique",
+        version: "0.2.0",
+        apiVersion: 1,
+        platform: "server",
+        directory: "plugins/homeassistant",
+        invalidReason: null,
+      },
+      reason: null,
+      retry: false,
+      instruction: "Domotique.",
+    },
+    {
+      name: "calendar",
+      state: "failed",
+      tools: [],
+      declaration: null,
+      reason: "PluginUnavailable: calendrier injoignable",
+      retry: true,
+      instruction: "",
+    },
+  ],
+};
+
 describe("normalizeStatus", () => {
-  it("reprend un instantané complet sans le modifier", () => {
-    expect(normalizeStatus(snapshot)).toEqual(snapshot);
+  it("normalise un instantané complet, plugins compris", () => {
+    expect(normalizeStatus(snapshot)).toEqual(normalized);
   });
 
   it("rend un état vide sûr quand les champs manquent", () => {
@@ -56,14 +104,22 @@ describe("normalizeStatus", () => {
   it("ignore les entrées mal formées plutôt que de casser la page", () => {
     const status = normalizeStatus({
       clients: [{ client_id: "c-1" }, "nope"],
-      plugins: [{ name: "homeassistant", tools: ["a", 3] }],
+      plugins: [{ name: "homeassistant", tools: ["a", 3] }, null],
       config: { model: "gemini-live", secret: 42 },
     });
     expect(status.clients).toEqual([
       { client_id: "c-1", client_name: "", platform: "" },
     ]);
     expect(status.plugins).toEqual([
-      { name: "homeassistant", state: "", tools: ["a"] },
+      {
+        name: "homeassistant",
+        state: "",
+        tools: ["a"],
+        declaration: null,
+        reason: null,
+        retry: false,
+        instruction: "",
+      },
     ]);
     expect(status.config).toEqual({ model: "gemini-live" });
   });
@@ -76,42 +132,6 @@ describe("statusFromHello", () => {
       type: "hello",
       data: { snapshot, backlog: [] },
     };
-    expect(statusFromHello(frame)).toEqual(snapshot);
-  });
-});
-
-describe("plugin state labels", () => {
-  it("traduit les six états du Plugin Registry", () => {
-    expect(formatPluginState("activated")).toBe("Activé");
-    expect(formatPluginState("failed")).toBe("En échec");
-    expect(formatPluginState("missing")).toBe("Manquant");
-    expect(formatPluginState("inactive")).toBe("Inactif");
-    expect(formatPluginState("unsupported")).toBe("Non supporté");
-    expect(formatPluginState("invalid")).toBe("Invalide");
-  });
-
-  it("ne reconnaît plus l'ancien état disabled", () => {
-    expect(isPluginState("disabled")).toBe(false);
-    expect(formatPluginState("disabled")).toBe("disabled");
-  });
-
-  it("retombe sur l'état brut puis « Inconnu »", () => {
-    expect(formatPluginState("paused")).toBe("paused");
-    expect(formatPluginState("")).toBe("Inconnu");
-  });
-
-  it("donne une classe CSS bornée pour les états connus", () => {
-    expect(pluginStateClass("activated")).toBe("activated");
-    expect(pluginStateClass("failed")).toBe("failed");
-    expect(pluginStateClass("unsupported")).toBe("unsupported");
-    expect(pluginStateClass("disabled")).toBe("unknown");
-    expect(pluginStateClass("paused")).toBe("unknown");
-  });
-
-  it("reconnaît les seuls états du Plugin Registry", () => {
-    expect(isPluginState("missing")).toBe(true);
-    expect(isPluginState("invalid")).toBe(true);
-    expect(isPluginState("paused")).toBe(false);
-    expect(isPluginState("__proto__")).toBe(false);
+    expect(statusFromHello(frame)).toEqual(normalized);
   });
 });
