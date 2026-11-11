@@ -1,502 +1,485 @@
-# Smoke test — T4 plugins et Home Assistant (`python -m server` + `python -m client`)
+# Smoke test — T4 système de plugins (`python -m server` + Console)
 
-Vérification manuelle de bout en bout du **système de plugins serveur** et de son premier
-plugin, `homeassistant` (spec #47, ADR-0014 et ADR-0015) : au démarrage, Athena découvre les
-**Tools Assist** exposés par Home Assistant, compose l'**Instruction de plugin** dans ses
-Sessions, puis pilote et interroge la maison à la voix — sans que Gemini ne voie jamais Home
-Assistant. Le scénario 13 ajoute l'activation du plugin de recherche web. Voir
-`docs/smoke-test-t3-evenements.md` pour les Événements,
-`docs/smoke-test-t2-memoire.md` pour la mémoire et `docs/smoke-test-t1-composition.md` pour la
-boucle serveur/client d'origine.
+Vérification manuelle du **système de plugins** serveur (ADR-0014, complété par
+ADR-0023) : au démarrage, Athena découvre les dossiers de plugins, n'importe que ceux
+listés dans le fichier d'état, publie leurs Tools et leur instruction, et rend leur état
+lisible dans la Console.
+
+Ce document ne met en scène **aucun plugin réel**. Le parcours s'appuie sur un plugin
+synthétique, `fixture`, construit ci-dessous à partir d'un manifeste et d'un court
+`plugin.py` — exactement comme le font les tests du chargeur. Il reste donc vrai quand un
+plugin réel est retiré du dépôt. Pour un exemple concret, chaque plugin documente son
+activation dans son propre `README.md` ; la forme obligatoire d'un dossier et la règle
+d'activation sont dans [`plugins/README.md`](../plugins/README.md).
+
+Le parcours couvre la découverte, l'activation, l'absence de fichier d'état, un échec
+fatal opposé à un démarrage dégradé avec relance, la collision de nom de Tool et
+l'instantané de la Console.
+
+Voir `docs/smoke-test-t1-composition.md` pour l'installation d'Athena et
+`docs/smoke-test-t5-console.md` pour le Compte, le Ticket Console et le détail de
+`GET /api/status`.
 
 ## Prérequis
 
 Toutes les commandes se lancent **depuis la racine du dépôt** (le python de la venv locale
 s'écrit donc `.venv/bin/python`).
 
-- Un `GEMINI_API_KEY` valide (modèle Live et Consolidation).
-- Le protocole généré : `python protocol/proto/generate.py` (ou `make generate`).
-- Un micro et un haut-parleur accessibles au client (`pyaudio`).
-- Les dépendances à jour, dont le client MCP : `uv sync`.
-- Un **Compte** et deux **Jetons d'accès** Athena (ADR-0017) : un `client` pour
-  `python -m client`, un `source` pour le `curl` du scénario 9. Voir le smoke test T1 pour
-  l'installation et la création depuis la Console. Ne pas confondre ces Jetons avec le
-  **jeton d'accès longue durée** de Home Assistant (`ATHENA_PLUGIN_HOMEASSISTANT_TOKEN`).
-- **Un Home Assistant réel**, joignable depuis la machine qui lance Athena, avec :
-  - l'intégration **Model Context Protocol Server** installée ;
-  - un **jeton d'accès longue durée** ;
-  - les entités et scripts de test **exposés à Assist** (voir étape 1).
-- La machine qui lance Athena doit résoudre l'URL de Home Assistant. `homeassistant.local`
-  ne résout pas partout (mDNS) : utilisez l'adresse IP de l'instance si besoin.
+- Les dépendances à jour : `uv sync`.
+- Le protocole généré : `.venv/bin/python protocol/proto/generate.py` (ou `make generate`).
+- Le modèle d'embedding local disponible : le serveur le précharge au démarrage.
+- Un **Compte** et un **Ticket Console** (ADR-0017), pour lire l'instantané : le premier
+  démarrage de l'étape 2 les crée, les étapes suivantes les réutilisent. Le parcours
+  n'ouvre aucune Session Live : un `GEMINI_API_KEY` factice suffit, et aucun micro n'est
+  nécessaire.
+- Aucun service externe, aucun secret de plugin : `fixture` ne déclare ni configuration ni
+  secret.
+
+### Isoler le run
+
+```sh
+export SMOKE=/tmp/athena-smoke
+export ATHENA_PLUGINS_DIR="$SMOKE/plugins"
+export ATHENA_PLUGINS_STATE="$SMOKE/plugins.json"
+export ATHENA_MEMORY_DB="$SMOKE/memory.db"
+export ATHENA_AUTH_DB="$SMOKE/auth.db"
+export ATHENA_LOG_DIR="$SMOKE/logs"
+export GEMINI_API_KEY=cle-factice
+export ATHENA_DEBUG_DECISIONS=1
+mkdir -p "$SMOKE/plugins"
+```
+
+`ATHENA_PLUGINS_STATE` et `ATHENA_PLUGINS_DIR` déplacent l'état et les dossiers hors du
+dépôt ; le fichier d'état n'est jamais versionné. `ATHENA_DEBUG_DECISIONS=1` rend les
+lignes `DEBUG` visibles, mais ce parcours n'en a pas besoin.
 
 ### Lire les traces
 
-Les extraits ci-dessous sont rendus **sans l'horodatage**, avec les clés du payload triées
-comme le fait le rendu (`render` trie les clés) et les identifiants abrégés par `…`.
-`N` désigne un nombre qui dépend de l'instance Home Assistant (Tools découverts, caractères
-de l'instruction) : ce n'est **pas** une valeur à retrouver à l'identique. Les lignes
-`DEBUG` n'apparaissent qu'avec `ATHENA_DEBUG_DECISIONS=1`.
+Les extraits sont rendus **sans l'horodatage**, avec les clés du payload triées comme le
+fait le rendu et les identifiants abrégés par `…`. Les lignes du chargeur portent la source
+`plugins` ; celles de l'application portent `app`. Le flux est recopié dans
+`$ATHENA_LOG_DIR/server.log`.
 
-## 1. Préparer Home Assistant
+`PluginState` est la seule trace d'état du chargeur. Un plugin peut émettre ses propres
+traces par `context.trace(...)` : `fixture` en émet une, `PluginCreated`. Aucun nom de
+trace de plugin réel n'est requis pour comprendre ce document.
 
-1. **Installer l'intégration.** Paramètres → Appareils et services → *Ajouter une
-   intégration* → **Model Context Protocol Server**. C'est elle qui sert le serveur MCP
-   natif de Home Assistant. Si elle n'est pas proposée, mettez Home Assistant à jour.
-2. **Endpoint Assist.** Athena se connecte à l'endpoint **`/api/mcp/assist`** (Streamable
-   HTTP stateless) : elle **ajoute ce chemin** à l'URL de l'instance configurée. Dans
-   `plugins.json`, on ne met donc que `http://homeassistant.local:8123`, jamais
-   `/api/mcp` ni `/api/mcp/assist`. Cet endpoint ne demande pas de compte administrateur et
-   son périmètre est exactement l'**Exposition Assist**.
-3. **Créer un jeton d'accès longue durée.** Profil (en bas à gauche) → *Sécurité* → *Jetons
-   d'accès longue durée* → *Créer un jeton*. Copiez-le une seule fois : il part en
-   `Authorization: Bearer` à chaque requête et n'est **jamais** écrit par Athena sur disque.
-4. **Exposer les entités à Assist.** Paramètres → *Assistants vocaux* → onglet **Exposer**.
-   Exposez au minimum :
-   - une lumière dont le nom parlé est sans ambiguïté (par ex. `light.salon`) ;
-   - un capteur d'ouverture, par ex. la porte du garage (`cover.garage` ou
-     `binary_sensor.porte_garage`) ;
-   - un script de test (par ex. `script.cinema`) qui produit un effet visible (lumières,
-     scène).
-   **Seules les entités exposées sont atteignables** : une entité non exposée est invisible
-   pour Gemini. C'est le périmètre de sécurité du plugin — il n'y a pas d'allow-list côté
-   Athena.
-5. **Noter les noms.** Home Assistant résout les noms de pièces et les alias dans **sa**
-   langue configurée : dites les noms tels qu'ils existent dans HA. Notez aussi l'`entity_id`
-   du script : HA l'expose comme `script__<object_id>` (par ex. `script.cinema` →
-   `script__cinema`).
+## 1. Déposer le plugin synthétique
 
-## 2. Créer `plugins.json` et renseigner `.env`
-
-Le dossier du plugin (`plugins/homeassistant/`, avec son `plugin.json` et son `plugin.py`)
-est **déjà dans le dépôt**. Il ne reste qu'à l'activer et à fournir son URL et son jeton.
-
-Créez `plugins.json` **à la racine du dépôt** (fichier non versionné, à ne pas commiter) :
+Créez `$ATHENA_PLUGINS_DIR/fixture/plugin.json` :
 
 ```json
 {
-  "enabled": ["homeassistant"],
-  "config": {
-    "homeassistant": { "url": "http://homeassistant.local:8123" }
-  }
+  "api_version": 1,
+  "name": "fixture",
+  "version": "0.1.0",
+  "description": "Plugin de fixture",
+  "platform": "server",
+  "entrypoint": "plugin.py"
 }
 ```
 
-L'activation est une **liste explicite** : un dossier présent mais non listé n'est jamais
-importé. Pas d'activation à chaud — le fichier est lu au démarrage, et la liste des Tools est
-de toute façon déclarée à l'ouverture de chaque Connexion Live.
+Puis `$ATHENA_PLUGINS_DIR/fixture/plugin.py` :
 
-Créez ou complétez `.env` à la racine (lu par le serveur, et ignoré par git) :
+```python
+from plugin_api import PluginBinding, ToolBinding, ToolSpec
 
-```dotenv
-GEMINI_API_KEY=votre-cle
-ATHENA_USER_ID=owner
-# Jeton longue durée Home Assistant. Athena le lit depuis .env comme le reste
-# de la configuration ; une variable de processus du même nom l'écrase.
-ATHENA_PLUGIN_HOMEASSISTANT_TOKEN=votre-jeton-longue-duree
-# Verbeux : indispensable pour voir ToolCall, ToolResult et les annotations
-ATHENA_DEBUG_DECISIONS=1
-# Emplacements des plugins (défauts : plugins/ et plugins.json)
-# ATHENA_PLUGINS_DIR=plugins
-# ATHENA_PLUGINS_STATE=plugins.json
-# ATHENA_LOG_DIR=logs
-# Webhook (actif par défaut) : utile au scénario 9
-# ATHENA_WEBHOOK_ENABLED=1
-# ATHENA_WEBHOOK_PORT=8766
+
+async def handle(arguments):
+    return {"status": "ok", "echo": arguments.get("value", "")}
+
+
+def create(context):
+    context.trace("PluginCreated", {"config": dict(context.config)})
+    return PluginBinding(
+        name="fixture",
+        tools=(
+            ToolBinding(
+                spec=ToolSpec(
+                    name="fixture__echo",
+                    description="Écho du plugin",
+                    parameters={
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                    },
+                ),
+                handler=handle,
+            ),
+        ),
+        instruction="Utilise fixture__echo pour répéter.",
+    )
 ```
 
-Le nom de la variable de secret est dérivé du manifeste :
-`ATHENA_PLUGIN_<PLUGIN>_<SECRET>` → `ATHENA_PLUGIN_HOMEASSISTANT_TOKEN`. Un jeton valide ne
-doit jamais être collé dans `plugins.json`, dans un test ou dans un rapport.
+Le manifeste est **validé au chargement** : `api_version` doit valoir `1`, le `name` doit
+être identique au nom du dossier, `platform` doit être une plateforme connue, et
+l'`entrypoint` doit exister. Le point d'entrée expose `create(context)`, synchrone ou
+asynchrone. Le contrat public est `plugin_api` ; un plugin n'importe jamais `server`.
 
-## 3. Démarrer le serveur
+À ce stade, **ne créez pas** le fichier d'état.
+
+## 2. Démarrer sans fichier d'état : découverte et `disabled`
+
+Lancez :
 
 ```sh
-python -m server
+.venv/bin/python -m server
 ```
 
-Les plugins sont chargés **avant** le transport et avant la trace `started` : une erreur de
-configuration d'un plugin activé empêche le serveur de servir quoi que ce soit. La découverte
-Home Assistant (Tools puis instruction) tient dans un budget de 5 s.
-
-Attendu, dans cet ordre (source `plugins`) :
+Attendu, avant `started` :
 
 ```
-INFO     [plugins] ToolsDiscovered {"count": N, "plugin": "homeassistant"}
-DEBUG    [plugins] ToolAnnotations {"destructive": false, "idempotent": true, "open_world": true, "plugin": "homeassistant", "read_only": false, "tool": "intent__HassTurnOn"}
-INFO     [plugins] InstructionLoaded {"chars": N, "name": "Device control", "plugin": "homeassistant"}
-INFO     [plugins] PluginReady {"instruction_chars": N, "plugin": "homeassistant", "tools": N}
-INFO     [plugins] PluginState {"plugin": "homeassistant", "state": "activated", "tools": N}
-...
-INFO     [app] started {"state": "Idle"}
-```
-
-- `ToolAnnotations` est émise une fois par Tool (niveau `debug`) : c'est là que vous voyez
-  les **vrais noms** publiés par votre version de Home Assistant. Les valeurs des
-  annotations (`read_only`, `destructive`, `idempotent`, `open_world`) sont celles de HA et
-  peuvent différer de l'exemple ; elles sont tracées mais **inutilisées** en v1 (aucune
-  confirmation des Tools destructifs).
-- `InstructionLoaded` nomme le prompt Assist découvert par `prompts/list` (`Device control`
-  sur les versions actuelles de HA). Si HA le renomme, le plugin retombe sur le nom attendu,
-  ou trace `InstructionUnavailable` et sert ses Tools **sans** instruction : l'absence
-  d'instruction n'est jamais bloquante.
-- Le **texte** de l'instruction n'apparaît ni dans le flux ni dans `logs/server.log` : seuls
-  `chars` / `instruction_chars` sont tracés. Vérifiez-le : aucune ligne ne doit contenir la
-  phrase d'usage du prompt Assist.
-- `N` n'est pas un contrat : le nombre de Tools dépend de la version de HA et de ce que vous
-  avez exposé.
-
-## 4. Première Session : l'Instruction de plugin entre dans le prompt
-
-Dans un second terminal :
-
-```sh
-export ATHENA_ACCESS_TOKEN=ath_…   # Jeton de nature client
-python -m client
-```
-
-Appuyez sur **Entrée** pour ouvrir une Session, puis parlez. À l'ouverture, le noyau compose
-le prompt système, l'instruction du plugin et le contexte mémoire ; la trace `Activation`
-donne **la taille** de l'instruction, jamais son texte :
-
-```
-INFO [core] Activation {"connection_id": "s1", "context_chars": 0, "has_context": false, "has_plugin_instruction": true, "plugin_instruction_chars": N, "user_id": "owner"}
-```
-
-`context_chars` peut être non nul si la mémoire contient déjà un profil épinglé. L'instruction
-est **figée à l'ouverture** de la Session : c'est aussi vrai pour une Annonce proactive
-(ADR-0013), qui reçoit la même instruction et les mêmes faits, mais **aucun Tool** (`#81`).
-
-## 5. « Allume la lumière du salon »
-
-Dites : « **Allume la lumière du salon** ».
-
-Attendu à l'oral : Athena confirme (par ex. « C'est allumé ») et la lumière s'allume
-réellement. Dans le terminal du serveur (avec `ATHENA_DEBUG_DECISIONS=1`) :
-
-```
-DEBUG [core] ToolCall {"client_id": "…", "connection_id": "s1", "from_state": "SessionVisible", "name": "intent__HassTurnOn", "plugin": "homeassistant", "session_id": "", "to_state": "SessionVisible", "tool_id": "…"}
-INFO  [gemini] tool_result_sent {"connection_id": "s1", "name": "intent__HassTurnOn", "tool_id": "…"}
-DEBUG [core] ToolResult {"client_id": "…", "connection_id": "s1", "from_state": "SessionVisible", "name": "intent__HassTurnOn", "plugin": "homeassistant", "session_id": "", "status": "ok", "to_state": "SessionVisible", "tool_id": "…"}
-```
-
-- Le nom est celui de HA, **repris tel quel** : sur une version récente, l'intent d'allumage
-  est `intent__HassTurnOn`. Les Tools propres au composant HA sont `homeassistant__*`, les
-  scripts `script__*` ; une version plus ancienne de HA peut publier des noms sans préfixe.
-  Ne déduisez donc pas le nom de ce document : lisez-le dans `ToolAnnotations` (étape 3) ou
-  dans `ToolCall`.
-- `plugin: "homeassistant"` attribue l'appel à son propriétaire (un Tool du noyau porte
-  `plugin: "core"`).
-- `from_state` peut être `LiveActive` au tout premier tour ; ensuite la Session est
-  `SessionVisible`.
-- Un succès ne produit **aucune** ligne `[plugins] ToolFailed`.
-
-## 6. Question d'état
-
-Dites : « **Est-ce que la porte du garage est ouverte ?** »
-
-Attendu à l'oral : une réponse qui correspond à la réalité (ouvrez/fermez la porte pour
-vérifier). La trace montre un Tool de **lecture** :
-
-```
-DEBUG [core] ToolCall {… "name": "<outil de lecture>", "plugin": "homeassistant" …}
-DEBUG [core] ToolResult {… "name": "<outil de lecture>", "plugin": "homeassistant", "status": "ok" …}
-```
-
-Le nom dépend de la version de Home Assistant et des Tools exposés : `GetLiveContext`
-(`homeassistant__GetLiveContext`, un instantané de contexte) ou `intent__HassGetState`.
-**Ce document ne fige aucun des deux** : le nom attendu est celui que HA a déclaré, visible
-dans `ToolAnnotations` / `ToolCall`. Le texte de HA (état de la porte) n'est pas dans la
-trace : il part dans le `message` du résultat, vers le modèle.
-
-## 7. Script
-
-Exposez un script à Assist (par ex. `script.cinema`, qui baisse les lumières). Dites :
-« **Lance le script cinéma** ».
-
-Attendu : la scène s'exécute réellement. Trace :
-
-```
-DEBUG [core] ToolCall {… "name": "script__cinema", "plugin": "homeassistant" …}
-DEBUG [core] ToolResult {… "name": "script__cinema", "plugin": "homeassistant", "status": "ok" …}
-```
-
-Le préfixe `script__` et l'`object_id` viennent de HA (`script.cinema` → `script__cinema`) ;
-Athena n'ajoute ni ne retire aucun préfixe. Le nom exact reste celui publié par votre
-instance.
-
-## 8. Désactiver le plugin
-
-Arrêtez le serveur (`Ctrl-C`), puis retirez `homeassistant` de la liste d'activation —
-gardez la configuration pour pouvoir le réactiver :
-
-```json
-{
-  "enabled": [],
-  "config": {
-    "homeassistant": { "url": "http://homeassistant.local:8123" }
-  }
-}
-```
-
-Relancez `python -m server`. Attendu :
-
-```
-INFO [plugins] PluginState {"plugin": "homeassistant", "state": "disabled"}
+INFO [plugins] PluginState {"plugin": "fixture", "state": "disabled"}
 INFO [app] started {"state": "Idle"}
 ```
 
-- Aucune ligne `ToolsDiscovered`, `InstructionLoaded` ni `PluginReady` : le dossier est
-  présent mais **jamais importé**.
-- La Session suivante trace `Activation` avec `has_plugin_instruction: false` et
-  `plugin_instruction_chars: 0`.
-- Demandez « allume la lumière du salon » : Athena répond qu'elle ne peut pas piloter la
-  maison, et **aucun** `ToolCall` / `ToolResult` n'apparaît. Tools et instruction
-  disparaissent ensemble.
-- Le dossier `plugins/homeassistant/` n'a pas été touché. Remettez `["homeassistant"]` et
-  redémarrez pour la suite. (Si vous laissez `homeassistant` listé et supprimez le dossier,
-  l'état tracé est `missing` et votre ligne de configuration est conservée.)
+- Un fichier d'état **absent** signifie « aucun plugin activé », jamais une erreur.
+- Le dossier est bien **découvert**, mais il n'est **pas importé** : aucune ligne
+  `PluginCreated`, aucun Tool dans le registre.
+- Aucune activation à chaud : le fichier d'état n'est lu qu'au démarrage.
+- Si ni le fichier d'état ni le dossier de plugins n'existent, aucune ligne `PluginState`
+  n'est émise : l'instantané porte `"plugins": []`.
 
-## 9. Home Assistant éteint au démarrage
-
-Arrêtez Home Assistant (ou pointez `url` vers un hôte injoignable), puis démarrez Athena.
-Attendu : un démarrage **dégradé**, pas un refus.
-
-```
-WARNING [plugins] DiscoveryFailed {"error": "…", "plugin": "homeassistant"}
-INFO    [plugins] PluginState {"plugin": "homeassistant", "reason": "PluginUnavailable: Home Assistant discovery failed: …", "state": "failed"}
-INFO    [app] started {"state": "Idle"}
-```
-
-La raison contient le type et le message de l'erreur de transport (connexion refusée, nom
-non résolu, délai dépassé), jamais le jeton. Le serveur est bien `started`, sans les Tools du
-plugin. Pendant la panne, la retente de fond réessaie **toutes les 5 s** et trace à chaque
-tentative `DiscoveryFailed` puis :
-
-```
-INFO [plugins] PluginState {"plugin": "homeassistant", "reason": "…", "retry": true, "state": "failed"}
-```
-
-Prouvez que le reste fonctionne :
-
-1. **Athena parle** : ouvrez une Session et conversez. `Activation` affiche
-   `has_plugin_instruction: false`, `plugin_instruction_chars: 0`.
-2. **Athena se souvient** : dites « **Souviens-toi que je m'appelle Camille** ». Trace
-   attendue (le Tool du noyau, propriétaire `core`) :
-   `ToolCall name="save_memory" plugin="core"` puis `ToolResult status="ok"`.
-3. **Les Événements passent** : laissez le Client au Repos (pas de Session — attendez la
-   fermeture par inactivité, ou relancez `python -m client`) et poussez un fait :
-
-   ```sh
-   export ATHENA_WEBHOOK_TOKEN=ath_…   # Jeton de nature source
-   curl -i -X POST http://127.0.0.1:8766/events \
-     -H "Authorization: Bearer $ATHENA_WEBHOOK_TOKEN" \
-     -H 'Content-Type: application/json' \
-     -d '{"source": "maison", "content": "La porte d entree vient de s ouvrir"}'
-   ```
-
-   Attendu : `202 Accepted`, puis `[webhook] event_received`, `[core] EventWindowOpened`, et
-   après la fenêtre de 5 s le jugement (`[core] EventJudge`, `[judge] judgment_done`). Le
-   verdict peut annoncer ou non : dans les deux cas le Canal d'événements a fonctionné.
-
-Rallumez Home Assistant **sans toucher à Athena**. Dans les 5 s qui suivent (plus la durée de
-la découverte) :
-
-```
-INFO [plugins] ToolsDiscovered {"count": N, "plugin": "homeassistant"}
-INFO [plugins] InstructionLoaded {"chars": N, "name": "Device control", "plugin": "homeassistant"}
-INFO [plugins] PluginReady {"instruction_chars": N, "plugin": "homeassistant", "tools": N}
-INFO [plugins] PluginState {"plugin": "homeassistant", "retry": true, "state": "activated", "tools": N}
-```
-
-Il n'y a **qu'une** ligne `started` : Athena n'a pas redémarré. Les Tools arrivent à la
-**Connexion Live suivante** — les déclarations d'une Session ouverte sont figées à son
-ouverture. Ouvrez donc une nouvelle Session (Entrée) puis redemandez la lumière : elle
-fonctionne. `Registered.server_tools` est lui aussi relu à chaque `Register` (étape 12).
-
-Tant que le plugin est en échec, demander la lumière ne produit aucun `ToolCall` : Athena
-répond qu'elle ne peut pas.
-
-## 10. Une commande échouée est annoncée, pas passée sous silence
-
-Provoquez un refus de Home Assistant. Deux moyens :
-
-- demander une entité **non exposée à Assist** (par ex. retirer temporairement l'exposition
-  de la lumière du salon, ou demander une pièce qui n'est pas exposée) ;
-- lancer un script exposé dont l'action échoue.
-
-Si le modèle refuse de lui-même sans appeler de Tool (le nom ne lui dit rien), reformulez en
-désignant explicitement la pièce : c'est l'**appel qui échoue** qui est testé ici. Pensez à
-restaurer l'exposition ensuite.
-
-Attendu à l'oral : Athena dit qu'elle **n'a pas pu** (par ex. « Je n'arrive pas à joindre
-cette lumière »), et ne prétend pas que c'est fait. Trace :
-
-```
-DEBUG [core] ToolCall {… "name": "intent__HassTurnOn", "plugin": "homeassistant" …}
-INFO  [gemini] tool_result_sent {"connection_id": "s1", "name": "intent__HassTurnOn", "tool_id": "…"}
-DEBUG [core] ToolResult {… "plugin": "homeassistant", "status": "error" …}
-```
-
-Le plugin rend `{"status": "error", "message": …}` avec **le texte de HA** (débarrassé de
-l'enveloppe du SDK) : le modèle peut donc expliquer le refus. Le libellé exact dépend de HA.
-La Session survit : la question suivante fonctionne et aucune ligne `SessionClosed` n'est
-émise.
-
-Nuance utile : `[plugins] ToolFailed` est réservé aux pannes de transport (Home Assistant
-injoignable ou délai de 10 s dépassé). Un `isError` renvoyé par HA est un `ToolResult` en
-erreur **normal**, sans `ToolFailed`.
-
-## 11. Token absent : le démarrage refuse
-
-Arrêtez le serveur, retirez la ligne `ATHENA_PLUGIN_HOMEASSISTANT_TOKEN` de `.env`, et
-assurez-vous qu'elle n'est pas exportée dans le shell (`unset`). Relancez :
+Au **premier** démarrage, le serveur tourne sans Compte : le journal porte le Code
+d'installation à usage unique. Laissez ce serveur tourner et installez le Compte ; le détail
+des écrans et des refus est dans `docs/smoke-test-t5-console.md`.
 
 ```sh
-python -m server
+CODE=$(sed -n 's/.*InstallationCode.*"code": "\([^"]*\)".*/\1/p' \
+  "$ATHENA_LOG_DIR/server.log" | tail -n 1)
+
+curl -i -c /tmp/athena-cookies.txt -X POST http://127.0.0.1:8767/api/setup \
+  -H 'Origin: http://127.0.0.1:8767' \
+  -H 'Content-Type: application/json' \
+  -d "{\"code\":\"$CODE\",\"username\":\"admin\",\"password\":\"un-mot-de-passe-de-12-caracteres\"}"
+```
+
+Attendu : `200`, `authenticated: true`, et un cookie `athena_ticket` dans la jar. Aux
+démarrages suivants, le Compte existe : passez par `POST /api/login` si la jar a expiré.
+
+Ouvrez la Console (`http://127.0.0.1:8767/`) : le panneau **Plugins** affiche `fixture`
+avec le badge **Désactivé** et « Aucun Tool ». L'instantané correspondant est :
+
+```json
+"plugins": [
+  { "name": "fixture", "state": "disabled", "tools": [] }
+]
+```
+
+Arrêtez le serveur (`Ctrl-C`).
+
+## 3. Activer le plugin par `plugins.json`
+
+Créez `$ATHENA_PLUGINS_STATE` :
+
+```json
+{
+  "enabled": ["fixture"],
+  "config": {}
+}
+```
+
+Relancez `.venv/bin/python -m server`. Attendu, dans cet ordre :
+
+```
+INFO [plugins] PluginCreated {"config": {}, "plugin": "fixture"}
+INFO [plugins] PluginState {"plugin": "fixture", "state": "activated", "tools": 1}
+INFO [app] started {"state": "Idle"}
+```
+
+- L'activation est une **liste explicite** : un dossier présent mais non listé n'est jamais
+  importé (étape 2). Seuls les plugins listés le sont, dans l'ordre du fichier d'état.
+- `PluginCreated` vient du plugin lui-même (`context.trace`) ; `PluginState` vient du
+  chargeur et porte le nombre de Tools du binding.
+- Les Tools sont publiés **tels quels** : `fixture__echo`, sa description et son schéma,
+  sans préfixe ajouté par Athena.
+- L'**Instruction de plugin** est composée dans le prompt système à l'ouverture de chaque
+  Session ; ce parcours n'ouvre pas de Session Live.
+
+L'instantané de la Console montre le même état, trié par nom :
+
+```json
+"plugins": [
+  { "name": "fixture", "state": "activated", "tools": ["fixture__echo"] }
+]
+```
+
+Le panneau **Plugins** affiche `fixture`, le badge **Activé** et `fixture__echo`.
+
+Arrêtez le serveur.
+
+## 4. Un plugin listé mais absent du disque est `missing`
+
+Avec `fixture` toujours listé dans le fichier d'état, déplacez son dossier hors de
+`$ATHENA_PLUGINS_DIR` :
+
+```sh
+mv "$ATHENA_PLUGINS_DIR/fixture" "$SMOKE/fixture-hors-ligne"
+.venv/bin/python -m server
 ```
 
 Attendu :
 
 ```
-Erreur de configuration : plugin 'homeassistant': required secret ATHENA_PLUGIN_HOMEASSISTANT_TOKEN is missing from the environment
+INFO [plugins] PluginState {"plugin": "fixture", "state": "missing"}
+INFO [app] started {"state": "Idle"}
 ```
 
-et le code de sortie **2** (`echo $?`). Aucune trace `[app] started`, aucun service démarré :
-le message nomme le plugin **et** la variable manquante. La valeur du jeton, elle, n'apparaît
-ni dans ce message ni dans le flux ni dans `logs/server.log`.
+- Le serveur démarre normalement, sans les Tools du plugin.
+- Le chargeur **ne réécrit jamais** le fichier d'état : la ligne de configuration est
+  conservée pour une réinstallation. Le plugin n'entre pas dans la relance de fond.
+- L'instantané porte
+  `{ "name": "fixture", "state": "missing", "tools": [] }`.
 
-Restaurez la ligne. Seul un secret **manquant**, une configuration requise absente ou un
-manifeste invalide est fatal : un **mauvais** jeton est traité comme une plateforme
-injoignable (scénario 9), avec démarrage dégradé et retente.
-
-## 12. `Registered.server_tools`
-
-À chaque enregistrement, le serveur envoie d'abord une trame `Registered` dont le champ
-`server_tools` liste **tous** les Tools serveur : les Tools du noyau (`save_memory`,
-`forget_memory`, `end_session`) puis les Tools Assist du plugin. Le schéma du protocole
-client est **inchangé** : le champ `repeated string server_tools = 2` existait déjà, et le
-client desktop l'ignore volontairement (il ne lit que `client_id`).
-
-Pour l'observer, lancez ceci **avant** `python -m client` (un seul client à la fois, pour ne
-pas déplacer la cible des Annonces) :
+Arrêtez le serveur et restaurez le dossier :
 
 ```sh
-.venv/bin/python - <<'PY'
-import asyncio, os
-
-import websockets
-
-from protocol import Register, decode, encode
-
-
-async def main() -> None:
-    headers = {"Authorization": f"Bearer {os.environ['ATHENA_ACCESS_TOKEN']}"}
-    async with websockets.connect(
-        "ws://127.0.0.1:8765", additional_headers=headers
-    ) as ws:
-        await ws.send(
-            encode(Register(client_name="smoke-tools", platform="linux"))
-        )
-        registered = decode(await ws.recv())
-        print("client_id:", registered.client_id)
-        for name in registered.server_tools:
-            print(name)
-
-
-asyncio.run(main())
-PY
+mv "$SMOKE/fixture-hors-ligne" "$ATHENA_PLUGINS_DIR/fixture"
 ```
 
-Le handshake exige un Jeton `client` dans `ATHENA_ACCESS_TOKEN` (ADR-0017) : sans lui, le
-serveur répond `401` + `WWW-Authenticate: Bearer` avant toute trame.
+## 5. Échec fatal, puis panne réparable
 
-Attendu (l'ordre et les noms Home Assistant dépendent de votre instance et de votre
-exposition) :
+Le chargeur distingue deux familles d'échec. Seule `PluginUnavailable` est **réparable** ;
+tout le reste est un **défaut permanent**.
 
-```
-client_id: …
-save_memory
-forget_memory
-end_session
-intent__HassTurnOn
-homeassistant__GetLiveContext
-script__cinema
+### 5.1 Défaut permanent : le démarrage refuse
+
+Remplacez `api_version` par `2` dans `plugin.json`, puis lancez le serveur :
+
+```sh
+.venv/bin/python -m server
 ```
 
-Si le plugin a échoué au démarrage, seuls les Tools du noyau (`save_memory`, `forget_memory`,
-`end_session`) apparaissent. La trame est régénérée à chaque `Register` : après une retente
-réussie, une nouvelle connexion annonce les Tools du plugin sans redémarrage d'Athena.
-
-## 13. Recherche web (optionnel)
-
-Le plugin `websearch` (ADR-0018) s'active comme les autres : ajoutez `websearch` à
-`enabled` dans `plugins.json`, posez `ATHENA_PLUGIN_WEBSEARCH_API_KEY` dans `.env` (ou
-l'environnement) et redémarrez. Sans la clé, le démarrage refuse en nommant la variable ;
-avec une clé refusée ou un Tavily injoignable, le serveur démarre **dégradé** : la Console
-affiche `failed` et la retente de fond réessaie toutes les 5 s.
-
-Attendu au démarrage, en plus de `PluginState ... "state": "activated"` :
+Attendu :
 
 ```
-INFO [plugins] CreditsRemaining {"limit": N, "plugin": "websearch", "remaining": N, "usage": N}
+Erreur de configuration : plugin 'fixture': unsupported api_version 2 (expected 1)
 ```
 
-Posez ensuite une question d'actualité : une ligne `Search` apparaît avec la requête, les
-paramètres, `"cache": "miss"`, le nombre de résultats et les crédits. Répétez la même
-question : `"cache": "hit"` et zéro crédit, sans second appel au moteur. La clé n'apparaît
-dans aucune ligne.
+et le code de sortie **2** (`echo $?`). Aucune trace `[app] started` : le chargement des
+plugins précède le transport et le démarrage des surfaces. Le message nomme le plugin et
+le champ fautif.
+
+Sont également fatals, avec le même refus : un manifeste illisible ou incomplet, un
+`api_version` inconnu, un `entrypoint` absent, une configuration ou un secret requis
+manquant, un `create()` qui lève autre chose que `PluginUnavailable`, un binding dont le
+`name` diffère du dossier, et une collision de Tool (étape 6). Le plugin fautif ne trace
+**aucun** `PluginState` : un défaut fatal n'est jamais présenté comme une panne passagère.
+
+Restaurez `api_version` à `1` avant la suite.
+
+### 5.2 Panne réparable : démarrage dégradé et relance
+
+Remplacez `plugin.py` par cette variante, qui échoue à la **première** création puis
+réussit à la suivante :
+
+```python
+from plugin_api import PluginBinding, PluginUnavailable, ToolBinding, ToolSpec
+
+attempts = 0
+
+
+async def handle(arguments):
+    return {"status": "ok"}
+
+
+def create(context):
+    global attempts
+    attempts += 1
+    if attempts == 1:
+        raise PluginUnavailable("fixture injoignable")
+    return PluginBinding(
+        name="fixture",
+        tools=(
+            ToolBinding(
+                spec=ToolSpec(name="fixture__echo", description="Écho", parameters={}),
+                handler=handle,
+            ),
+        ),
+    )
+```
+
+Lancez le serveur. Attendu au démarrage :
+
+```
+INFO [plugins] PluginState {"plugin": "fixture", "reason": "PluginUnavailable: fixture injoignable", "state": "failed"}
+INFO [app] started {"state": "Idle"}
+```
+
+Le serveur est bien `started`, sans les Tools du plugin : la panne d'une plateforme ne rend
+pas Athena muette. Puis, au plus tard **5 s** après le démarrage, la relance de fond
+réessaie et réussit :
+
+```
+INFO [plugins] PluginState {"plugin": "fixture", "retry": true, "state": "activated", "tools": 1}
+```
+
+- La raison d'un échec porte le type et le message de l'exception, jamais une valeur de
+  secret : les valeurs connues sont remplacées par `***`.
+- Chaque tentative infructueuse réémet `PluginState` avec `"retry": true` et
+  `"state": "failed"`, et le plugin reste en attente. Le serveur ne redémarre pas.
+- Un défaut **structurel** révélé par la relance (par exemple un `create()` qui lève
+  `TypeError`, ou une collision de Tool) est tracé `failed` au niveau `error`, puis
+  **oublié** : il n'est jamais retenté indéfiniment.
+- Les Tools réparés arrivent à la **Connexion Live suivante** : les déclarations d'une
+  Session ouverte sont figées à son ouverture.
+
+L'instantané de la Console reflète l'état courant : `failed` puis `activated`, avec
+`"tools": []` puis `["fixture__echo"]`.
+
+Arrêtez le serveur et restaurez le `plugin.py` de l'étape 1.
+
+## 6. Collision de nom de Tool : le chargement refuse
+
+La collision est un défaut **permanent**, jamais une panne réparable. Créez un second
+plugin synthétique `duplicate` qui déclare le même nom de Tool que `fixture`.
+
+`$ATHENA_PLUGINS_DIR/duplicate/plugin.json` :
+
+```json
+{
+  "api_version": 1,
+  "name": "duplicate",
+  "version": "0.1.0",
+  "description": "Second plugin de fixture",
+  "platform": "server",
+  "entrypoint": "plugin.py"
+}
+```
+
+`$ATHENA_PLUGINS_DIR/duplicate/plugin.py` :
+
+```python
+from plugin_api import PluginBinding, ToolBinding, ToolSpec
+
+
+async def handle(arguments):
+    return {"status": "ok"}
+
+
+def create(context):
+    return PluginBinding(
+        name="duplicate",
+        tools=(
+            ToolBinding(
+                spec=ToolSpec(
+                    name="fixture__echo",
+                    description="Le même nom que fixture",
+                    parameters={},
+                ),
+                handler=handle,
+            ),
+        ),
+    )
+```
+
+Activez les deux plugins :
+
+```json
+{
+  "enabled": ["fixture", "duplicate"],
+  "config": {}
+}
+```
+
+Lancez le serveur :
+
+```sh
+.venv/bin/python -m server
+```
+
+Attendu :
+
+```
+Erreur de configuration : plugin 'duplicate': tool 'fixture__echo' is already registered by 'fixture'
+```
+
+et le code de sortie **2**, sans `started`. Le registre n'enregistre **jamais à moitié** :
+le plugin refusé ne laisse aucun de ses Tools derrière lui.
+
+Une collision découverte **à la relance** (le registre vit déjà) est refusée de la même
+façon, tracée `failed` au niveau `error`, et le plugin est retiré de la relance. Un Tool du
+plugin refusé n'entre jamais dans le registre.
+
+Arrêtez le serveur, supprimez `$ATHENA_PLUGINS_DIR/duplicate` et remettez
+`"enabled": ["fixture"]`.
+
+## 7. Lire l'instantané de la Console
+
+Le panneau **Plugins** et `GET /api/status` lisent le **même** registre. Chaque entrée
+porte le nom, l'état de chargement et les Tools attribués au propriétaire, triés par nom :
+
+```json
+"plugins": [
+  { "name": "fixture", "state": "activated", "tools": ["fixture__echo"] }
+]
+```
+
+Les quatre états sont rendus par le front :
+
+| État brut | Badge de la Console | Sens |
+| --- | --- | --- |
+| `activated` | **Activé** | importé, Tools publiés |
+| `disabled` | **Désactivé** | dossier découvert, non listé (ou plateforme cliente) |
+| `missing` | **Manquant** | listé, dossier absent ; ligne d'état conservée |
+| `failed` | **En échec** | panne réparable en attente, ou défaut tracé puis oublié |
+
+Pour lire l'API avec le Ticket Console :
+
+```sh
+curl -s -b /tmp/athena-cookies.txt http://127.0.0.1:8767/api/status \
+  | .venv/bin/python -c 'import json, sys; print(json.dumps(json.load(sys.stdin)["plugins"], indent=2, ensure_ascii=False))'
+```
+
+Sans Ticket, la route répond `401` JSON. L'instantané ne porte **aucun secret** : il ne
+montre ni configuration de plugin, ni valeur de secret, ni contenu d'appel.
 
 ## Limites connues
 
-- **Mauvais jeton** : indistinguable d'une plateforme injoignable → démarrage dégradé et
-  retente toutes les 5 s. Seul un secret ou une configuration requis **manquant** (ou un
-  manifeste invalide) est fatal.
-- **Langue** : HA résout les noms de zones et d'alias dans **sa** langue configurée. Athena
-  ne transmet ni langue ni `device_id` ; parlez les noms tels qu'ils existent dans HA.
-- **Nouveau Tool côté HA** (script, nouvelle exposition) : visible seulement au **redémarrage
-  suivant d'Athena**, car la découverte a lieu au démarrage. Un redémarrage de HA, lui, ne
-  casse rien : une session MCP neuve est ouverte à chaque appel.
-- **Ressources MCP** : `resources/read` et le `context-snapshot` de HA sont hors périmètre.
-- **Événements poussés par le plugin** : hors périmètre v1 ; le MCP ne pousse rien.
-- **Tools destructifs** : les annotations sont tracées mais inutilisées ; aucune confirmation
-  côté Athena. Le seul garde-fou est l'**Exposition Assist**.
-- **Coût d'un appel** : une session MCP par appel (le serveur HA est stateless), donc une
-  poignée de main `initialize` à chaque Tool. Le délai d'appel d'Athena est de 10 s.
-- **Pas d'activation à chaud** : `plugins.json` n'est lu qu'au démarrage.
+- **Pas d'activation à chaud** : le fichier d'état n'est lu qu'au démarrage, et les
+  déclarations d'une Connexion Live sont figées à son ouverture.
+- **Ordre déterministe** : plugins activés dans l'ordre du fichier d'état, puis dossiers
+  présents non listés par ordre de nom. L'instantané, lui, trie par nom.
+- **Seule `PluginUnavailable` est réparable.** Un manifeste, une configuration, un secret,
+  un import, un `create()` qui lève autre chose, ou une collision sont permanents.
+- **Un plugin listé et absent** reste `missing` : le chargeur ne modifie jamais le fichier
+  d'état.
+- **Les secrets ne sont jamais tracés** : ni dans les payloads, ni dans les raisons
+  d'échec, ni dans un message de démarrage refusé. Les valeurs connues sont expurgées en
+  `***`.
+- **Un plugin est amovible** : supprimer son dossier ne doit laisser aucune référence dure
+  ailleurs. La convention est dans `plugins/README.md` et l'ADR-0023.
 
 ## Vérification automatisée
 
 ```sh
-python -m pytest protocol/tests server/tests client/tests -q
+make test PYTHON=.venv/bin/python
 ```
 
-Les scénarios ci-dessus s'appuient sur :
+Les comportements de ce document sont couverts par :
 
-- `server/tests/test_plugins_homeassistant.py` — le **vrai** plugin contre un serveur MCP HA
-  en processus (`server/tests/ha_stub.py`) : découverte, déclarations telles quelles, appels,
-  texte `isError`, délais, maison injoignable, redémarrage de HA entre deux appels, jeton
-  jamais tracé ;
-- `server/tests/test_plugins.py` — agrégation du registre, collision de noms, attribution du
-  propriétaire, composition de l'instruction ;
-- `server/tests/test_plugins_loader.py` — états `activated` / `disabled` / `missing` /
-  `failed`, retente, cas fatals, expurgation des secrets ;
+- `server/tests/test_plugins_loader.py` — découverte et `disabled` sans import,
+  activation et Tools, `missing`, état et dossier absents, manifeste invalide,
+  `api_version`, `entrypoint`, configuration et secret requis, `create()` fatal, collision,
+  panne `PluginUnavailable` puis relance, relance toujours en échec, défaut structurel
+  découvert à la relance, expurgation des secrets, ordre déterministe des états ;
+- `server/tests/test_plugins.py` — registre agrégé, propriétaire de chaque Tool, composition
+  de l'instruction de plugin ;
 - `server/tests/test_plugins_instruction.py` — instruction dans les Sessions ordinaires et
-  les Annonces, et taille (jamais le texte) dans `Activation` ;
-- `server/tests/test_app_integration.py` — couture application : `server_tools` peuplé, Tools
-  de plugin déclarés et appelés, plugin désactivé, retente dégradée prise en compte à la
-  Connexion Live suivante ;
-- `server/tests/test_transport_server.py` — `Registered.server_tools` et relecture du
-  fournisseur à chaque enregistrement ;
-- `server/tests/test_transport_auth.py` et `client/tests/test_ws_client.py` — Jeton `client`
-  au handshake, refus `401`, Jeton `source` refusé et message client explicite ;
-- `server/tests/test_server_main.py` — code de sortie 2 sur plugin cassé ;
-- `server/tests/test_app_secrets.py` — secrets de plugin lus depuis `.env`, priorité à
-  l'environnement du processus.
+  les Annonces, taille (jamais le texte) dans la trace `Activation` ;
+- `server/tests/test_plugin_contract.py` — `plugin_api` importable sans le serveur, aucun
+  plugin n'importe un interne du serveur, contrat sans I/O ;
+- `server/tests/test_server_main.py` — code de sortie 2, plugin et champ nommés, aucune
+  trace `started`, secret jamais exposé ;
+- `server/tests/test_app_integration.py` — chargement avant `started`, Tool du plugin
+  déclaré, appelé et répondu, panne puis relance sans redémarrage, plugin listé sans
+  dossier ;
+- `server/tests/test_app_root.py` — instantané réel de `build_app` : `fixture` activé,
+  `fixture__echo` listé, aucun secret dans la configuration exposée ;
+- `web/src/status.test.ts` — libellés français des quatre états de Plugin.
 
 ## Résultat du run
 
-**Non exécuté à ce jour.** Ce document a été rédigé dans un environnement sans Home Assistant
-réel ni `GEMINI_API_KEY` valide : aucun parcours vocal n'a été joué et aucune trace réelle
-n'est reproduite ici. Les extraits décrivent le comportement **implémenté**, couvert par les
-tests listés ci-dessus ; les `N` et les noms de Tools restent à relever sur une instance
-réelle. Ce document n'est donc **pas** un compte rendu de run.
+**Non rejoué à la main sur cette tranche.** Le parcours ne dépend d'aucun service externe
+et ne met en scène qu'un plugin synthétique ; les extraits décrivent le comportement
+implémenté et sont couverts par les tests ci-dessus. La suite complète les rejoue avec le
+reste du dépôt.
