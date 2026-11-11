@@ -10,7 +10,7 @@ from testkit import RecordingTraceSink
 
 from server.adapters.plugins import PluginLoadError, PluginLoader
 from server.app.secrets import EnvSecretResolver
-from server.core.plugins import PluginRegistry
+from server.core.plugins import ConfigField, PluginRegistry, SecretField
 
 FIXTURE_NAME = "fixture"
 
@@ -159,7 +159,7 @@ def test_plugin_present_but_not_enabled_is_never_imported(tmp_path: Path) -> Non
     registry = _load(_loader(tmp_path, sink))
 
     assert registry.tools.specs() == ()
-    assert _states(sink) == [(FIXTURE_NAME, "disabled")]
+    assert _states(sink) == [(FIXTURE_NAME, "inactive")]
 
 
 def test_enabled_plugin_without_a_directory_is_traced_missing(tmp_path: Path) -> None:
@@ -198,8 +198,122 @@ def test_plugin_declared_for_a_client_platform_is_skipped(tmp_path: Path) -> Non
     registry = _load(_loader(tmp_path, sink))
 
     assert registry.tools.specs() == ()
-    assert _states(sink) == [(FIXTURE_NAME, "disabled")]
+    assert _states(sink) == [(FIXTURE_NAME, "unsupported")]
     assert sink.of_kind("PluginState")[0].payload["platform"] == "desktop"
+
+
+def test_a_client_platform_plugin_outside_the_enabled_list_is_unsupported(
+    tmp_path: Path,
+) -> None:
+    _write_plugin(tmp_path, code=EXPLODING_CODE, manifest=_manifest(platform="android"))
+    _write_state(tmp_path, enabled=[])
+    sink = RecordingTraceSink()
+
+    registry = _load(_loader(tmp_path, sink))
+
+    assert registry.tools.specs() == ()
+    assert _states(sink) == [(FIXTURE_NAME, "unsupported")]
+    assert registry.declaration_of(FIXTURE_NAME) is not None
+    assert registry.declaration_of(FIXTURE_NAME).platform == "android"
+
+
+SENTINEL_CODE = '''
+from pathlib import Path
+
+Path(__file__).with_name("imported.txt").write_text("imported", encoding="utf-8")
+'''
+
+
+def test_no_module_of_a_plugin_outside_the_enabled_list_is_imported(
+    tmp_path: Path,
+) -> None:
+    """Déposer un dossier n'exécute rien : le balayage lit le manifeste seul."""
+    _write_plugin(tmp_path, code=SENTINEL_CODE)
+    _write_state(tmp_path, enabled=[])
+    sink = RecordingTraceSink()
+
+    registry = _load(_loader(tmp_path, sink))
+
+    assert not (tmp_path / "plugins" / FIXTURE_NAME / "imported.txt").exists()
+    assert registry.declaration_of(FIXTURE_NAME) is not None
+
+
+def test_a_directory_without_a_manifest_is_invalid_and_does_not_stop_startup(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "plugins" / FIXTURE_NAME
+    directory.mkdir(parents=True)
+    (directory / "plugin.py").write_text(SENTINEL_CODE, encoding="utf-8")
+    _write_state(tmp_path, enabled=[])
+    sink = RecordingTraceSink()
+
+    registry = _load(_loader(tmp_path, sink))
+
+    [state] = sink.of_kind("PluginState")
+    assert state.payload["plugin"] == FIXTURE_NAME
+    assert state.payload["state"] == "invalid"
+    assert "manifest" in state.payload["reason"]
+    assert not (directory / "imported.txt").exists()
+    assert registry.state_of(FIXTURE_NAME) == "invalid"
+    assert registry.declaration_of(FIXTURE_NAME).invalid_reason is not None
+
+
+def test_a_broken_manifest_outside_the_enabled_list_is_invalid_not_fatal(
+    tmp_path: Path,
+) -> None:
+    _write_plugin(tmp_path, manifest="{pas du JSON")
+    _write_state(tmp_path, enabled=[])
+    sink = RecordingTraceSink()
+
+    registry = _load(_loader(tmp_path, sink))
+
+    [state] = sink.of_kind("PluginState")
+    assert state.payload["state"] == "invalid"
+    assert "JSON" in state.payload["reason"]
+    assert registry.declaration_of(FIXTURE_NAME) is not None
+    assert registry.declaration_of(FIXTURE_NAME).invalid_reason is not None
+
+
+def test_a_manifest_inconsistent_with_its_directory_is_invalid_when_not_enabled(
+    tmp_path: Path,
+) -> None:
+    _write_plugin(tmp_path, manifest=_manifest("un-autre-nom"))
+    _write_state(tmp_path, enabled=[])
+    sink = RecordingTraceSink()
+
+    _load(_loader(tmp_path, sink))
+
+    [state] = sink.of_kind("PluginState")
+    assert state.payload["state"] == "invalid"
+    assert "un-autre-nom" in state.payload["reason"]
+
+
+def test_scanning_records_the_declaration_of_every_installed_directory(
+    tmp_path: Path,
+) -> None:
+    _write_plugin(
+        tmp_path,
+        manifest=_manifest(
+            config=[{"key": "base_url", "type": "url", "required": False}],
+            secrets=[{"key": "api_key", "required": True}],
+        ),
+    )
+    _write_state(tmp_path, enabled=[])
+
+    registry = _load(_loader(tmp_path, RecordingTraceSink()))
+
+    declaration = registry.declaration_of(FIXTURE_NAME)
+    assert declaration is not None
+    assert declaration.description == "Plugin de fixture"
+    assert declaration.version == "0.1.0"
+    assert declaration.api_version == 1
+    assert declaration.platform == "server"
+    assert declaration.directory.endswith("plugins/fixture")
+    assert declaration.config == (
+        ConfigField(key="base_url", type="url", required=False),
+    )
+    assert declaration.secrets == (SecretField(key="api_key", required=True),)
+    assert declaration.invalid_reason is None
 
 
 def test_unknown_api_version_fails_the_startup(tmp_path: Path) -> None:
@@ -747,7 +861,7 @@ def test_startup_traces_every_plugin_state_in_one_deterministic_pass(
         ("disparu", "missing"),
         ("gamma", "activated"),
         ("beta", "failed"),
-        ("delta", "disabled"),
+        ("delta", "inactive"),
     ]
     # Le registre porte le même état, lisible sans relire la trace.
     assert dict(registry.states) == {
@@ -755,5 +869,5 @@ def test_startup_traces_every_plugin_state_in_one_deterministic_pass(
         "disparu": "missing",
         "gamma": "activated",
         "beta": "failed",
-        "delta": "disabled",
+        "delta": "inactive",
     }

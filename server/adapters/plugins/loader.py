@@ -17,6 +17,7 @@ from server.core.plugins import (
     ConfigField,
     PluginBinding,
     PluginContext,
+    PluginDeclaration,
     PluginManifest,
     PluginRegistry,
     PluginUnavailable,
@@ -79,15 +80,18 @@ class PluginLoader:
     secrets et import du point d'entrée. Le noyau ne reçoit qu'un
     ``PluginBinding`` agrégé dans le ``PluginRegistry`` injecté.
 
-    Seuls les plugins **listés** dans le fichier d'état sont importés ; un
-    dossier présent mais non listé est tracé ``disabled`` sans être exécuté.
-    Un défaut permanent d'un plugin activé lève ``PluginLoadError`` et fait
-    échouer le démarrage ; une exception ``PluginUnavailable`` de
-    ``create(context)`` (plateforme injoignable) est tracée ``failed`` et le
-    plugin reste en attente de retente (``retry_pending``), pour qu'une
-    plateforme injoignable ne rende pas Athena muette. Un plugin listé dont le
-    dossier a disparu est tracé ``missing`` sans perdre sa ligne d'état : le
-    chargeur ne fait que lire le fichier d'état.
+    Seuls les plugins **listés** dans le fichier d'état sont importés. Chaque
+    dossier du répertoire est néanmoins lu au démarrage pour sa Déclaration :
+    un dossier présent mais non listé est tracé ``inactive`` sans être exécuté,
+    un plugin d'une autre plateforme ``unsupported``, et un manifeste cassé
+    ``invalid`` (avec sa raison) sans interrompre le démarrage. Un défaut
+    permanent d'un plugin activé lève ``PluginLoadError`` et fait échouer le
+    démarrage ; une exception ``PluginUnavailable`` de ``create(context)``
+    (plateforme injoignable) est tracée ``failed`` et le plugin reste en attente
+    de retente (``retry_pending``), pour qu'une plateforme injoignable ne rende
+    pas Athena muette. Un plugin listé dont le dossier a disparu est tracé
+    ``missing`` sans perdre sa ligne d'état : le chargeur ne fait que lire le
+    fichier d'état.
     """
 
     def __init__(
@@ -126,8 +130,10 @@ class PluginLoader:
         enabled, configs = self._read_state()
         for name in enabled:
             await self._load_enabled(name, registry, configs.get(name, {}), push_event)
+        # Le balayage ne lit que les manifestes : aucun module d'un plugin non
+        # retenu n'est importé, donc déposer un dossier n'exécute rien.
         for name in sorted(self._on_disk() - set(enabled)):
-            self._record_state(registry, name, "disabled")
+            self._scan_installed(name, registry)
 
     # -- État d'activation ---------------------------------------------------
 
@@ -194,11 +200,12 @@ class PluginLoader:
             self._record_state(registry, name, "missing")
             return
         manifest = self._read_manifest(name, plugin_dir)
+        registry.declare(name, _declaration(manifest, plugin_dir))
         if manifest.platform != SERVER_PLATFORM:
             # Une plateforme cliente n'est jamais chargée par le serveur : le
             # plugin reste inerte ici, sans faire échouer le démarrage.
             self._record_state(
-                registry, name, "disabled", platform=manifest.platform
+                registry, name, "unsupported", platform=manifest.platform
             )
             return
         config = self._resolve_config(manifest, raw_config)
@@ -310,6 +317,11 @@ class PluginLoader:
 
     def _read_manifest(self, name: str, plugin_dir: Path) -> PluginManifest:
         """Lit et valide strictement le manifeste d'un plugin activé."""
+        data = self._read_manifest_data(name, plugin_dir)
+        return self._parse_manifest(name, plugin_dir, data)
+
+    def _read_manifest_data(self, name: str, plugin_dir: Path) -> dict:
+        """Lit le JSON brut du manifeste ; un défaut d'I/O ou de forme est fatal."""
         path = plugin_dir / _MANIFEST_FILE
         if not path.is_file():
             raise PluginLoadError(f"plugin {name!r}: missing manifest {path}")
@@ -323,6 +335,12 @@ class PluginLoader:
             raise PluginLoadError(
                 f"plugin {name!r}: manifest must be a JSON object"
             )
+        return data
+
+    def _parse_manifest(
+        self, name: str, plugin_dir: Path, data: dict
+    ) -> PluginManifest:
+        """Valide un manifeste déjà lu ; partagé par le chargement et le balayage."""
         api_version = data.get("api_version")
         if api_version != _API_VERSION:
             raise PluginLoadError(
@@ -366,6 +384,63 @@ class PluginLoader:
             config=self._read_config_fields(name, data.get("config", [])),
             secrets=self._read_secret_fields(name, data.get("secrets", [])),
         )
+
+    def _scan_installed(self, name: str, registry: PluginRegistry) -> None:
+        """Classe un dossier non retenu en lisant son manifeste, sans l'importer.
+
+        La plateforme est lue avant la validation complète : un manifeste qui
+        annonce ``desktop`` reste ``unsupported`` même s'il lui manque un champ
+        serveur. Tout autre défaut donne ``invalid`` avec une raison expurgée,
+        sans interrompre le démarrage ; un manifeste sain donne ``inactive``.
+        """
+        plugin_dir = self._directory / name
+        try:
+            data = self._read_manifest_data(name, plugin_dir)
+        except PluginLoadError as exc:
+            reason = _redact(str(exc), ())
+            registry.declare(
+                name, _raw_declaration(plugin_dir, {}, invalid_reason=reason)
+            )
+            self._record_state(registry, name, "invalid", reason=reason)
+            return
+        platform = data.get("platform")
+        if (
+            isinstance(platform, str)
+            and platform in KNOWN_PLATFORMS
+            and platform != SERVER_PLATFORM
+        ):
+            declaration = self._declaration_or_raw(name, plugin_dir, data)
+            registry.declare(name, declaration)
+            self._record_state(
+                registry, name, "unsupported", platform=declaration.platform
+            )
+            return
+        try:
+            manifest = self._parse_manifest(name, plugin_dir, data)
+        except PluginLoadError as exc:
+            reason = _redact(str(exc), ())
+            registry.declare(
+                name, _raw_declaration(plugin_dir, data, invalid_reason=reason)
+            )
+            self._record_state(registry, name, "invalid", reason=reason)
+            return
+        registry.declare(name, _declaration(manifest, plugin_dir))
+        self._record_state(registry, name, "inactive")
+
+    def _declaration_or_raw(
+        self, name: str, plugin_dir: Path, data: dict
+    ) -> PluginDeclaration:
+        """Déclaration complète quand le manifeste tient, identité seule sinon.
+
+        Un plugin d'une autre plateforme n'est jamais chargé, donc un défaut qui
+        ne concerne que le serveur (entrypoint absent) ne doit pas masquer son
+        identité dans le registre.
+        """
+        try:
+            manifest = self._parse_manifest(name, plugin_dir, data)
+        except PluginLoadError:
+            return _raw_declaration(plugin_dir, data)
+        return _declaration(manifest, plugin_dir)
 
     @staticmethod
     def _read_entries(
@@ -602,6 +677,43 @@ class PluginLoader:
             )
 
         return trace
+
+
+def _declaration(manifest: PluginManifest, plugin_dir: Path) -> PluginDeclaration:
+    """Déclaration d'un manifeste validé, identité et exigences comprises."""
+    return PluginDeclaration(
+        description=manifest.description,
+        version=manifest.version,
+        api_version=manifest.api_version,
+        platform=manifest.platform,
+        directory=str(plugin_dir),
+        config=manifest.config,
+        secrets=manifest.secrets,
+    )
+
+
+def _raw_declaration(
+    plugin_dir: Path, data: dict, *, invalid_reason: str | None = None
+) -> PluginDeclaration:
+    """Identité lisible d'un manifeste invalide, sans inventer le reste.
+
+    Le registre doit pouvoir nommer un dossier au manifeste cassé ; les champs
+    qu'on ne sait pas valider restent vides plutôt que d'être devinés.
+    """
+
+    def text(key: str) -> str:
+        value = data.get(key)
+        return value.strip() if isinstance(value, str) else ""
+
+    api_version = data.get("api_version")
+    return PluginDeclaration(
+        description=text("description"),
+        version=text("version"),
+        api_version=api_version if isinstance(api_version, int) else 0,
+        platform=text("platform"),
+        directory=str(plugin_dir),
+        invalid_reason=invalid_reason,
+    )
 
 
 def _is_http_url(text: str) -> bool:
