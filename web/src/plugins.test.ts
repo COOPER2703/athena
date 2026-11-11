@@ -519,6 +519,140 @@ describe("pluginSheet settings", () => {
 });
 
 
+describe("pluginSheet registry view", () => {
+  it("rend les trois marqueurs avec leur libellé d'état, sans répéter le manifeste invalide", () => {
+    const sheet = pluginSheet(
+      normalizePlugin({
+        name: "broken",
+        state: "invalid",
+        declaration: {
+          directory: "plugins/broken",
+          invalid_reason: "manifest is not valid JSON",
+        },
+        reason: "manifest is not valid JSON",
+      }) as PluginInfo,
+    );
+
+    expect(sheet.markers).toEqual([
+      {
+        key: "manifest",
+        label: "Manifeste",
+        stateLabel: "Manque",
+        stateClass: "missing",
+        note: null,
+        gaps: [],
+      },
+      {
+        key: "config",
+        label: "Configuration requise",
+        stateLabel: "Non évaluable",
+        stateClass: "unknown",
+        note: "Non évaluable : le manifeste ne permet pas de lire les exigences.",
+        gaps: [],
+      },
+      {
+        key: "secrets",
+        label: "Secrets requis",
+        stateLabel: "Non évaluable",
+        stateClass: "unknown",
+        note: "Non évaluable : le manifeste ne permet pas de lire les exigences.",
+        gaps: [],
+      },
+    ]);
+    expect(sheet.diagnosticNote).toBe(
+      "Diagnostic partiel : des exigences restent illisibles.",
+    );
+    expect(sheet.failureMessage).toBeNull();
+  });
+
+  it("n'affiche la raison d'échec qu'une fois, hors raison d'invalidité", () => {
+    const sheet = pluginSheet(
+      normalizePlugin({
+        name: "calendar",
+        state: "failed",
+        declaration: {
+          platform: "server",
+          directory: "plugins/calendar",
+        },
+        reason: "PluginUnavailable: injoignable",
+      }) as PluginInfo,
+    );
+
+    expect(sheet.failure).toBe("PluginUnavailable: injoignable");
+    expect(sheet.failureMessage).toBe("PluginUnavailable: injoignable");
+    expect(sheet.diagnosticNote).toBeNull();
+  });
+
+  it("nomme explicitement l'absence de configuration, de secret ou de Tool", () => {
+    const bare = pluginSheet(
+      normalizePlugin({
+        name: "bare",
+        state: "inactive",
+        declaration: {
+          description: "Sans réglage",
+          version: "1.0.0",
+          api_version: 1,
+          platform: "server",
+          directory: "plugins/bare",
+        },
+      }) as PluginInfo,
+    );
+
+    expect(bare.configNotice).toBe("Aucun champ de configuration déclaré.");
+    expect(bare.secretsNotice).toBe("Aucun secret déclaré.");
+    expect(bare.toolsNotice).toBe("Aucun Tool exposé.");
+    expect(bare.instructionNote).toBe(
+      "Aucune Instruction : ce plugin n'est pas chargé.",
+    );
+
+    const ghost = pluginSheet(
+      normalizePlugin({ name: "ghost", state: "missing" }) as PluginInfo,
+    );
+    expect(ghost.configNotice).toBe(
+      "Réglages inconnus : aucune Déclaration lue.",
+    );
+    expect(ghost.secretsNotice).toBe(
+      "Secrets inconnus : aucune Déclaration lue.",
+    );
+  });
+
+  it("garde une fiche complète sans note d'absence de réglage", () => {
+    const sheet = pluginSheet(
+      normalizePlugin(configuredPlugin) as PluginInfo,
+    );
+
+    expect(sheet.configNotice).toBeNull();
+    expect(sheet.secretsNotice).toBeNull();
+    expect(sheet.toolsNotice).toBe("Aucun Tool exposé.");
+    expect(sheet.markers.map((marker) => marker.stateLabel)).toEqual([
+      "Satisfait",
+      "Manque",
+      "Manque",
+    ]);
+  });
+});
+
+describe("diagnostic source of truth", () => {
+  it("recalcule le diagnostic au lieu de faire confiance au ready du serveur", () => {
+    const plugin = normalizePlugin({
+      ...configuredPlugin,
+      // Le serveur se tromperait (ou la trame serait ancienne) : la fiche nomme
+      // toujours les manques qu'elle peut lire, et ne montre jamais deux vérités.
+      ready: { manifest: true, config: true, secrets: true },
+    }) as PluginInfo;
+
+    expect(plugin.ready).toEqual({
+      manifest: true,
+      config: true,
+      secrets: true,
+    });
+    const diagnostic = pluginDiagnostic(plugin);
+    expect(diagnostic.ready).toBe(false);
+    expect(diagnostic.gaps).toContain("`parent_page_id` requis non renseigné");
+    expect(diagnostic.gaps).toContain("`ATHENA_PLUGIN_NOTION_TOKEN` absente");
+  });
+});
+
 describe("marker state labels", () => {
   it("traduit les trois états d'un marqueur de diagnostic", () => {
     expect(formatMarkerState("ok")).toBe("Satisfait");
