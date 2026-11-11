@@ -20,21 +20,24 @@ from server.core.tools import ToolRegistry
 
 # Le contrat public vit dans ``plugin_api`` (aucun import de ``server``) ; ce
 # module le ré-exporte pour que les imports existants du noyau continuent de
-# marcher. Seuls ``PluginDeclaration`` et ``PluginRegistry`` appartiennent au
-# noyau.
+# marcher. Seuls ``ConfigValue``, ``SecretPresence``, ``PluginObservation``,
+# ``PluginDeclaration`` et ``PluginRegistry`` appartiennent au noyau.
 
 __all__ = [
     "KNOWN_PLATFORMS",
     "PLUGIN_STATES",
     "SERVER_PLATFORM",
     "ConfigField",
+    "ConfigValue",
     "PluginBinding",
     "PluginContext",
     "PluginDeclaration",
     "PluginManifest",
+    "PluginObservation",
     "PluginRegistry",
     "PluginUnavailable",
     "SecretField",
+    "SecretPresence",
     "ToolBinding",
     "ToolSpec",
 ]
@@ -50,6 +53,50 @@ PLUGIN_STATES = (
     "unsupported",
     "invalid",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigValue:
+    """Valeur effective observée d'une clé de configuration déclarée.
+
+    ``value`` vaut ``None`` quand la clé est laissée au défaut du plugin. Une
+    chaîne vide n'a pas de sens ici : le fichier d'état ne distingue pas une
+    valeur vide d'une absence, donc le chargeur les ramène toutes deux au
+    défaut. La validité (URL, par exemple) n'est pas jugée ici : le diagnostic
+    la déduit du ``type`` déclaré et de la valeur.
+    """
+
+    key: str
+    value: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SecretPresence:
+    """Présence observée d'un secret déclaré, jamais sa valeur (ADR-0014).
+
+    ``variable`` est le nom exact de la variable que le chargeur a sondée : la
+    Console peut ainsi nommer ce qui manque sans reconstruire la convention de
+    nommage.
+    """
+
+    key: str
+    variable: str
+    present: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PluginObservation:
+    """Réglages observés d'un plugin, portés à côté de sa Déclaration.
+
+    La Déclaration dit ce que le manifeste **attend** ; l'observation dit ce que
+    le serveur a **trouvé** au démarrage : valeurs de configuration réellement
+    renseignées (une clé absente est laissée au défaut du plugin) et présence
+    des secrets. Aucune valeur de secret n'entre ici, et le type est immuable :
+    l'agrégat qui le porte reste pur et sans I/O.
+    """
+
+    config: tuple[ConfigValue, ...] = ()
+    secrets: tuple[SecretPresence, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,10 +129,11 @@ class PluginRegistry:
     plugins, dans un ordre déterministe, pour que le prompt système reste
     reproductible.
 
-    Il porte aussi l'**état de service** et la **Déclaration** de chaque plugin
-    installé, pour qu'ils soient lisibles sans relire la trace : c'est le
-    Plugin Registry décrit par le glossaire. Le chargeur l'entretient au
-    démarrage ; l'instantané ne fait ensuite que lire le cache.
+    Il porte aussi l'**état de service**, la **Déclaration** et les **réglages
+    observés** (valeurs de configuration effectives, présence des secrets) de
+    chaque plugin installé, pour qu'ils soient lisibles sans relire la trace :
+    c'est le Plugin Registry décrit par le glossaire. Le chargeur l'entretient
+    au démarrage ; l'instantané ne fait ensuite que lire le cache.
     """
 
     def __init__(self) -> None:
@@ -93,6 +141,7 @@ class PluginRegistry:
         self._instructions: dict[str, str] = {}
         self._states: dict[str, str] = {}
         self._declarations: dict[str, PluginDeclaration] = {}
+        self._observations: dict[str, PluginObservation] = {}
         # Raison d'échec expurgée et attente de retente, tenues à côté de
         # l'état : la fiche de la Console les lit sans relire la Trace qui les
         # a annoncées.
@@ -112,6 +161,11 @@ class PluginRegistry:
     def declarations(self) -> Mapping[str, PluginDeclaration]:
         """Déclarations connues des plugins installés, en lecture seule."""
         return MappingProxyType(self._declarations)
+
+    @property
+    def observations(self) -> Mapping[str, PluginObservation]:
+        """Réglages observés des plugins installés, en lecture seule."""
+        return MappingProxyType(self._observations)
 
     def state_of(self, plugin: str) -> str | None:
         """État de service d'un plugin, ``None`` s'il n'a jamais été vu."""
@@ -137,12 +191,27 @@ class PluginRegistry:
         """Déclaration d'un plugin installé, ``None`` si aucun manifeste lu."""
         return self._declarations.get(plugin)
 
+    def observation_of(self, plugin: str) -> PluginObservation | None:
+        """Réglages observés d'un plugin, ``None`` s'ils n'ont pas été sondés."""
+        return self._observations.get(plugin)
+
     def declare(self, plugin: str, declaration: PluginDeclaration) -> None:
         """Enregistre la Déclaration lue d'un dossier installé."""
         name = plugin.strip()
         if not name:
             raise ValueError("plugin name is required")
         self._declarations[name] = declaration
+
+    def observe(self, plugin: str, observation: PluginObservation) -> None:
+        """Enregistre les réglages observés au démarrage, sans I/O ici.
+
+        Un dossier dont les exigences sont illisibles n'a simplement pas
+        d'observation : le diagnostic le dit au lieu de deviner.
+        """
+        name = plugin.strip()
+        if not name:
+            raise ValueError("plugin name is required")
+        self._observations[name] = observation
 
     def mark_state(
         self,

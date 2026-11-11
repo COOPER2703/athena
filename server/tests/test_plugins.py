@@ -7,10 +7,13 @@ import pytest
 
 from server.core.plugins import (
     ConfigField,
+    ConfigValue,
     PluginBinding,
     PluginDeclaration,
+    PluginObservation,
     PluginRegistry,
     SecretField,
+    SecretPresence,
     ToolBinding,
 )
 from server.core.ports import ToolSpec
@@ -243,3 +246,33 @@ def test_registry_keeps_the_declaration_alongside_the_service_state() -> None:
     assert registry.declaration_of("absent") is None
     assert dict(registry.declarations) == {"websearch": declaration}
     assert registry.state_of("websearch") == "inactive"
+
+
+def test_registry_keeps_observed_settings_read_only_beside_the_declaration() -> None:
+    """Les valeurs effectives et la présence vivent à côté, jamais dans la Déclaration."""
+    declaration = PluginDeclaration(
+        directory="plugins/websearch",
+        config=(ConfigField(key="base_url", type="url", required=False),),
+        secrets=(SecretField(key="api_key", required=True),),
+    )
+    observation = PluginObservation(
+        config=(ConfigValue(key="base_url", value=None),),
+        secrets=(
+            SecretPresence(
+                key="api_key",
+                variable="ATHENA_PLUGIN_WEBSEARCH_API_KEY",
+                present=False,
+            ),
+        ),
+    )
+    registry = PluginRegistry()
+    registry.declare("websearch", declaration)
+    registry.observe("websearch", observation)
+
+    assert registry.observation_of("websearch") is observation
+    assert registry.observation_of("absent") is None
+    assert dict(registry.observations) == {"websearch": observation}
+    # Aucune valeur de secret n'est représentable : seule la présence existe.
+    assert not hasattr(observation.secrets[0], "value")
+    with pytest.raises(TypeError):
+        registry.observations["websearch"] = observation  # type: ignore[index]
