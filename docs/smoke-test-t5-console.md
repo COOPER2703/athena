@@ -490,8 +490,8 @@ Avec le build (`make web` puis lancement par défaut) :
 ### Client audio (Protocole partagé)
 
 Le Protocole partagé n'est pas modifié par la Console. Pour le prouver sans micro, enregistrez
-un client factice sur le WebSocket du serveur (même extrait qu'au smoke test T4, étape 12).
-Le handshake exige un **Jeton `client`** (créé dans la Console) :
+un client factice sur le WebSocket du serveur. Le handshake exige un **Jeton `client`**
+(créé dans la Console) :
 
 ```sh
 export ATHENA_ACCESS_TOKEN=ath_…   # Jeton de nature client
