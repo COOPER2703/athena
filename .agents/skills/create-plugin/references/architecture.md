@@ -3,8 +3,12 @@
 Link-first. The authorities are:
 
 - `ADR-0014` — server plugins: manifest, discovery, activation, loading, failure semantics.
-- `ADR-0018` — `websearch`, the complete example of a plugin with one Tool.
-- `GLOSSARY.md` — the domain vocabulary; use its terms, not synonyms.
+- `plugins/README.md` — the mandatory shape of a plugin folder and its amovibility rule
+  (ADR-0023), plus the secret naming rule.
+- `plugins/websearch/docs/adr/0001-recherche-web-par-plugin.md` — `websearch`, the complete
+  example of a plugin with one Tool.
+- `docs/adr/README.md` — the central ADR index and the old → new plugin ADR correspondence.
+- `GLOSSARY-MAP.md` — the domain vocabulary per context; use its terms, not synonyms.
 - `plugin_api/__init__.py` — the only surface a plugin imports.
 - `plugins/websearch/plugin.py` — HTTP archetype.
 - `plugins/homeassistant/plugin.py` — MCP platform archetype.
@@ -42,10 +46,11 @@ The core concepts a plugin will meet:
 ## Where a plugin sits
 
 A server plugin is a directory under `plugins/<name>/` with a `plugin.json` manifest and an
-entrypoint. It is loaded **at startup**, never hot. Dropping the directory executes nothing:
-activation is an explicit list in the state file (`plugins.json` by default). A plugin is
-trusted code running in the server process, with the server's privileges and no sandbox
-(ADR-0014).
+entrypoint. Its README, glossary, tests, fake servers, smoke test and local ADRs live in the
+same folder; `plugins/README.md` states the mandatory shape. It is loaded **at startup**,
+never hot. Dropping the directory executes nothing: activation is an explicit list in the
+state file (`plugins.json` by default). A plugin is trusted code running in the server
+process, with the server's privileges and no sandbox (ADR-0014).
 
 ### Loading lifecycle
 
