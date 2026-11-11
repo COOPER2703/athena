@@ -203,11 +203,7 @@ class PluginLoader:
             self._record_state(registry, name, "missing")
             return
         manifest = self._read_manifest(name, plugin_dir)
-        registry.declare(name, _declaration(manifest, plugin_dir))
-        registry.observe(
-            name,
-            self._observe(name, manifest.config, manifest.secrets, raw_config),
-        )
+        self._declare(registry, name, _declaration(manifest, plugin_dir), raw_config)
         if manifest.platform != SERVER_PLATFORM:
             # Une plateforme cliente n'est jamais chargée par le serveur : le
             # plugin reste inerte ici, sans faire échouer le démarrage.
@@ -407,12 +403,9 @@ class PluginLoader:
         try:
             data = self._read_manifest_data(name, plugin_dir)
         except PluginLoadError as exc:
-            reason = _redact(str(exc), ())
-            declaration = self._raw_declaration(
-                name, plugin_dir, {}, invalid_reason=reason
+            self._mark_invalid(
+                name, registry, plugin_dir, {}, _redact(str(exc), ()), raw_config
             )
-            self._declare(registry, name, declaration, raw_config)
-            self._record_state(registry, name, "invalid", reason=reason)
             return
         platform = data.get("platform")
         if (
@@ -429,15 +422,32 @@ class PluginLoader:
         try:
             manifest = self._parse_manifest(name, plugin_dir, data)
         except PluginLoadError as exc:
-            reason = _redact(str(exc), ())
-            declaration = self._raw_declaration(
-                name, plugin_dir, data, invalid_reason=reason
+            self._mark_invalid(
+                name, registry, plugin_dir, data, _redact(str(exc), ()), raw_config
             )
-            self._declare(registry, name, declaration, raw_config)
-            self._record_state(registry, name, "invalid", reason=reason)
             return
         self._declare(registry, name, _declaration(manifest, plugin_dir), raw_config)
         self._record_state(registry, name, "inactive")
+
+    def _mark_invalid(
+        self,
+        name: str,
+        registry: PluginRegistry,
+        plugin_dir: Path,
+        data: dict,
+        reason: str,
+        raw_config: Mapping[str, object],
+    ) -> None:
+        """Trace un dossier non retenu au manifeste cassé, sans interrompre le scan.
+
+        L'identité se limite à ce qui reste lisible : ``data`` est vide quand
+        le manifeste n'a pas pu être lu du tout.
+        """
+        declaration = self._raw_declaration(
+            name, plugin_dir, data, invalid_reason=reason
+        )
+        self._declare(registry, name, declaration, raw_config)
+        self._record_state(registry, name, "invalid", reason=reason)
 
     def _declare(
         self,
