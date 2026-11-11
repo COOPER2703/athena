@@ -1,12 +1,22 @@
 /**
- * Fiche d'un plugin installé : normalisation défensive et regroupement.
+ * Fiche d'un plugin installé : normalisation défensive, regroupement et
+ * registre (compteurs, recherche, filtres, motifs de rail).
  *
  * L'instantané du serveur reste en `snake_case` et peut être partiel (une
  * trame ancienne, un dossier jamais lu, un manifeste cassé). Ce module est pur
  * et sans DOM : il borne chaque champ à une valeur affichable, et regroupe la
  * matière de la fiche (identité, Tools, Instruction, panne) pour que le
  * composant n'ait aucune logique à porter.
+ *
+ * Source de vérité du diagnostic : l'interface recalcule tout avec
+ * `pluginDiagnostic`, à partir du manifeste, des `required` et des
+ * `value`/`present`. Le champ `ready` publié par le serveur n'est qu'une forme
+ * de transport JSON : il n'est jamais rendu, pour qu'une trame ancienne ou un
+ * désaccord serveur ne fasse pas coexister deux vérités contradictoires. Le
+ * diagnostic calculé nomme les manques et sait dire « non évaluable ».
  */
+
+import { normalizeText } from "./filters";
 
 /** Identité déclarée par un manifeste, normalisée pour l'affichage. */
 export interface PluginDeclarationInfo {
@@ -59,7 +69,13 @@ export interface PluginInfo {
   instruction: string;
   config: PluginConfigField[];
   secrets: PluginSecretField[];
-  /** `null` quand l'instantané ne porte pas de diagnostic exploitable. */
+  /**
+   * Marqueurs publiés par le serveur, gardés pour la forme JSON.
+   *
+   * L'interface ne rend jamais ce champ : elle recalcule le diagnostic avec
+   * `pluginDiagnostic`, qui nomme les manques et sait dire « non évaluable ».
+   * Une seule vérité est affichée, même si le serveur et le manifeste divergent.
+   */
   ready: PluginReady | null;
 }
 
@@ -118,6 +134,16 @@ export interface PluginDiagnostic {
   gaps: string[];
 }
 
+/** Un marqueur prêt à rendre : libellé d'état et manques déjà résolus. */
+export interface PluginMarkerView {
+  key: "manifest" | "config" | "secrets";
+  label: string;
+  stateLabel: string;
+  stateClass: PluginMarkerState;
+  note: string | null;
+  gaps: string[];
+}
+
 /** Fiche groupée d'un plugin, prête à rendre. */
 export interface PluginSheet {
   /** Identité déclarée, `[]` quand aucune Déclaration n'a été lue. */
@@ -125,6 +151,8 @@ export interface PluginSheet {
   tools: string[];
   instruction: string;
   failure: string | null;
+  /** Raison à afficher hors raison d'invalidité, déjà dédoublonnée. */
+  failureMessage: string | null;
   invalidReason: string | null;
   retry: boolean;
   loaded: boolean;
@@ -132,6 +160,18 @@ export interface PluginSheet {
   config: PluginConfigRow[];
   secrets: PluginSecretRow[];
   diagnostic: PluginDiagnostic;
+  /** Marqueurs affichés ; le manifeste invalide n'y répète pas sa raison. */
+  markers: PluginMarkerView[];
+  /** Note affichée quand un marqueur reste non évaluable. */
+  diagnosticNote: string | null;
+  /** Texte d'absence de configuration, `null` dès qu'un champ est déclaré. */
+  configNotice: string | null;
+  /** Texte d'absence de secret, `null` dès qu'un secret est déclaré. */
+  secretsNotice: string | null;
+  /** Texte d'absence de Tool, `null` dès qu'un Tool est exposé. */
+  toolsNotice: string | null;
+  /** Texte d'absence d'Instruction, `null` quand elle existe. */
+  instructionNote: string | null;
   /** Vrai dès qu'un champ de configuration ou un secret est déclaré. */
   hasRequirements: boolean;
 }
@@ -408,6 +448,19 @@ function secretRow(field: PluginSecretField): PluginSecretRow {
   };
 }
 
+function markerView(marker: PluginMarker): PluginMarkerView {
+  return {
+    key: marker.key,
+    label: marker.label,
+    stateLabel: formatMarkerState(marker.state),
+    stateClass: marker.state,
+    note: marker.note,
+    // La raison d'un manifeste invalide est affichée plus haut : la répéter
+    // dans les manques ferait lire deux fois la même phrase.
+    gaps: marker.key === "manifest" ? [] : marker.gaps,
+  };
+}
+
 /**
  * Regroupe la fiche : identité déclarée, réglages, diagnostic, Tools et panne.
  *
@@ -445,18 +498,47 @@ export function pluginSheet(plugin: PluginInfo): PluginSheet {
       mono: true,
     });
   }
+  const invalidReason = declaration?.invalidReason ?? null;
+  const diagnostic = pluginDiagnostic(plugin);
+  const declarationMissing = declaration === null;
   return {
     identity,
     tools: plugin.tools,
     instruction: plugin.instruction,
     failure: plugin.reason,
-    invalidReason: declaration?.invalidReason ?? null,
+    failureMessage:
+      plugin.reason !== null && plugin.reason !== invalidReason
+        ? plugin.reason
+        : null,
+    invalidReason,
     retry: plugin.retry,
     loaded: plugin.state === "activated",
-    declarationMissing: declaration === null,
+    declarationMissing,
     config: plugin.config.map(configRow),
     secrets: plugin.secrets.map(secretRow),
-    diagnostic: pluginDiagnostic(plugin),
+    diagnostic,
+    markers: [
+      markerView(diagnostic.manifest),
+      markerView(diagnostic.config),
+      markerView(diagnostic.secrets),
+    ],
+    diagnosticNote: diagnostic.unknown
+      ? "Diagnostic partiel : des exigences restent illisibles."
+      : null,
+    configNotice:
+      plugin.config.length > 0
+        ? null
+        : declarationMissing
+          ? "Réglages inconnus : aucune Déclaration lue."
+          : "Aucun champ de configuration déclaré.",
+    secretsNotice:
+      plugin.secrets.length > 0
+        ? null
+        : declarationMissing
+          ? "Secrets inconnus : aucune Déclaration lue."
+          : "Aucun secret déclaré.",
+    toolsNotice: plugin.tools.length > 0 ? null : "Aucun Tool exposé.",
+    instructionNote: instructionNotice(plugin),
     hasRequirements: plugin.config.length > 0 || plugin.secrets.length > 0,
   };
 }
@@ -485,18 +567,28 @@ export type PluginState =
   | "unsupported"
   | "invalid";
 
-const PLUGIN_STATES: Readonly<Record<PluginState, { label: string }>> = {
-  activated: { label: "Activé" },
-  failed: { label: "En échec" },
-  missing: { label: "Manquant" },
-  inactive: { label: "Inactif" },
-  unsupported: { label: "Non supporté" },
-  invalid: { label: "Invalide" },
+const PLUGIN_STATE_LABELS: Readonly<Record<PluginState, string>> = {
+  activated: "Activé",
+  failed: "En échec",
+  missing: "Manquant",
+  inactive: "Inactif",
+  unsupported: "Non supporté",
+  invalid: "Invalide",
 };
+
+/** Les six États de service, dans l'ordre du glossaire du Plugin Registry. */
+export const PLUGIN_STATES: readonly PluginState[] = [
+  "activated",
+  "failed",
+  "missing",
+  "inactive",
+  "unsupported",
+  "invalid",
+];
 
 /** Vrai si l'état est un état connu du Plugin Registry. */
 export function isPluginState(state: string): state is PluginState {
-  return Object.prototype.hasOwnProperty.call(PLUGIN_STATES, state);
+  return Object.prototype.hasOwnProperty.call(PLUGIN_STATE_LABELS, state);
 }
 
 /** Libellé d'un état de Plugin ; l'état brut passe s'il est inconnu. */
@@ -504,10 +596,250 @@ export function formatPluginState(state: string): string {
   if (!state) {
     return "Inconnu";
   }
-  return isPluginState(state) ? PLUGIN_STATES[state].label : state;
+  return isPluginState(state) ? PLUGIN_STATE_LABELS[state] : state;
 }
 
 /** Classe CSS bornée d'un état de Plugin (aucune injection de valeur brute). */
 export function pluginStateClass(state: string): string {
   return isPluginState(state) ? state : "unknown";
+}
+/** Compteurs de l'en-tête, recalculés à chaque instantané (jamais figés). */
+export interface PluginCounters {
+  /** Tous les dossiers installés, quel que soit leur état. */
+  discovered: number;
+  /** État `activated` uniquement : un plugin en échec n'est pas en service. */
+  activated: number;
+  /** État `failed` uniquement ; `missing` reste un manque, pas un échec de service. */
+  failed: number;
+}
+
+/** Une cellule de l'en-tête, avec son libellé français. */
+export interface PluginCounterItem {
+  key: keyof PluginCounters;
+  label: string;
+  value: number;
+}
+
+const COUNTER_LABELS: Readonly<Record<keyof PluginCounters, string>> = {
+  discovered: "Découverts",
+  activated: "En service",
+  failed: "En échec",
+};
+
+/** Compte les plugins du registre, exactement comme le flux les publie. */
+export function pluginCounters(
+  plugins: readonly PluginInfo[],
+): PluginCounters {
+  let activated = 0;
+  let failed = 0;
+  for (const plugin of plugins) {
+    if (plugin.state === "activated") {
+      activated += 1;
+    } else if (plugin.state === "failed") {
+      failed += 1;
+    }
+  }
+  return { discovered: plugins.length, activated, failed };
+}
+
+/** Ordonne les compteurs pour l'en-tête : découverts, en service, en échec. */
+export function pluginCounterItems(
+  counters: PluginCounters,
+): PluginCounterItem[] {
+  return (["discovered", "activated", "failed"] as const).map((key) => ({
+    key,
+    label: COUNTER_LABELS[key],
+    value: counters[key],
+  }));
+}
+
+/** Filtre du registre ; un état vide signifie « tous », un texte vide « tout ». */
+export interface PluginFilter {
+  state: string;
+  text: string;
+}
+
+/** Filtre neutre : tout le registre, dans l'ordre du flux. */
+export const EMPTY_PLUGIN_FILTER: PluginFilter = { state: "", text: "" };
+
+/** Options du filtre par État de service, « tous » en tête. */
+export const PLUGIN_STATE_FILTERS: ReadonlyArray<{
+  value: string;
+  label: string;
+}> = [
+  { value: "", label: "Tous les états" },
+  ...PLUGIN_STATES.map((state) => ({
+    value: state,
+    label: formatPluginState(state),
+  })),
+];
+
+/** Vrai dès qu'un critère restreint la liste. */
+export function pluginFilterActive(filter: PluginFilter): boolean {
+  return filter.state !== "" || filter.text.trim() !== "";
+}
+
+/**
+ * Texte dans lequel la recherche rapproche : nom, description, noms de Tools.
+ *
+ * L'état, le dossier et la raison d'échec en sont exclus : chercher « failed »
+ * ne doit pas ramener tous les plugins en échec, et une variable de chemin ne
+ * doit pas se confondre avec un nom de Tool.
+ */
+function searchableText(plugin: PluginInfo): string {
+  return normalizeText(
+    [plugin.name, plugin.declaration?.description ?? "", ...plugin.tools].join(
+      " ",
+    ),
+  );
+}
+
+/** Vrai si le plugin porte le texte cherché, casse et accents ignorés. */
+export function matchesPluginSearch(
+  plugin: PluginInfo,
+  text: string,
+): boolean {
+  const needle = normalizeText(text.trim());
+  return needle === "" || searchableText(plugin).includes(needle);
+}
+
+/** Vrai si le plugin passe le filtre d'état **et** la recherche. */
+export function matchesPluginFilter(
+  plugin: PluginInfo,
+  filter: PluginFilter,
+): boolean {
+  if (filter.state !== "" && plugin.state !== filter.state) {
+    return false;
+  }
+  return matchesPluginSearch(plugin, filter.text);
+}
+
+/** Lignes visibles, dans l'ordre du flux, sans tri ni copie de l'instantané. */
+export function filterPlugins(
+  plugins: readonly PluginInfo[],
+  filter: PluginFilter,
+): PluginInfo[] {
+  return plugins.filter((plugin) => matchesPluginFilter(plugin, filter));
+}
+
+/** Texte du résultat, annoncé dans une zone `aria-live`. */
+export interface PluginResultSummary {
+  label: string;
+  /** Vrai quand aucune ligne ne peut être rendue : le texte le dit alors. */
+  empty: boolean;
+}
+
+function plural(count: number, singular: string, pluralForm: string): string {
+  return count > 1 ? pluralForm : singular;
+}
+
+/**
+ * Phrase de résultat, y compris le cas vide explicite.
+ *
+ * Un registre vide et un registre filtré jusqu'à vide ne disent pas la même
+ * chose : le premier n'a rien à montrer, le second invite à relâcher le filtre.
+ */
+export function pluginResultSummary(
+  filter: PluginFilter,
+  counts: { total: number; shown: number },
+): PluginResultSummary {
+  if (counts.total === 0) {
+    return { label: "Aucun Plugin installé.", empty: true };
+  }
+  if (counts.shown === 0) {
+    return {
+      label: "Aucun Plugin ne correspond à la recherche et au filtre d'état.",
+      empty: true,
+    };
+  }
+  if (!pluginFilterActive(filter)) {
+    return {
+      label: `${counts.total} ${plural(
+        counts.total,
+        "Plugin installé",
+        "Plugins installés",
+      )}.`,
+      empty: false,
+    };
+  }
+  return {
+    label: `${counts.shown} ${plural(
+      counts.shown,
+      "Plugin affiché",
+      "Plugins affichés",
+    )} sur ${counts.total}.`,
+    empty: false,
+  };
+}
+
+/**
+ * Motif de rail d'un État de service.
+ *
+ * Six motifs se distinguent en noir et blanc : plein, creux, pointillé, brisé,
+ * hachuré, double. La couleur ne porte jamais l'information seule, et un état
+ * inconnu (trame partielle) retombe sur le creux plutôt que d'inventer un
+ * septième motif ou d'injecter la valeur brute dans une classe.
+ */
+export type PluginRailMotif =
+  | "solid"
+  | "hollow"
+  | "dotted"
+  | "broken"
+  | "hatched"
+  | "double";
+
+const RAIL_MOTIFS: Readonly<Record<PluginState, PluginRailMotif>> = {
+  activated: "solid",
+  inactive: "hollow",
+  missing: "dotted",
+  failed: "broken",
+  unsupported: "hatched",
+  invalid: "double",
+};
+
+/** Motif de rail borné pour un état ; `hollow` si l'état est inconnu. */
+export function pluginRailMotif(state: string): PluginRailMotif {
+  return pluginStateClass(state) === "unknown"
+    ? "hollow"
+    : RAIL_MOTIFS[state as PluginState];
+}
+
+/** Une ligne du registre, prête à rendre sans décision dans le composant. */
+export interface PluginRow {
+  name: string;
+  /** Nom affichable, jamais vide. */
+  nameLabel: string;
+  stateLabel: string;
+  /** Classe bornée de l'état, pour colorer le libellé sans jamais le remplacer. */
+  stateClass: string;
+  motif: PluginRailMotif;
+  description: string;
+  /** Description affichable, avec un manque dit explicitement. */
+  descriptionLabel: string;
+  toolCount: number;
+  /** « Aucun Tool », « 1 Tool » ou « N Tools ». */
+  toolsLabel: string;
+}
+
+/** Regroupe ce qu'une ligne affiche : identité courte, état et Tools. */
+export function pluginRow(plugin: PluginInfo): PluginRow {
+  const description = plugin.declaration?.description ?? "";
+  const toolCount = plugin.tools.length;
+  let toolsLabel = "Aucun Tool";
+  if (toolCount === 1) {
+    toolsLabel = "1 Tool";
+  } else if (toolCount > 1) {
+    toolsLabel = `${toolCount} Tools`;
+  }
+  return {
+    name: plugin.name,
+    nameLabel: plugin.name || "(sans nom)",
+    stateLabel: formatPluginState(plugin.state),
+    stateClass: pluginStateClass(plugin.state),
+    motif: pluginRailMotif(plugin.state),
+    description,
+    descriptionLabel: description || "Aucune description déclarée.",
+    toolCount,
+    toolsLabel,
+  };
 }
