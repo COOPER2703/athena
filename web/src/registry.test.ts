@@ -282,9 +282,7 @@ describe("pluginRow", () => {
       stateLabel: "Activé",
       stateClass: "activated",
       motif: "solid",
-      description: "Pilote la domotique",
       descriptionLabel: "Pilote la domotique",
-      toolCount: 2,
       toolsLabel: "2 Tools",
     });
   });

@@ -151,7 +151,7 @@ describe("pluginSheet", () => {
     expect(sheet.declarationMissing).toBe(false);
   });
 
-  it("omet api_version quand elle vaut zéro plutôt que d'afficher une fausse valeur", () => {
+  it("garde api_version avec « — » quand la valeur est inconnue", () => {
     const sheet = pluginSheet(
       normalizePlugin({
         name: "broken",
@@ -168,7 +168,13 @@ describe("pluginSheet", () => {
       }) as PluginInfo,
     );
 
-    expect(sheet.identity.map((fact) => fact.label)).not.toContain("api_version");
+    // La ligne reste : #157 exige de lire l'api_version d'un plugin, et une
+    // absence ne doit jamais passer pour la version « 0 ».
+    expect(sheet.identity).toContainEqual({
+      label: "api_version",
+      value: "—",
+      mono: true,
+    });
     expect(sheet.invalidReason).toBe("manifeste cassé");
     expect(sheet.failure).toBe("manifeste cassé");
   });
@@ -416,6 +422,47 @@ describe("pluginDiagnostic", () => {
     expect(diagnostic.secrets.state).toBe("ok");
   });
 
+  it("suit le ready du serveur même quand aucun manque n'est déduit des listes", () => {
+    const diagnostic = pluginDiagnostic(
+      normalizePlugin({
+        name: "notion",
+        state: "inactive",
+        declaration: {
+          description: "Pages Notion",
+          version: "0.1.0",
+          api_version: 1,
+          platform: "server",
+          directory: "plugins/notion",
+          invalid_reason: null,
+        },
+        config: [],
+        secrets: [],
+        // Le serveur sait quelque chose que les listes ne montrent pas : il
+        // fait foi tant qu'aucun manque visible ne le contredit.
+        ready: { manifest: true, config: false, secrets: true },
+      }) as PluginInfo,
+    );
+
+    expect(diagnostic.config.state).toBe("missing");
+    expect(diagnostic.config.gaps).toEqual([]);
+    expect(diagnostic.secrets.state).toBe("ok");
+    expect(diagnostic.ready).toBe(false);
+  });
+
+  it("retombe sur la déduction locale quand la trame ne publie pas ready", () => {
+    const diagnostic = pluginDiagnostic(
+      normalizePlugin({
+        ...configuredPlugin,
+        ready: null,
+      }) as PluginInfo,
+    );
+
+    expect(diagnostic.config.state).toBe("missing");
+    expect(diagnostic.secrets.state).toBe("missing");
+    expect(diagnostic.gaps).toContain("`parent_page_id` requis non renseigné");
+  });
+
+
   it("marque « non évaluable » un dossier sans Déclaration, sans inventer de manque", () => {
     const diagnostic = pluginDiagnostic(
       normalizePlugin({ name: "ghost", state: "missing" }) as PluginInfo,
@@ -616,6 +663,35 @@ describe("pluginSheet registry view", () => {
     );
   });
 
+  it("avertit explicitement qu'un plugin non supporté ne peut pas être activé", () => {
+    const sheet = pluginSheet(
+      normalizePlugin({
+        name: "mobile-shell",
+        state: "unsupported",
+        declaration: {
+          description: "Coque Android",
+          version: "0.1.0",
+          api_version: 1,
+          platform: "android",
+          directory: "plugins/mobile-shell",
+          invalid_reason: null,
+        },
+        ready: { manifest: true, config: true, secrets: true },
+      }) as PluginInfo,
+    );
+
+    // Les marqueurs peuvent être satisfaits sans qu'une activation soit
+    // possible ici : la note empêche de lire un « prêt » trompeur.
+    expect(sheet.diagnosticNote).toBe(
+      "Plateforme non supportée : l'activation n'est pas possible ici.",
+    );
+    expect(sheet.markers.map((marker) => marker.stateLabel)).toEqual([
+      "Satisfait",
+      "Satisfait",
+      "Satisfait",
+    ]);
+  });
+
   it("garde une fiche complète sans note d'absence de réglage", () => {
     const sheet = pluginSheet(
       normalizePlugin(configuredPlugin) as PluginInfo,
@@ -633,11 +709,11 @@ describe("pluginSheet registry view", () => {
 });
 
 describe("diagnostic source of truth", () => {
-  it("recalcule le diagnostic au lieu de faire confiance au ready du serveur", () => {
+  it("garde un manque visible même quand le serveur prétend que tout est prêt", () => {
     const plugin = normalizePlugin({
       ...configuredPlugin,
-      // Le serveur se tromperait (ou la trame serait ancienne) : la fiche nomme
-      // toujours les manques qu'elle peut lire, et ne montre jamais deux vérités.
+      // Le serveur se tromperait : les manques déduits des listes restent
+      // affichés, et « prêt » n'est jamais annoncé en leur présence.
       ready: { manifest: true, config: true, secrets: true },
     }) as PluginInfo;
 
@@ -648,6 +724,8 @@ describe("diagnostic source of truth", () => {
     });
     const diagnostic = pluginDiagnostic(plugin);
     expect(diagnostic.ready).toBe(false);
+    expect(diagnostic.config.state).toBe("missing");
+    expect(diagnostic.secrets.state).toBe("missing");
     expect(diagnostic.gaps).toContain("`parent_page_id` requis non renseigné");
     expect(diagnostic.gaps).toContain("`ATHENA_PLUGIN_NOTION_TOKEN` absente");
   });
