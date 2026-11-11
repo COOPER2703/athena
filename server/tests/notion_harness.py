@@ -1,6 +1,6 @@
 """Harnais partagé des tests du plugin ``notion``.
 
-Mêmes formes que ``test_plugins_websearch.py`` : un faux Gemini Live retient
+Mêmes formes que les autres tests de plugin : un faux Gemini Live retient
 les Configs ouvertes, l'App tourne pour de vrai sur une socket éphémère, et le
 plugin réel est copié dans ``tmp_path`` pour être activé par ``plugins.json``.
 Les projections d'objets Notion et la session de test vivent ici, une seule

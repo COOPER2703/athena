@@ -93,37 +93,9 @@ sont installés par `npx skills add` et épinglés dans `skills-lock.json`.
 
 ### Recherche web
 
-Le plugin `plugins/websearch/` (ADR-0018) expose à Gemini un seul Tool, `web_search`,
-adossé à Tavily : il rend des **Extraits de recherche** (titre, URL, extrait, date de
-publication quand elle existe) et Gemini reste le seul rédacteur de la réponse. Le dossier
-est versionné, mais **rien ne s'exécute tant qu'il n'est pas listé**.
-
-Pour l'activer, ajoutez `websearch` à la liste `enabled` du fichier d'état local
-`plugins.json` (non versionné) :
-
-```json
-{ "enabled": ["websearch"], "config": { "websearch": {} } }
-```
-
-Le manifeste déclare un secret **requis** : `ATHENA_PLUGIN_WEBSEARCH_API_KEY`, lu comme les
-autres secrets de plugin (environnement ou `.env`). Absent, le démarrage échoue
-explicitement en nommant la variable (code de sortie 2). Cinq options, toutes
-**optionnelles**, se placent sous `config.websearch` ; le plugin applique lui-même les
-défauts :
-
-- `base_url` : `https://api.tavily.com` (proxy ou moteur compatible) ;
-- `search_depth` : `basic` (`fast`, `basic` ou `advanced` ; `advanced` coûte deux crédits) ;
-- `language` : `fr` ;
-- `country` : `france` (envoyé seulement pour `topic: general`) ;
-- `strict_language` : `0` (`1` filtre strictement la langue au lieu de la biaiser).
-
-Au démarrage, `create()` sonde `GET /usage` : la clé est validée sans consommer de crédit,
-les crédits restants sont tracés (`CreditsRemaining`) et un quota épuisé avertit
-(`CreditsExhausted`). Une clé refusée ou un moteur injoignable n'est pas fatal : le plugin
-démarre **dégradé**, la Console le montre en `failed`, et le serveur retente toutes les 5 s ;
-il s'active seul quand le moteur revient. Une panne en cours de Session reste une phrase
-rendue au modèle, jamais un arrêt. La clé n'apparaît ni dans une Trace, ni dans le journal,
-ni dans l'instantané de la Console.
+Le plugin `plugins/websearch/` cherche sur le web via Tavily et expose à Gemini un seul Tool, `web_search`.
+Activation, secret, options et démarrage dégradé : `plugins/websearch/README.md` ; décisions
+et vocabulaire : `plugins/websearch/docs/adr/0001-recherche-web-par-plugin.md`, `plugins/websearch/GLOSSARY.md`.
 
 ### Image et déploiement
 
