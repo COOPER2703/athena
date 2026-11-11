@@ -531,10 +531,9 @@ class PluginLoader:
         Une clé laissée vide ou absente du fichier d'état vaut ``None`` : elle
         est au défaut du plugin. Une URL invalide est conservée telle quelle,
         pour que le diagnostic la nomme ; c'est la résolution stricte d'un
-        plugin retenu qui refusera le démarrage. Un résolveur qui échoue autre
-        chose que ``MissingSecretError`` est traité comme « absent » : ce
-        balayage ne doit jamais interrompre le démarrage pour un dossier non
-        retenu.
+        plugin retenu qui refusera le démarrage. Seul ``MissingSecretError``
+        vaut « absent » : toute autre exception du résolveur est un bogue, et
+        remonte plutôt que de se déguiser en secret manquant.
         """
         config: list[ConfigValue] = []
         for field in config_fields:
@@ -546,7 +545,7 @@ class PluginLoader:
             variable = secret_variable(name, field.key)
             try:
                 self._secrets.resolve(variable)
-            except Exception:
+            except MissingSecretError:
                 present = False
             else:
                 present = True

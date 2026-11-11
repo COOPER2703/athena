@@ -119,6 +119,13 @@ def _loader(root: Path, sink: RecordingTraceSink, env: dict[str, str] | None = N
     )
 
 
+class _BrokenSecretResolver:
+    """Résolveur qui échoue pour autre chose qu'un secret absent."""
+
+    def resolve(self, variable: str) -> str:
+        raise RuntimeError(f"résolveur cassé pour {variable}")
+
+
 def _load(
     loader: PluginLoader,
     registry: PluginRegistry | None = None,
@@ -1031,6 +1038,26 @@ def test_a_gap_in_the_settings_of_an_inactive_plugin_never_stops_the_scan(
             present=False,
         ),
     )
+
+
+def test_a_broken_secret_resolver_is_never_swallowed_as_absent(
+    tmp_path: Path,
+) -> None:
+    """Seul ``MissingSecretError`` vaut « absent » : un bogue du résolveur remonte."""
+    _write_plugin(
+        tmp_path,
+        manifest=_manifest(secrets=[{"key": "token", "required": True}]),
+    )
+    _write_state(tmp_path, enabled=[])
+    loader = PluginLoader(
+        directory=tmp_path / "plugins",
+        state_path=tmp_path / "plugins.json",
+        secrets=_BrokenSecretResolver(),
+        trace_sink=RecordingTraceSink(),
+    )
+
+    with pytest.raises(RuntimeError, match="résolveur cassé"):
+        _load(loader)
 
 
 def test_every_installed_directory_is_observed_including_unsupported_and_invalid(
