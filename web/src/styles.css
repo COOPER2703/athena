@@ -372,6 +372,122 @@ code,
   font-size: 0.75rem;
 }
 
+.plugin__settings {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--border);
+  border-left: 1px solid var(--border);
+}
+
+.plugin__setting {
+  display: grid;
+  grid-template-columns: minmax(7rem, 1fr) 5rem minmax(9rem, 2fr);
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.35rem 0.75rem;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8125rem;
+}
+
+.plugin__setting--secret {
+  grid-template-columns: minmax(7rem, 1fr) 5rem minmax(10rem, 2fr) 5rem;
+}
+
+.plugin__setting-key {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.plugin__setting-meta {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.plugin__setting-value,
+.plugin__setting-variable {
+  overflow-wrap: anywhere;
+}
+
+.plugin__setting-value--default {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.plugin__setting-variable {
+  color: var(--muted);
+}
+
+.plugin__setting-presence {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-align: right;
+}
+
+.plugin__setting-presence--present {
+  color: var(--accent);
+}
+
+.plugin__setting-presence--absent {
+  color: var(--danger);
+}
+
+.plugin__diagnostic {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--border);
+  border-left: 1px solid var(--border);
+}
+
+.plugin__marker {
+  padding: 0.35rem 0.75rem;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8125rem;
+}
+
+.plugin__marker-label {
+  font-weight: 600;
+}
+
+.plugin__marker-state {
+  margin-left: 0.5rem;
+  font-size: 0.75rem;
+}
+
+.plugin__marker--ok .plugin__marker-state {
+  color: var(--accent);
+}
+
+.plugin__marker--missing .plugin__marker-state {
+  color: var(--danger);
+}
+
+.plugin__marker--unknown .plugin__marker-state {
+  color: var(--muted);
+}
+
+.plugin__marker-note {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.plugin__gaps {
+  margin: 0.25rem 0 0;
+  padding-left: 1rem;
+}
+
+.plugin__gap {
+  color: var(--danger);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
 .facts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
@@ -583,5 +699,15 @@ code,
 
   .fact {
     border-right: 0;
+  }
+
+  .plugin__setting,
+  .plugin__setting--secret {
+    grid-template-columns: 1fr;
+    gap: 0.15rem;
+  }
+
+  .plugin__setting-presence {
+    text-align: left;
   }
 }
