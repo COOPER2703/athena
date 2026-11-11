@@ -69,7 +69,7 @@ function PluginSheetView({ plugin }: { plugin: PluginInfo }) {
 
       {sheet.invalidReason !== null ? (
         <div className="plugin__failure">
-          <h3 className="plugin__section-title">Manifeste invalide</h3>
+          <h3 className="plugin__section-title">Déclaration invalide</h3>
           <p className="plugin__message mono">{sheet.invalidReason}</p>
         </div>
       ) : null}

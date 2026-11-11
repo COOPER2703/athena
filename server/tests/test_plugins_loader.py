@@ -119,6 +119,13 @@ def _loader(root: Path, sink: RecordingTraceSink, env: dict[str, str] | None = N
     )
 
 
+class _BrokenSecretResolver:
+    """Résolveur qui échoue pour autre chose qu'un secret absent."""
+
+    def resolve(self, variable: str) -> str:
+        raise RuntimeError(f"résolveur cassé pour {variable}")
+
+
 def _load(
     loader: PluginLoader,
     registry: PluginRegistry | None = None,
@@ -654,6 +661,8 @@ def test_a_failing_create_is_traced_failed_and_kept_for_retry(tmp_path: Path) ->
     assert failed.payload["state"] == "failed"
     assert "PluginUnavailable" in failed.payload["reason"]
     assert "unreachable" in failed.payload["reason"]
+    # Une retente est encore attendue : la trace le dit, comme le registre.
+    assert failed.payload["retry"] is True
     assert loader.pending == (FIXTURE_NAME,)
 
     remaining = asyncio.run(
@@ -666,6 +675,8 @@ def test_a_failing_create_is_traced_failed_and_kept_for_retry(tmp_path: Path) ->
     assert registry.state_of(FIXTURE_NAME) == "activated"
     states = [entry.payload["state"] for entry in sink.of_kind("PluginState")]
     assert states == ["failed", "activated"]
+    # Réparé : plus aucune retente à annoncer, donc pas de champ ``retry``.
+    assert "retry" not in sink.of_kind("PluginState")[-1].payload
 
 
 def test_a_retry_that_fails_again_is_traced_and_kept(tmp_path: Path) -> None:
@@ -683,6 +694,7 @@ def test_a_retry_that_fails_again_is_traced_and_kept(tmp_path: Path) -> None:
     states = [entry.payload["state"] for entry in sink.of_kind("PluginState")]
     assert states == ["failed", "failed"]
     assert "toujours injoignable" in sink.of_kind("PluginState")[-1].payload["reason"]
+    assert sink.of_kind("PluginState")[-1].payload["retry"] is True
 
 
 def test_a_retry_never_retries_a_structural_defect(tmp_path: Path) -> None:
@@ -796,6 +808,10 @@ def test_a_fatal_defect_discovered_at_retry_is_permanently_dropped(
     assert retry.level == "error"
     assert "TypeError" in retry.payload["reason"]
     assert "bogue du plugin" in retry.payload["reason"]
+    # Le plugin est oublié de la retente : le registre et la trace disent
+    # tous deux ``false``, sans qu'une tentative à venir soit annoncée.
+    assert registry.retry_of(FIXTURE_NAME) is False
+    assert retry.payload["retry"] is False
 
 
 def test_a_failing_plugin_exposes_its_reason_and_pending_retry(tmp_path: Path) -> None:
@@ -1031,6 +1047,26 @@ def test_a_gap_in_the_settings_of_an_inactive_plugin_never_stops_the_scan(
             present=False,
         ),
     )
+
+
+def test_a_broken_secret_resolver_is_never_swallowed_as_absent(
+    tmp_path: Path,
+) -> None:
+    """Seul ``MissingSecretError`` vaut « absent » : un bogue du résolveur remonte."""
+    _write_plugin(
+        tmp_path,
+        manifest=_manifest(secrets=[{"key": "token", "required": True}]),
+    )
+    _write_state(tmp_path, enabled=[])
+    loader = PluginLoader(
+        directory=tmp_path / "plugins",
+        state_path=tmp_path / "plugins.json",
+        secrets=_BrokenSecretResolver(),
+        trace_sink=RecordingTraceSink(),
+    )
+
+    with pytest.raises(RuntimeError, match="résolveur cassé"):
+        _load(loader)
 
 
 def test_every_installed_directory_is_observed_including_unsupported_and_invalid(

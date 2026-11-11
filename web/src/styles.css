@@ -196,6 +196,11 @@ code,
   font-weight: 600;
 }
 
+.badge--muted {
+  border-color: var(--border);
+  color: var(--muted);
+}
+
 .client-list {
   margin: 0;
   padding: 0;

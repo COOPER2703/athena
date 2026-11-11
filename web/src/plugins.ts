@@ -8,12 +8,13 @@
  * matière de la fiche (identité, Tools, Instruction, panne) pour que le
  * composant n'ait aucune logique à porter.
  *
- * Source de vérité du diagnostic : l'interface recalcule tout avec
- * `pluginDiagnostic`, à partir du manifeste, des `required` et des
- * `value`/`present`. Le champ `ready` publié par le serveur n'est qu'une forme
- * de transport JSON : il n'est jamais rendu, pour qu'une trame ancienne ou un
- * désaccord serveur ne fasse pas coexister deux vérités contradictoires. Le
- * diagnostic calculé nomme les manques et sait dire « non évaluable ».
+ * Source de vérité du diagnostic : quand le serveur publie `ready`, il fait foi
+ * pour la configuration et les secrets — l'interface ne recalcule jamais deux
+ * vérités concurrentes. Les **manques** restent déduits des listes
+ * (`required` + `value`/`present`) pour les nommer, et un manque visible
+ * l'emporte toujours sur un `ready` qui prétendrait le contraire. Sans
+ * `ready` (trame ancienne), on retombe sur la déduction locale ; le diagnostic
+ * calculé sait aussi dire « non évaluable ».
  */
 
 import { normalizeText } from "./filters";
@@ -70,11 +71,11 @@ export interface PluginInfo {
   config: PluginConfigField[];
   secrets: PluginSecretField[];
   /**
-   * Marqueurs publiés par le serveur, gardés pour la forme JSON.
+   * Marqueurs publiés par le serveur ; `null` sur une trame ancienne.
    *
-   * L'interface ne rend jamais ce champ : elle recalcule le diagnostic avec
-   * `pluginDiagnostic`, qui nomme les manques et sait dire « non évaluable ».
-   * Une seule vérité est affichée, même si le serveur et le manifeste divergent.
+   * Ils font foi pour la configuration et les secrets dès qu'ils sont
+   * présents : l'interface déduit encore les manques pour les nommer, mais ne
+   * conclut jamais « satisfait » contre un manque visible.
    */
   ready: PluginReady | null;
 }
@@ -341,13 +342,48 @@ function secretGaps(plugin: PluginInfo): string[] {
     .map((field) => `\`${field.variable || field.key}\` absente`);
 }
 
+/**
+ * Un marqueur de réglage : le `ready` du serveur fait foi, les manques nommés.
+ *
+ * Un `ready` contradictoire n'annonce jamais « satisfait » quand un manque est
+ * visible : le manque gagne. Sans `ready` (trame ancienne), la déduction
+ * locale reste la seule information disponible.
+ */
+function requirementMarker(
+  key: "config" | "secrets",
+  label: string,
+  evaluable: boolean,
+  ready: boolean | undefined,
+  gaps: string[],
+  unevaluableNote: string,
+): PluginMarker {
+  if (!evaluable) {
+    return {
+      key,
+      label,
+      state: "unknown",
+      gaps: [],
+      note: unevaluableNote,
+    };
+  }
+  const satisfied = (ready ?? true) && gaps.length === 0;
+  return {
+    key,
+    label,
+    state: satisfied ? "ok" : "missing",
+    gaps,
+    note: null,
+  };
+}
+
 /** Diagnostic « prêt à activer » : trois marqueurs et les manques nommés.
  *
- * Le serveur ne fournit aucune phrase : tout se déduit des `required`, des
- * `value`/`present` et du manifeste. Un dossier sans manifeste lisible n'est
- * pas « prêt » et n'invente pas de manque : ses marqueurs de configuration et
- * de secrets sont *non évaluables*, une distinction que l'interface doit
- * rendre visible.
+ * Le serveur ne fournit aucune phrase : les manques se déduisent des
+ * `required`, des `value`/`present` et du manifeste. Son `ready` fait foi pour
+ * la configuration et les secrets, mais un manque visible l'emporte. Un
+ * dossier sans manifeste lisible n'est pas « prêt » et n'invente pas de
+ * manque : ses marqueurs sont *non évaluables*, une distinction que
+ * l'interface doit rendre visible.
  */
 export function pluginDiagnostic(plugin: PluginInfo): PluginDiagnostic {
   const declaration = plugin.declaration;
@@ -385,36 +421,22 @@ export function pluginDiagnostic(plugin: PluginInfo): PluginDiagnostic {
     "Non évaluable : le manifeste ne permet pas de lire les exigences.";
   const configGapList = manifestKnown ? configGaps(plugin) : [];
   const secretGapList = manifestKnown ? secretGaps(plugin) : [];
-  const config: PluginMarker = manifestKnown
-    ? {
-        key: "config",
-        label: "Configuration requise",
-        state: configGapList.length > 0 ? "missing" : "ok",
-        gaps: configGapList,
-        note: null,
-      }
-    : {
-        key: "config",
-        label: "Configuration requise",
-        state: "unknown",
-        gaps: [],
-        note: unevaluable,
-      };
-  const secrets: PluginMarker = manifestKnown
-    ? {
-        key: "secrets",
-        label: "Secrets requis",
-        state: secretGapList.length > 0 ? "missing" : "ok",
-        gaps: secretGapList,
-        note: null,
-      }
-    : {
-        key: "secrets",
-        label: "Secrets requis",
-        state: "unknown",
-        gaps: [],
-        note: unevaluable,
-      };
+  const config = requirementMarker(
+    "config",
+    "Configuration requise",
+    manifestKnown,
+    plugin.ready?.config,
+    configGapList,
+    unevaluable,
+  );
+  const secrets = requirementMarker(
+    "secrets",
+    "Secrets requis",
+    manifestKnown,
+    plugin.ready?.secrets,
+    secretGapList,
+    unevaluable,
+  );
 
   const markers = [manifest, config, secrets];
   return {
@@ -464,7 +486,8 @@ function markerView(marker: PluginMarker): PluginMarkerView {
 /**
  * Regroupe la fiche : identité déclarée, réglages, diagnostic, Tools et panne.
  *
- * Une `api_version` nulle est omise : l'afficher comme « 0 » ferait passer une
+ * La ligne `api_version` est toujours rendue dès qu'une Déclaration existe :
+ * une valeur inconnue s'affiche « — », jamais « 0 » qui ferait passer une
  * absence de lecture pour une version réelle. Un dossier sans Déclaration le
  * dit par `declarationMissing`, pour que l'interface n'invente rien.
  */
@@ -481,13 +504,11 @@ export function pluginSheet(plugin: PluginInfo): PluginSheet {
       value: declaration.version || "—",
       mono: true,
     });
-    if (declaration.apiVersion > 0) {
-      identity.push({
-        label: "api_version",
-        value: String(declaration.apiVersion),
-        mono: true,
-      });
-    }
+    identity.push({
+      label: "api_version",
+      value: declaration.apiVersion > 0 ? String(declaration.apiVersion) : "—",
+      mono: true,
+    });
     identity.push({
       label: "Plateforme",
       value: declaration.platform || "—",
@@ -501,6 +522,13 @@ export function pluginSheet(plugin: PluginInfo): PluginSheet {
   const invalidReason = declaration?.invalidReason ?? null;
   const diagnostic = pluginDiagnostic(plugin);
   const declarationMissing = declaration === null;
+  // Une plateforme non supportée n'est jamais activable ici : le diagnostic
+  // reste rendu pour les états de #158, mais la note empêche de lire ses
+  // marqueurs satisfaits comme une promesse d'activation.
+  const unsupportedNote =
+    plugin.state === "unsupported"
+      ? "Plateforme non supportée : l'activation n'est pas possible ici."
+      : null;
   return {
     identity,
     tools: plugin.tools,
@@ -522,9 +550,11 @@ export function pluginSheet(plugin: PluginInfo): PluginSheet {
       markerView(diagnostic.config),
       markerView(diagnostic.secrets),
     ],
-    diagnosticNote: diagnostic.unknown
-      ? "Diagnostic partiel : des exigences restent illisibles."
-      : null,
+    diagnosticNote:
+      unsupportedNote ??
+      (diagnostic.unknown
+        ? "Diagnostic partiel : des exigences restent illisibles."
+        : null),
     configNotice:
       plugin.config.length > 0
         ? null
@@ -813,10 +843,8 @@ export interface PluginRow {
   /** Classe bornée de l'état, pour colorer le libellé sans jamais le remplacer. */
   stateClass: string;
   motif: PluginRailMotif;
-  description: string;
   /** Description affichable, avec un manque dit explicitement. */
   descriptionLabel: string;
-  toolCount: number;
   /** « Aucun Tool », « 1 Tool » ou « N Tools ». */
   toolsLabel: string;
 }
@@ -837,9 +865,7 @@ export function pluginRow(plugin: PluginInfo): PluginRow {
     stateLabel: formatPluginState(plugin.state),
     stateClass: pluginStateClass(plugin.state),
     motif: pluginRailMotif(plugin.state),
-    description,
     descriptionLabel: description || "Aucune description déclarée.",
-    toolCount,
     toolsLabel,
   };
 }

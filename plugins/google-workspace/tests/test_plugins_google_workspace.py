@@ -3636,10 +3636,12 @@ def test_all_accounts_failing_degrades_the_start_and_retries_globally(
                 [last] = [
                     entry
                     for entry in sink.of_kind("PluginState")
-                    if entry.payload.get("retry") is True
-                    and entry.payload["state"] == "activated"
+                    if entry.payload["state"] == "activated"
                 ]
                 assert last.payload["tools"] == 9
+                # La reprise réussie n'annonce plus de retente : seule une
+                # trace ``failed`` encore retentée porte ``retry``.
+                assert "retry" not in last.payload
 
                 unavailable = sink.of_kind("AccountUnavailable")
                 assert {entry.payload["account"] for entry in unavailable} == {

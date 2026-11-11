@@ -1205,7 +1205,8 @@ def test_build_app_serves_the_six_service_states_without_disabled(
             assert broken["retry"] is False
             assert broken["instruction"] == ""
             # Un manifeste illisible n'invente aucune exigence : listes vides,
-            # diagnostic borné au marqueur du manifeste.
+            # donc les marqueurs de configuration/secrets restent satisfaits
+            # faute d'exigence lisible ; seul le manifeste est en défaut.
             assert broken["config"] == []
             assert broken["secrets"] == []
             assert broken["ready"] == {
@@ -1237,14 +1238,15 @@ def test_build_app_serves_the_six_service_states_without_disabled(
             assert ghost["declaration"] is None
             assert ghost["reason"] is None
             assert ghost["instruction"] == ""
-            # Sans Déclaration, aucune exigence n'est connue : listes vides et
-            # marqueurs de configuration/secrets vrais faute d'exigence.
+            # Sans Déclaration, rien n'est assertable : listes vides et trois
+            # marqueurs faux plutôt qu'un « prêt » fondé sur des exigences
+            # qu'on n'a pas pu lire.
             assert ghost["config"] == []
             assert ghost["secrets"] == []
             assert ghost["ready"] == {
                 "manifest": False,
-                "config": True,
-                "secrets": True,
+                "config": False,
+                "secrets": False,
             }
 
             mobile = by_name["mobile"]
@@ -1445,17 +1447,19 @@ def test_build_app_serves_plugin_settings_and_readiness_without_secret_values(
             }
 
             # Ni manifeste lisible ni exigences connues : aucune liste inventée,
-            # et les deux marqueurs sans exigence restent vrais.
+            # et aucun marqueur n'affirme un « prêt » invérifiable.
             ghost_entry = by_name["ghost"]
             assert ghost_entry["declaration"] is None
             assert ghost_entry["config"] == []
             assert ghost_entry["secrets"] == []
             assert ghost_entry["ready"] == {
                 "manifest": False,
-                "config": True,
-                "secrets": True,
+                "config": False,
+                "secrets": False,
             }
 
+            # Un manifeste invalide n'a pas de Déclaration exploitable : listes
+            # vides, donc seuls les marqueurs sans exigence restent satisfaits.
             broken_entry = by_name["broken"]
             assert broken_entry["declaration"]["invalid_reason"] is not None
             assert broken_entry["config"] == []

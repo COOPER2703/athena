@@ -203,11 +203,7 @@ class PluginLoader:
             self._record_state(registry, name, "missing")
             return
         manifest = self._read_manifest(name, plugin_dir)
-        registry.declare(name, _declaration(manifest, plugin_dir))
-        registry.observe(
-            name,
-            self._observe(name, manifest.config, manifest.secrets, raw_config),
-        )
+        self._declare(registry, name, _declaration(manifest, plugin_dir), raw_config)
         if manifest.platform != SERVER_PLATFORM:
             # Une plateforme cliente n'est jamais chargée par le serveur : le
             # plugin reste inerte ici, sans faire échouer le démarrage.
@@ -259,7 +255,7 @@ class PluginLoader:
                 )
             except _CreateFailure as failure:
                 self._record_state(
-                    registry, name, "failed", reason=failure.reason, retry=True
+                    registry, name, "failed", reason=failure.reason
                 )
                 continue
             except PluginLoadError as exc:
@@ -271,7 +267,6 @@ class PluginLoader:
                     name,
                     "failed",
                     reason=_redact(str(exc), pending.secrets.values()),
-                    retry=True,
                     level="error",
                 )
                 continue
@@ -284,12 +279,11 @@ class PluginLoader:
                     name,
                     "failed",
                     reason=_redact(str(exc), pending.secrets.values()),
-                    retry=True,
                     level="error",
                 )
                 continue
             self._record_state(
-                registry, name, "activated", tools=len(binding.tools), retry=True
+                registry, name, "activated", tools=len(binding.tools)
             )
         return self.pending
 
@@ -409,12 +403,9 @@ class PluginLoader:
         try:
             data = self._read_manifest_data(name, plugin_dir)
         except PluginLoadError as exc:
-            reason = _redact(str(exc), ())
-            declaration = self._raw_declaration(
-                name, plugin_dir, {}, invalid_reason=reason
+            self._mark_invalid(
+                name, registry, plugin_dir, {}, _redact(str(exc), ()), raw_config
             )
-            self._declare(registry, name, declaration, raw_config)
-            self._record_state(registry, name, "invalid", reason=reason)
             return
         platform = data.get("platform")
         if (
@@ -431,15 +422,32 @@ class PluginLoader:
         try:
             manifest = self._parse_manifest(name, plugin_dir, data)
         except PluginLoadError as exc:
-            reason = _redact(str(exc), ())
-            declaration = self._raw_declaration(
-                name, plugin_dir, data, invalid_reason=reason
+            self._mark_invalid(
+                name, registry, plugin_dir, data, _redact(str(exc), ()), raw_config
             )
-            self._declare(registry, name, declaration, raw_config)
-            self._record_state(registry, name, "invalid", reason=reason)
             return
         self._declare(registry, name, _declaration(manifest, plugin_dir), raw_config)
         self._record_state(registry, name, "inactive")
+
+    def _mark_invalid(
+        self,
+        name: str,
+        registry: PluginRegistry,
+        plugin_dir: Path,
+        data: dict,
+        reason: str,
+        raw_config: Mapping[str, object],
+    ) -> None:
+        """Trace un dossier non retenu au manifeste cassé, sans interrompre le scan.
+
+        L'identité se limite à ce qui reste lisible : ``data`` est vide quand
+        le manifeste n'a pas pu être lu du tout.
+        """
+        declaration = self._raw_declaration(
+            name, plugin_dir, data, invalid_reason=reason
+        )
+        self._declare(registry, name, declaration, raw_config)
+        self._record_state(registry, name, "invalid", reason=reason)
 
     def _declare(
         self,
@@ -531,10 +539,9 @@ class PluginLoader:
         Une clé laissée vide ou absente du fichier d'état vaut ``None`` : elle
         est au défaut du plugin. Une URL invalide est conservée telle quelle,
         pour que le diagnostic la nomme ; c'est la résolution stricte d'un
-        plugin retenu qui refusera le démarrage. Un résolveur qui échoue autre
-        chose que ``MissingSecretError`` est traité comme « absent » : ce
-        balayage ne doit jamais interrompre le démarrage pour un dossier non
-        retenu.
+        plugin retenu qui refusera le démarrage. Seul ``MissingSecretError``
+        vaut « absent » : toute autre exception du résolveur est un bogue, et
+        remonte plutôt que de se déguiser en secret manquant.
         """
         config: list[ConfigValue] = []
         for field in config_fields:
@@ -546,7 +553,7 @@ class PluginLoader:
             variable = secret_variable(name, field.key)
             try:
                 self._secrets.resolve(variable)
-            except Exception:
+            except MissingSecretError:
                 present = False
             else:
                 present = True
@@ -757,24 +764,22 @@ class PluginLoader:
         *,
         level: str = "info",
         reason: str | None = None,
-        retry: bool | None = None,
         **extra: object,
     ) -> None:
         """Met à jour l'état du plugin dans le registre, puis le trace.
 
         Le registre porte l'état lisible (glossaire), la raison expurgée et
         l'attente de retente ; la trace reste le flux d'observabilité, avec les
-        mêmes payloads qu'avant. La retente du registre suit ``_pending`` :
-        seule une tentative encore à venir est annoncée, pas une tentative qui
-        vient d'échouer définitivement.
+        mêmes payloads qu'avant. Une seule vérité pour la retente : elle se
+        déduit de ``_pending``, et seule une trace ``failed`` l'annonce — un
+        état réparé ou structurellement perdu n'a plus de tentative à venir.
         """
-        registry.mark_state(
-            plugin, state, reason=reason, retry=plugin in self._pending
-        )
+        retry = plugin in self._pending
+        registry.mark_state(plugin, state, reason=reason, retry=retry)
         payload: dict[str, object] = {"plugin": plugin, "state": state, **extra}
         if reason is not None:
             payload["reason"] = reason
-        if retry is not None:
+        if state == "failed":
             payload["retry"] = retry
         emit(
             self._trace_sink,

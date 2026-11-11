@@ -199,14 +199,15 @@ def _plugin_ready(
 ) -> Mapping[str, bool]:
     """Trois marqueurs distincts : manifeste, configuration requise, secrets.
 
-    Un dossier sans Déclaration n'a aucune exigence connue : seul le marqueur
-    ``manifest`` est faux, les deux autres restent vrais faute d'exigence à
-    satisfaire. L'interface les présente comme « non évaluables », jamais comme
-    des manques réels. Les manques eux-mêmes ne sont pas des phrases ici : ils
-    se déduisent des listes ``config`` et ``secrets``.
+    Un dossier sans Déclaration n'a aucune exigence **assertable** : les trois
+    marqueurs sont faux, car rien ne permet de dire que le plugin est prêt. Un
+    manifeste invalide n'invalide que le marqueur ``manifest`` ; ses listes
+    d'exigences restent évaluées telles quelles, éventuellement vides. Les
+    manques eux-mêmes ne sont pas des phrases ici : ils se déduisent des listes
+    ``config`` et ``secrets``.
     """
     if declaration is None:
-        return {"manifest": False, "config": True, "secrets": True}
+        return {"manifest": False, "config": False, "secrets": False}
     values = (
         {item.key: item.value for item in observation.config}
         if observation is not None
