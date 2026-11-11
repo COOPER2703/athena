@@ -259,7 +259,7 @@ class PluginLoader:
                 )
             except _CreateFailure as failure:
                 self._record_state(
-                    registry, name, "failed", reason=failure.reason, retry=True
+                    registry, name, "failed", reason=failure.reason
                 )
                 continue
             except PluginLoadError as exc:
@@ -271,7 +271,6 @@ class PluginLoader:
                     name,
                     "failed",
                     reason=_redact(str(exc), pending.secrets.values()),
-                    retry=True,
                     level="error",
                 )
                 continue
@@ -284,12 +283,11 @@ class PluginLoader:
                     name,
                     "failed",
                     reason=_redact(str(exc), pending.secrets.values()),
-                    retry=True,
                     level="error",
                 )
                 continue
             self._record_state(
-                registry, name, "activated", tools=len(binding.tools), retry=True
+                registry, name, "activated", tools=len(binding.tools)
             )
         return self.pending
 
@@ -756,24 +754,22 @@ class PluginLoader:
         *,
         level: str = "info",
         reason: str | None = None,
-        retry: bool | None = None,
         **extra: object,
     ) -> None:
         """Met à jour l'état du plugin dans le registre, puis le trace.
 
         Le registre porte l'état lisible (glossaire), la raison expurgée et
         l'attente de retente ; la trace reste le flux d'observabilité, avec les
-        mêmes payloads qu'avant. La retente du registre suit ``_pending`` :
-        seule une tentative encore à venir est annoncée, pas une tentative qui
-        vient d'échouer définitivement.
+        mêmes payloads qu'avant. Une seule vérité pour la retente : elle se
+        déduit de ``_pending``, et seule une trace ``failed`` l'annonce — un
+        état réparé ou structurellement perdu n'a plus de tentative à venir.
         """
-        registry.mark_state(
-            plugin, state, reason=reason, retry=plugin in self._pending
-        )
+        retry = plugin in self._pending
+        registry.mark_state(plugin, state, reason=reason, retry=retry)
         payload: dict[str, object] = {"plugin": plugin, "state": state, **extra}
         if reason is not None:
             payload["reason"] = reason
-        if retry is not None:
+        if state == "failed":
             payload["retry"] = retry
         emit(
             self._trace_sink,
