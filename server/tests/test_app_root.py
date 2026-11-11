@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import socket
 from pathlib import Path
 from typing import Callable, TypeVar
@@ -820,6 +821,47 @@ def _install_fixture_plugin(tmp_path: Path) -> tuple[Path, Path]:
     return plugins_dir, state_path
 
 
+FAILING_PLUGIN_CODE = '''
+from plugin_api import PluginUnavailable
+
+
+def create(context):
+    raise PluginUnavailable("home assistant injoignable")
+'''
+
+
+def _write_declared_plugin(
+    plugins_dir: Path,
+    name: str,
+    *,
+    platform: str = "server",
+    code: str | None = None,
+    manifest: str | None = None,
+) -> None:
+    """Installe un dossier avec manifeste et code, ou un manifeste brut."""
+    plugin_dir = plugins_dir / name
+    plugin_dir.mkdir(parents=True)
+    if manifest is not None:
+        (plugin_dir / "plugin.json").write_text(manifest, encoding="utf-8")
+    else:
+        (plugin_dir / "plugin.json").write_text(
+            json.dumps(
+                {
+                    "api_version": 1,
+                    "name": name,
+                    "version": "0.1.0",
+                    "description": f"Plugin {name}",
+                    "platform": platform,
+                    "entrypoint": "plugin.py",
+                }
+            ),
+            encoding="utf-8",
+        )
+    (plugin_dir / "plugin.py").write_text(
+        FAILING_PLUGIN_CODE if code is None else code, encoding="utf-8"
+    )
+
+
 def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -1051,6 +1093,82 @@ def test_build_app_serves_plugins_and_safe_config_in_the_snapshot(
             }
             assert "api_key" not in snapshot["config"]
             assert "test-key" not in json.dumps(snapshot)
+        finally:
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+
+    asyncio.run(scenario())
+
+
+def test_build_app_serves_the_six_service_states_without_disabled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Câblage réel : le registre expose chaque dossier installé, chargé ou non."""
+
+    async def scenario() -> None:
+        plugins_dir, state_path = _install_fixture_plugin(tmp_path)
+        # En échec retentable, mais retenu.
+        _write_declared_plugin(plugins_dir, "failing")
+        # Installé, jamais retenu : seul son manifeste est lu.
+        _write_declared_plugin(plugins_dir, "dormant", code="raise RuntimeError('jamais importé')")
+        # Plateforme cliente : jamais chargée non plus.
+        _write_declared_plugin(plugins_dir, "mobile", platform="desktop")
+        # Manifeste cassé, hors liste d'activation : invalide, pas fatal.
+        (plugins_dir / "broken").mkdir()
+        (plugins_dir / "broken" / "plugin.json").write_text(
+            "{pas du json", encoding="utf-8"
+        )
+        state_path.write_text(
+            json.dumps(
+                {
+                    "enabled": ["failing", "fixture", "ghost"],
+                    "config": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "server.app.root.SentenceTransformerEmbedder", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            "server.app.root.SqliteMemoryStore", lambda *a, **k: FakeMemory()
+        )
+        port = _free_port()
+        console_port = _free_port()
+        config = AppConfig(
+            gemini=GeminiConfig(api_key="test-key"),
+            server=ServerConfig(host="127.0.0.1", port=port),
+            console=ConsoleConfig(port=console_port),
+            webhook=WebhookConfig(enabled=False),
+            plugins=PluginsConfig(
+                directory=str(plugins_dir), state_path=str(state_path)
+            ),
+            log_dir=str(tmp_path),
+            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
+        )
+        app = build_app(config, secrets=EnvSecretResolver({}), env={}, env_file=None)
+        runner = asyncio.create_task(app.run())
+        try:
+            base_url = f"http://127.0.0.1:{console_port}"
+            async with console_session(base_url) as http:
+                await install_console(http, base_url, tmp_path / "server.log")
+                snapshot = await _snapshot_when_ready(
+                    http, f"{base_url}/api/status"
+                )
+
+            assert snapshot["plugins"] == [
+                {"name": "broken", "state": "invalid", "tools": []},
+                {"name": "dormant", "state": "inactive", "tools": []},
+                {"name": "failing", "state": "failed", "tools": []},
+                {"name": "fixture", "state": "activated", "tools": ["fixture__echo"]},
+                {"name": "ghost", "state": "missing", "tools": []},
+                {"name": "mobile", "state": "unsupported", "tools": []},
+            ]
+            assert "disabled" not in json.dumps(snapshot)
+            # L'instantané sert un état observé au démarrage : supprimer les
+            # dossiers ne le change pas, aucune I/O n'a lieu à sa construction.
+            shutil.rmtree(plugins_dir)
+            assert app.snapshot()["plugins"] == snapshot["plugins"]
         finally:
             app.request_shutdown()
             await asyncio.wait_for(runner, 1.0)
