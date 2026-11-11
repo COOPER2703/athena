@@ -93,6 +93,11 @@ class PluginRegistry:
         self._instructions: dict[str, str] = {}
         self._states: dict[str, str] = {}
         self._declarations: dict[str, PluginDeclaration] = {}
+        # Raison d'échec expurgée et attente de retente, tenues à côté de
+        # l'état : la fiche de la Console les lit sans relire la Trace qui les
+        # a annoncées.
+        self._reasons: dict[str, str] = {}
+        self._retries: dict[str, bool] = {}
 
     @property
     def tools(self) -> ToolRegistry:
@@ -112,6 +117,22 @@ class PluginRegistry:
         """État de service d'un plugin, ``None`` s'il n'a jamais été vu."""
         return self._states.get(plugin)
 
+    def reason_of(self, plugin: str) -> str | None:
+        """Raison d'échec expurgée d'un plugin, ``None`` s'il n'a pas échoué."""
+        return self._reasons.get(plugin)
+
+    def retry_of(self, plugin: str) -> bool:
+        """Vrai si une retente en tâche de fond est attendue pour ce plugin."""
+        return self._retries.get(plugin, False)
+
+    def instruction_of(self, plugin: str) -> str:
+        """Instruction d'un plugin chargé ; chaîne vide s'il n'en fournit pas.
+
+        Un plugin non chargé n'a jamais d'Instruction : le registre le dit par
+        la chaîne vide, que la Console traduit en absence explicite.
+        """
+        return self._instructions.get(plugin, "")
+
     def declaration_of(self, plugin: str) -> PluginDeclaration | None:
         """Déclaration d'un plugin installé, ``None`` si aucun manifeste lu."""
         return self._declarations.get(plugin)
@@ -123,17 +144,32 @@ class PluginRegistry:
             raise ValueError("plugin name is required")
         self._declarations[name] = declaration
 
-    def mark_state(self, plugin: str, state: str) -> None:
-        """Enregistre l'état de service d'un plugin.
+    def mark_state(
+        self,
+        plugin: str,
+        state: str,
+        *,
+        reason: str | None = None,
+        retry: bool = False,
+    ) -> None:
+        """Enregistre l'état de service d'un plugin et ce qui l'explique.
 
         Les états sont ceux du glossaire ; une valeur inconnue signale une
-        dérive du chargeur, pas une donnée utilisateur.
+        dérive du chargeur, pas une donnée utilisateur. ``reason`` et ``retry``
+        sont remplacés à chaque transition : une panne réparée n'a plus de
+        raison ni de retente à afficher.
         """
         if state not in PLUGIN_STATES:
             raise ValueError(
                 f"unknown plugin state {state!r} (known: {', '.join(PLUGIN_STATES)})"
             )
-        self._states[plugin.strip()] = state
+        name = plugin.strip()
+        self._states[name] = state
+        if reason is None:
+            self._reasons.pop(name, None)
+        else:
+            self._reasons[name] = reason
+        self._retries[name] = retry
 
     def add(self, binding: PluginBinding) -> None:
         """Enregistre tous les Tools d'un binding, attribués à son plugin.

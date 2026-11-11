@@ -792,6 +792,70 @@ def test_a_fatal_defect_discovered_at_retry_is_permanently_dropped(
     assert "bogue du plugin" in retry.payload["reason"]
 
 
+def test_a_failing_plugin_exposes_its_reason_and_pending_retry(tmp_path: Path) -> None:
+    """La fiche lit la panne et la retente dans le registre, pas dans la Trace."""
+    _write_plugin(tmp_path, code=FLAKY_CODE)
+    _write_state(tmp_path, enabled=[FIXTURE_NAME])
+    loader = _loader(tmp_path, RecordingTraceSink())
+    registry = _load(loader)
+
+    assert registry.state_of(FIXTURE_NAME) == "failed"
+    assert "PluginUnavailable" in registry.reason_of(FIXTURE_NAME)
+    assert registry.retry_of(FIXTURE_NAME) is True
+
+    asyncio.run(
+        loader.retry_pending(registry, push_event=lambda source, content: None)
+    )
+
+    # Réparé : la raison et la retente ne doivent pas survivre à la guérison.
+    assert registry.state_of(FIXTURE_NAME) == "activated"
+    assert registry.reason_of(FIXTURE_NAME) is None
+    assert registry.retry_of(FIXTURE_NAME) is False
+
+
+def test_a_fatal_defect_at_retry_keeps_its_reason_without_a_retry(
+    tmp_path: Path,
+) -> None:
+    _write_plugin(tmp_path, code=DEFECT_ON_RETRY_CODE)
+    _write_state(tmp_path, enabled=[FIXTURE_NAME])
+    loader = _loader(tmp_path, RecordingTraceSink())
+    registry = _load(loader)
+
+    asyncio.run(
+        loader.retry_pending(registry, push_event=lambda source, content: None)
+    )
+
+    assert registry.state_of(FIXTURE_NAME) == "failed"
+    assert "TypeError" in registry.reason_of(FIXTURE_NAME)
+    assert registry.retry_of(FIXTURE_NAME) is False
+
+
+def test_an_invalid_directory_exposes_its_reason_and_neither_retries_nor_loads(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "plugins" / FIXTURE_NAME
+    directory.mkdir(parents=True)
+    _write_state(tmp_path, enabled=[])
+
+    registry = _load(_loader(tmp_path, RecordingTraceSink()))
+
+    assert registry.state_of(FIXTURE_NAME) == "invalid"
+    assert "manifest" in registry.reason_of(FIXTURE_NAME)
+    assert registry.retry_of(FIXTURE_NAME) is False
+    assert registry.instruction_of(FIXTURE_NAME) == ""
+
+
+def test_an_inactive_plugin_has_no_reason_and_no_retry(tmp_path: Path) -> None:
+    _write_plugin(tmp_path)
+    _write_state(tmp_path, enabled=[])
+
+    registry = _load(_loader(tmp_path, RecordingTraceSink()))
+
+    assert registry.state_of(FIXTURE_NAME) == "inactive"
+    assert registry.reason_of(FIXTURE_NAME) is None
+    assert registry.retry_of(FIXTURE_NAME) is False
+
+
 LEAKY_CODE = '''
 from plugin_api import PluginUnavailable
 
