@@ -7,6 +7,9 @@ accepted
 Précise l'ADR-0014 : `google-workspace` est un plugin serveur à Tools déclarés par le plugin,
 authentifié par des refresh tokens OAuth statiques. Ne modifie aucun autre ADR.
 
+Est complété par l'ADR local [0002](0002-contacts-google-via-people-api.md), qui ajoute le
+carnet de contacts au même modèle multi-comptes.
+
 ## Contexte
 
 Le plugin `google-workspace` doit lire et écrire les mails et l'agenda de plusieurs **Comptes
@@ -30,7 +33,8 @@ n'exécute aucun flow d'autorisation.
   utilisateur. La surface dépasse le besoin et sort du modèle de secrets du plugin.
 - **Flow OAuth dans le plugin** : le serveur n'a ni navigateur ni répertoire d'état
   contractuel. Il faudrait persister un token tournant et gérer la réautorisation, alors qu'un
-  refresh token classique reste un **secret statique**, comme le jeton Notion (ADR-0019).
+  refresh token classique reste un **secret statique**, comme le jeton Notion (ADR local 0001
+  du plugin [`notion`](../../notion/docs/adr/0001-notion-en-rest-plutot-que-mcp.md)).
 - **Listes parallèles** : le chargeur ne découvre pas les secrets dynamiquement et le
   manifeste doit déclarer chaque nom. Trois listes ordonnées permettent un nombre de comptes
   non borné sans fichier de credentials hors du modèle `ATHENA_PLUGIN_*` et sans emplacements

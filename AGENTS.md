@@ -115,72 +115,9 @@ et vocabulaire : `plugins/notion/docs/adr/0001-notion-en-rest-plutot-que-mcp.md`
 
 ### Google Workspace
 
-Le plugin `plugins/google-workspace/` (ADR-0021, ADR-0022) expose neuf Tools adossés à
-Gmail, Google Calendar et l'API People : `gmail_search`, `gmail_read`, `gmail_send`,
-`gmail_reply` pour les mails, `calendar_list_events`, `calendar_create_event`,
-`calendar_update_event`, `calendar_delete_event` pour l'agenda, et `contacts_search` pour
-le carnet. Chaque **Compte Google** porte son propre client OAuth ; les refresh tokens sont
-échangés en mémoire contre des access tokens d'une heure, jamais persistés. Les envois de
-mails et les suppressions d'événements exigent une confirmation explicite. Aucun Événement
-proactif n'est poussé en v1.
-
-`contacts_search` interroge les contacts **enregistrés** (`people/me/connections`) et les
-**autres contacts** que Gmail a mémorisés (`otherContacts`), fusionnés sur une adresse
-identique ; il ne voit ni l'annuaire du domaine, ni les fiches sans adresse. La comparaison
-est locale : une passe exacte d'abord, puis — seulement si elle ne rend rien — une passe
-tolérante qui rapproche chaque mot du nom ou de la partie locale d'une adresse à une faute
-près jusqu'à sept lettres, deux à partir de huit, jamais sous quatre lettres et jamais sans
-la même initiale (« Aubagne » retrouve « Aubane »). Elle est marquée `approximate: true`
-dans le retour, plafonnée à cinq personnes et triée par distance. Le domaine d'une adresse
-n'est jamais comparé, et une approximation est relue à voix haute puis confirmée avant tout
-envoi. Un nom seul n'est jamais une adresse : `gmail_send` refuse un destinataire qui n'y
-ressemble pas et renvoie vers le Tool. Quand plusieurs adresses ou plusieurs personnes
-correspondent, l'instruction impose de les lire et de faire choisir, jamais de trancher. Le
-carnet n'est pas mis en cache : chaque recherche refait ses appels.
-
-Pour l'activer, ajoutez `google-workspace` à la liste `enabled` de `plugins.json` avec les
-libellés de comptes sous `config.google-workspace`, et fournissez les trois secrets requis
-dans l'environnement ou `.env`, chacun une liste **de même longueur et dans le même ordre**
-que `accounts` (les valeurs Google ne contiennent pas de virgule) :
-
-```json
-{
-  "enabled": ["google-workspace"],
-  "config": {
-    "google-workspace": {
-      "accounts": "Pro,perso",
-      "default_account": "perso"
-    }
-  }
-}
-```
-
-```sh
-ATHENA_PLUGIN_GOOGLE_WORKSPACE_CLIENT_ID=idPro,idPerso
-ATHENA_PLUGIN_GOOGLE_WORKSPACE_CLIENT_SECRET=secretPro,secretPerso
-ATHENA_PLUGIN_GOOGLE_WORKSPACE_REFRESH_TOKEN=rtPro,rtPerso
-```
-
-`default_account` est optionnelle (le premier compte fait foi) ; `api_base_url`,
-`people_base_url` et `token_url` sont réservées aux tests ou à un proxy (`people_base_url`
-vaut `https://people.googleapis.com` par défaut). Les scopes demandés sont
-`gmail.readonly`, `gmail.send`, `calendar.events`, `contacts.readonly` et
-`contacts.other.readonly` ; l'API **People** doit être activée dans le projet Cloud. Le
-client OAuth est de type « Web application » avec le redirect du Playground, et une
-application **External + Testing** est refusée (refresh tokens expirant en 7 jours).
-
-Au démarrage, `create()` échange en parallèle le refresh token de chaque compte. Si au moins
-un compte répond, le plugin s'active ; un compte refusé (`invalid_grant`) est tracé
-`AccountUnavailable`, reste visible dans la Console et est retenté à **chaque** appel de Tool
-qui le vise, jusqu'à une phrase française d'indisponibilité. Un scope Contacts manquant
-n'empêche jamais l'activation : chaque compte sain sonde son carnet au démarrage et, en cas
-de refus réparable, trace `ContactsScopeMissing` ; le premier appel réel rend une phrase qui
-nomme l'API People et la réautorisation. Si tous les comptes échouent, le
-plugin rend `PluginUnavailable` : la Console le montre en `failed` et le serveur retente
-toutes les 5 s. Ni les Traces, ni le journal, ni l'instantané, ni les messages d'erreur ne
-portent un secret, une adresse, un objet, un corps, une requête Gmail ou une URL complète.
-La recette complète (client OAuth, Playground, consentement, réautorisation après
-révocation, dépannage) est `docs/smoke-test-google-workspace.md`.
+Le plugin `plugins/google-workspace/` expose neuf Tools Gmail, Google Calendar et carnet via l'API People.
+Activation, secrets, comptes, panne partielle et reprise : `plugins/google-workspace/README.md` ; décisions
+et vocabulaire : `plugins/google-workspace/docs/adr/0001-google-workspace-par-refresh-tokens.md`, `plugins/google-workspace/GLOSSARY.md`.
 
 ### Front (`web/`)
 
