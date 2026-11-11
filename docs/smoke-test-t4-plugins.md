@@ -156,12 +156,31 @@ curl -i -c /tmp/athena-cookies.txt -X POST http://127.0.0.1:8767/api/setup \
 Attendu : `200`, `authenticated: true`, et un cookie `athena_ticket` dans la jar. Aux
 démarrages suivants, le Compte existe : passez par `POST /api/login` si la jar a expiré.
 
-Ouvrez la Console (`http://127.0.0.1:8767/`) : le panneau **Plugins** affiche `fixture`
-avec le badge **Inactif** et « Aucun Tool ». L'instantané correspondant est :
+Ouvrez la Console (`http://127.0.0.1:8767/`) : la section **Plugin Registry** affiche
+`fixture`, le libellé **Inactif** (rail creux) et « Aucun Tool ». L'instantané
+correspondant est :
 
 ```json
 "plugins": [
-  { "name": "fixture", "state": "inactive", "tools": [] }
+  {
+    "name": "fixture",
+    "state": "inactive",
+    "tools": [],
+    "declaration": {
+      "description": "Plugin de fixture",
+      "version": "0.1.0",
+      "api_version": 1,
+      "platform": "server",
+      "directory": "/tmp/athena-smoke/plugins/fixture",
+      "invalid_reason": null
+    },
+    "reason": null,
+    "retry": false,
+    "instruction": "",
+    "config": [],
+    "secrets": [],
+    "ready": { "manifest": true, "config": true, "secrets": true }
+  }
 ]
 ```
 
@@ -199,11 +218,30 @@ L'instantané de la Console montre le même état, trié par nom :
 
 ```json
 "plugins": [
-  { "name": "fixture", "state": "activated", "tools": ["fixture__echo"] }
+  {
+    "name": "fixture",
+    "state": "activated",
+    "tools": ["fixture__echo"],
+    "declaration": {
+      "description": "Plugin de fixture",
+      "version": "0.1.0",
+      "api_version": 1,
+      "platform": "server",
+      "directory": "/tmp/athena-smoke/plugins/fixture",
+      "invalid_reason": null
+    },
+    "reason": null,
+    "retry": false,
+    "instruction": "Utilise fixture__echo pour répéter.",
+    "config": [],
+    "secrets": [],
+    "ready": { "manifest": true, "config": true, "secrets": true }
+  }
 ]
 ```
 
-Le panneau **Plugins** affiche `fixture`, le badge **Activé** et `fixture__echo`.
+La section **Plugin Registry** affiche `fixture`, le libellé **Activé** (rail plein) et
+`fixture__echo`.
 
 Arrêtez le serveur.
 
@@ -227,8 +265,8 @@ INFO [app] started {"state": "Idle"}
 - Le serveur démarre normalement, sans les Tools du plugin.
 - Le chargeur **ne réécrit jamais** le fichier d'état : la ligne de configuration est
   conservée pour une réinstallation. Le plugin n'entre pas dans la relance de fond.
-- L'instantané porte
-  `{ "name": "fixture", "state": "missing", "tools": [] }`.
+- L'instantané porte une entrée `missing` avec `"declaration": null`, `"tools": []` et un
+  diagnostic non évaluable.
 
 Arrêtez le serveur et restaurez le dossier :
 
@@ -301,7 +339,7 @@ def create(context):
 Lancez le serveur. Attendu au démarrage :
 
 ```
-INFO [plugins] PluginState {"plugin": "fixture", "reason": "PluginUnavailable: fixture injoignable", "state": "failed"}
+INFO [plugins] PluginState {"plugin": "fixture", "reason": "PluginUnavailable: fixture injoignable", "retry": true, "state": "failed"}
 INFO [app] started {"state": "Idle"}
 ```
 
@@ -310,13 +348,15 @@ pas Athena muette. Puis, au plus tard **5 s** après le démarrage, la relance d
 réessaie et réussit :
 
 ```
-INFO [plugins] PluginState {"plugin": "fixture", "retry": true, "state": "activated", "tools": 1}
+INFO [plugins] PluginState {"plugin": "fixture", "state": "activated", "tools": 1}
 ```
 
 - La raison d'un échec porte le type et le message de l'exception, jamais une valeur de
   secret : les valeurs connues sont remplacées par `***`.
 - Chaque tentative infructueuse réémet `PluginState` avec `"retry": true` et
-  `"state": "failed"`, et le plugin reste en attente. Le serveur ne redémarre pas.
+  `"state": "failed"`, et le plugin reste en attente. La trace `activated` d'une reprise
+  réussie ne porte plus `retry` : seule une panne encore retentée l'annonce. Le serveur ne
+  redémarre pas.
 - Un défaut **structurel** révélé par la relance (par exemple un `create()` qui lève
   `TypeError`, ou une collision de Tool) est tracé `failed` au niveau `error`, puis
   **oublié** : il n'est jamais retenté indéfiniment.
@@ -405,25 +445,44 @@ Arrêtez le serveur, supprimez `$ATHENA_PLUGINS_DIR/duplicate` et remettez
 
 ## 7. Lire l'instantané de la Console
 
-Le panneau **Plugins** et `GET /api/status` lisent le **même** registre. Chaque entrée
-porte le nom, l'État de service et les Tools attribués au propriétaire, triés par nom :
+La section **Plugin Registry** et `GET /api/status` lisent le **même** registre. Chaque
+entrée porte son nom, son État de service, ses Tools, sa Déclaration, sa raison d'échec, sa
+retente, son Instruction, ses réglages observés et le diagnostic `ready`, triés par nom :
 
 ```json
 "plugins": [
-  { "name": "fixture", "state": "activated", "tools": ["fixture__echo"] }
+  {
+    "name": "fixture",
+    "state": "activated",
+    "tools": ["fixture__echo"],
+    "declaration": {
+      "description": "Plugin de fixture",
+      "version": "0.1.0",
+      "api_version": 1,
+      "platform": "server",
+      "directory": "/tmp/athena-smoke/plugins/fixture",
+      "invalid_reason": null
+    },
+    "reason": null,
+    "retry": false,
+    "instruction": "Utilise fixture__echo pour répéter.",
+    "config": [],
+    "secrets": [],
+    "ready": { "manifest": true, "config": true, "secrets": true }
+  }
 ]
 ```
 
-Les six états sont rendus par le front :
+Les six états sont rendus par le front, par un libellé **et** un motif de rail :
 
-| État brut | Badge de la Console | Sens |
+| État brut | Libellé et rail de la Console | Sens |
 | --- | --- | --- |
-| `activated` | **Activé** | importé, Tools publiés |
-| `failed` | **En échec** | panne réparable en attente, ou défaut tracé puis oublié |
-| `missing` | **Manquant** | listé, dossier absent ; ligne d'état conservée |
-| `inactive` | **Inactif** | dossier présent au manifeste sain, absent de la liste d'activation |
-| `unsupported` | **Non supporté** | plateforme autre que `server`, donc jamais chargé |
-| `invalid` | **Invalide** | manifeste absent, illisible ou incohérent, raison dans la trace |
+| `activated` | **Activé** (plein) | importé, Tools publiés |
+| `failed` | **En échec** (brisé) | panne réparable en attente, ou défaut tracé puis oublié |
+| `missing` | **Manquant** (pointillé) | listé, dossier absent ; ligne d'état conservée |
+| `inactive` | **Inactif** (creux) | dossier présent au manifeste sain, absent de la liste d'activation |
+| `unsupported` | **Non supporté** (hachuré) | plateforme autre que `server`, donc jamais chargé |
+| `invalid` | **Invalide** (double) | manifeste absent, illisible ou incohérent, raison dans la trace |
 
 Pour lire l'API avec le Ticket Console :
 
@@ -432,8 +491,9 @@ curl -s -b /tmp/athena-cookies.txt http://127.0.0.1:8767/api/status \
   | .venv/bin/python -c 'import json, sys; print(json.dumps(json.load(sys.stdin)["plugins"], indent=2, ensure_ascii=False))'
 ```
 
-Sans Ticket, la route répond `401` JSON. L'instantané ne porte **aucun secret** : il ne
-montre ni configuration de plugin, ni valeur de secret, ni contenu d'appel.
+Sans Ticket, la route répond `401` JSON. L'instantané montre les champs de configuration et
+la seule **présence** des secrets (clé, variable, présent/absent), jamais une valeur de
+secret, ni en-tête ni contenu d'appel.
 
 ## Limites connues
 
@@ -478,7 +538,8 @@ Les comportements de ce document sont couverts par :
   dossier ;
 - `server/tests/test_app_root.py` — instantané réel de `build_app` : `fixture` activé,
   `fixture__echo` listé, aucun secret dans la configuration exposée ;
-- `web/src/status.test.ts` — libellés français des quatre états de Plugin.
+- `web/src/registry.test.ts` — libellés, motifs de rail et filtres des six états de Plugin,
+  compteurs, recherche et fiche du registre ;
 
 ## Résultat du run
 
