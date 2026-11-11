@@ -1,6 +1,6 @@
 # Smoke test — Plugin Notion (pages en voix)
 
-Vérification manuelle de bout en bout du plugin serveur `notion` (spec #111, ADR-0019) :
+Vérification manuelle de bout en bout du plugin serveur `notion` (spec #111, ADR local 0001) :
 préparer une connexion Notion, partager une page racine, activer le plugin dans Athena, puis
 dérouler le parcours vocal complet — chercher une page, la lire, la modifier, la mettre à la
 corbeille et la restaurer. Le plugin parle directement à la **REST Notion** avec un jeton
@@ -519,13 +519,13 @@ c'est une erreur de configuration fatale.
 
 ```sh
 make generate
-.venv/bin/python -m pytest protocol/tests server/tests client/tests -q
+.venv/bin/python -m pytest plugins/notion/tests -q
 ```
 
 Aucun test ne contacte le vrai Notion : un **faux serveur en processus** enregistre chaque
 requête (méthode, chemin, en-têtes, corps) et programme les réponses.
 
-- `server/tests/test_plugins_notion.py` — un seul fichier, organisé par sections :
+- `plugins/notion/tests/test_plugins_notion.py` — un seul fichier, organisé par sections :
   - manifeste exact, secret absent, jeton refusé, Notion injoignable, `5xx` de sonde
     (compte et page parente), `parent_page_id` absent/invalide/non partagé, recherche,
     plafond de dix résultats, curseur, erreurs françaises sans retry, jeton absent des
