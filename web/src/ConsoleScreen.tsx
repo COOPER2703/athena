@@ -4,8 +4,9 @@ import { AccountPanel } from "./AccountPanel";
 import { fetchSession, fetchStatus } from "./api";
 import { isUnauthorized } from "./auth";
 import { EventForm } from "./EventForm";
+import { PluginRegistry } from "./PluginRegistry";
 import { sessionSummary } from "./session";
-import { ClientsPanel, ConfigPanel, PluginsPanel } from "./StatusPanels";
+import { ClientsPanel, ConfigPanel } from "./StatusPanels";
 import type { StatusData } from "./status";
 import { TokenPanel } from "./TokenPanel";
 import { TraceFeed } from "./TraceFeed";
@@ -156,9 +157,10 @@ export function ConsoleScreen({
               clients={status.clients}
               activeClientId={status.session.active_client_id}
             />
-            <PluginsPanel plugins={status.plugins} />
           </div>
         ) : null}
+
+        {status !== null ? <PluginRegistry plugins={status.plugins} /> : null}
 
         {status !== null ? <ConfigPanel config={status.config} /> : null}
 

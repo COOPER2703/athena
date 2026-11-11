@@ -654,21 +654,20 @@ def test_each_account_refresh_token_is_exchanged_at_startup(
                 assert app.plugins.states["google-workspace"] == "activated"
 
                 [row] = app.snapshot()["plugins"]
-                assert row == {
-                    "name": "google-workspace",
-                    "state": "activated",
-                    "tools": [
-                        "calendar_create_event",
-                        "calendar_delete_event",
-                        "calendar_list_events",
-                        "calendar_update_event",
-                        "contacts_search",
-                        "gmail_read",
-                        "gmail_reply",
-                        "gmail_search",
-                        "gmail_send",
-                    ],
-                }
+                assert row["name"] == "google-workspace"
+                assert row["state"] == "activated"
+                assert row["tools"] == [
+                    "calendar_create_event",
+                    "calendar_delete_event",
+                    "calendar_list_events",
+                    "calendar_update_event",
+                    "contacts_search",
+                    "gmail_read",
+                    "gmail_reply",
+                    "gmail_search",
+                    "gmail_send",
+                ]
+                assert row["declaration"]["api_version"] == 1
 
                 # Un échange par compte, avec le formulaire OAuth exact.
                 assert len(stub.token_requests) == 2
@@ -3530,23 +3529,21 @@ def test_the_console_snapshot_shows_the_activated_plugin_and_its_tools(
             ):
                 # Un compte indisponible ne retire pas le plugin de la Console :
                 # il reste activé et garde ses Tools.
-                assert app.snapshot()["plugins"] == [
-                    {
-                        "name": "google-workspace",
-                        "state": "activated",
-                        "tools": [
-                            "calendar_create_event",
-                            "calendar_delete_event",
-                            "calendar_list_events",
-                            "calendar_update_event",
-                            "contacts_search",
-                            "gmail_read",
-                            "gmail_reply",
-                            "gmail_search",
-                            "gmail_send",
-                        ],
-                    }
+                [google] = app.snapshot()["plugins"]
+                assert google["name"] == "google-workspace"
+                assert google["state"] == "activated"
+                assert google["tools"] == [
+                    "calendar_create_event",
+                    "calendar_delete_event",
+                    "calendar_list_events",
+                    "calendar_update_event",
+                    "contacts_search",
+                    "gmail_read",
+                    "gmail_reply",
+                    "gmail_search",
+                    "gmail_send",
                 ]
+                assert google["declaration"]["api_version"] == 1
                 assert app.plugins.tools.owner_of("gmail_search") == (
                     "google-workspace"
                 )
@@ -3594,13 +3591,12 @@ def test_all_accounts_failing_degrades_the_start_and_retries_globally(
                 assert states(sink)[0] == "failed"
                 assert app.plugins.states["google-workspace"] == "failed"
                 assert app.plugins.tools.specs() == ()
-                assert app.snapshot()["plugins"] == [
-                    {
-                        "name": "google-workspace",
-                        "state": "failed",
-                        "tools": [],
-                    }
-                ]
+                [google] = app.snapshot()["plugins"]
+                assert google["name"] == "google-workspace"
+                assert google["state"] == "failed"
+                assert google["tools"] == []
+                assert google["retry"] is True
+                assert google["reason"].startswith("PluginUnavailable")
                 first = sink.of_kind("PluginState")[0]
                 assert first.payload["state"] == "failed"
                 assert first.payload["reason"].startswith("PluginUnavailable")
@@ -3622,30 +3618,30 @@ def test_all_accounts_failing_degrades_the_start_and_retries_globally(
                 stub.route("GET", MESSAGES_PATH, body=gmail_message_list())
                 await wait_for_state(app, "google-workspace", "activated")
 
-                assert app.snapshot()["plugins"] == [
-                    {
-                        "name": "google-workspace",
-                        "state": "activated",
-                        "tools": [
-                            "calendar_create_event",
-                            "calendar_delete_event",
-                            "calendar_list_events",
-                            "calendar_update_event",
-                            "contacts_search",
-                            "gmail_read",
-                            "gmail_reply",
-                            "gmail_search",
-                            "gmail_send",
-                        ],
-                    }
+                [google] = app.snapshot()["plugins"]
+                assert google["name"] == "google-workspace"
+                assert google["state"] == "activated"
+                assert google["tools"] == [
+                    "calendar_create_event",
+                    "calendar_delete_event",
+                    "calendar_list_events",
+                    "calendar_update_event",
+                    "contacts_search",
+                    "gmail_read",
+                    "gmail_reply",
+                    "gmail_search",
+                    "gmail_send",
                 ]
+                assert google["declaration"]["api_version"] == 1
                 [last] = [
                     entry
                     for entry in sink.of_kind("PluginState")
-                    if entry.payload.get("retry") is True
-                    and entry.payload["state"] == "activated"
+                    if entry.payload["state"] == "activated"
                 ]
                 assert last.payload["tools"] == 9
+                # La reprise réussie n'annonce plus de retente : seule une
+                # trace ``failed`` encore retentée porte ``retry``.
+                assert "retry" not in last.payload
 
                 unavailable = sink.of_kind("AccountUnavailable")
                 assert {entry.payload["account"] for entry in unavailable} == {

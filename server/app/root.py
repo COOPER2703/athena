@@ -14,7 +14,7 @@ from server.adapters.memory import (
     SentenceTransformerEmbedder,
     SqliteMemoryStore,
 )
-from server.adapters.plugins import PluginLoader
+from server.adapters.plugins import PluginLoader, is_http_url, secret_variable
 from server.adapters.trace import emit
 from server.adapters.transport import ClientConnection, WebSocketTransport
 from server.adapters.webhook import WebhookAdapter
@@ -47,7 +47,12 @@ from server.core.commands import (
 from server.core.coordinator import Coordinator
 from server.core.events import Event, EventReceived, ShutdownRequested
 from server.core.memory_tools import register_memory_tools
-from server.core.plugins import PluginRegistry
+from server.core.plugins import (
+    ConfigField,
+    PluginDeclaration,
+    PluginObservation,
+    PluginRegistry,
+)
 from server.core.ports import AuthService, EventJudge, MemoryStore, TraceSink
 from server.core.session_tools import register_session_tools
 from server.core.tools import ToolRegistry
@@ -112,6 +117,156 @@ def _trace_consolidation(
         },
         level="debug",
     )
+
+
+def _plugin_config_summary(
+    declaration: PluginDeclaration | None, observation: PluginObservation | None
+) -> list[Mapping[str, object]]:
+    """Une entrée par champ de configuration déclaré, valeur effective comprise.
+
+    ``value`` vaut ``None`` quand la clé est laissée au défaut du plugin : une
+    chaîne vide ne signifie jamais « défaut ». La validité d'une URL n'est pas
+    recalculée ici, la liste porte le ``type`` pour que l'interface la juge.
+    """
+    if declaration is None:
+        return []
+    values = (
+        {item.key: item.value for item in observation.config}
+        if observation is not None
+        else {}
+    )
+    return [
+        {
+            "key": field.key,
+            "type": field.type,
+            "required": field.required,
+            "value": values.get(field.key),
+        }
+        for field in declaration.config
+    ]
+
+
+def _plugin_secrets_summary(
+    name: str, declaration: PluginDeclaration | None, observation: PluginObservation | None
+) -> list[Mapping[str, object]]:
+    """Une entrée par secret déclaré : clé, variable exacte et présence seule.
+
+    Aucune valeur de secret n'entre dans l'instantané. Le nom de variable vient
+    de l'observation quand elle existe ; sinon il est reconstruit par la même
+    convention que le chargeur, pour qu'une observation manquante ne fasse pas
+    disparaître le nom.
+    """
+    if declaration is None:
+        return []
+    variables = (
+        {item.key: item.variable for item in observation.secrets}
+        if observation is not None
+        else {}
+    )
+    present = (
+        {item.key: item.present for item in observation.secrets}
+        if observation is not None
+        else {}
+    )
+    return [
+        {
+            "key": field.key,
+            "variable": variables.get(field.key, secret_variable(name, field.key)),
+            "required": field.required,
+            "present": present.get(field.key, False),
+        }
+        for field in declaration.secrets
+    ]
+
+
+def _config_field_ready(field: ConfigField, value: str | None) -> bool:
+    """Vrai si une clé déclarée satisfait son exigence de configuration.
+
+    Une clé requise doit être renseignée ; une URL déclarée doit rester une URL
+    ``http``/``https`` avec un hôte. Une clé optionnelle absente est au défaut
+    du plugin, donc satisfaite.
+    """
+    required = field.required
+    if value is None:
+        return not required
+    if field.type == "url":
+        return is_http_url(value)
+    return True
+
+
+def _plugin_ready(
+    declaration: PluginDeclaration | None, observation: PluginObservation | None
+) -> Mapping[str, bool]:
+    """Trois marqueurs distincts : manifeste, configuration requise, secrets.
+
+    Un dossier sans Déclaration n'a aucune exigence **assertable** : les trois
+    marqueurs sont faux, car rien ne permet de dire que le plugin est prêt. Un
+    manifeste invalide n'invalide que le marqueur ``manifest`` ; ses listes
+    d'exigences restent évaluées telles quelles, éventuellement vides. Les
+    manques eux-mêmes ne sont pas des phrases ici : ils se déduisent des listes
+    ``config`` et ``secrets``.
+    """
+    if declaration is None:
+        return {"manifest": False, "config": False, "secrets": False}
+    values = (
+        {item.key: item.value for item in observation.config}
+        if observation is not None
+        else {}
+    )
+    present = (
+        {item.key: item.present for item in observation.secrets}
+        if observation is not None
+        else {}
+    )
+    return {
+        "manifest": declaration.invalid_reason is None,
+        "config": all(
+            _config_field_ready(field, values.get(field.key))
+            for field in declaration.config
+        ),
+        "secrets": all(
+            not field.required or present.get(field.key, False)
+            for field in declaration.secrets
+        ),
+    }
+
+
+def _plugin_summary(
+    plugins: PluginRegistry, name: str, state: str, tools: list[str]
+) -> Mapping[str, object]:
+    """Une entrée du registre : ce que le plugin est, attend et devient.
+
+    ``tools`` reste une liste de noms, sans description ni schéma. ``reason``
+    n'est renseignée que pour un échec, ``retry`` dit qu'une retente de fond est
+    encore attendue, et ``instruction`` vaut la chaîne vide pour un plugin non
+    chargé — la Console en fait une absence explicite. ``config``, ``secrets``
+    et ``ready`` décrivent les réglages observés au démarrage sans aucune I/O.
+    """
+    declaration = plugins.declaration_of(name)
+    observation = plugins.observation_of(name)
+    return {
+        "name": name,
+        "state": state,
+        "tools": sorted(tools),
+        "declaration": (
+            None
+            if declaration is None
+            else {
+                "description": declaration.description,
+                "version": declaration.version,
+                "api_version": declaration.api_version,
+                "platform": declaration.platform,
+                "directory": declaration.directory,
+                "invalid_reason": declaration.invalid_reason,
+            }
+        ),
+        "reason": plugins.reason_of(name),
+        "retry": plugins.retry_of(name),
+        "instruction": plugins.instruction_of(name),
+        "config": _plugin_config_summary(declaration, observation),
+        "secrets": _plugin_secrets_summary(name, declaration, observation),
+        "ready": _plugin_ready(declaration, observation),
+    }
 
 
 class WebhookServer(Protocol):
@@ -287,7 +442,12 @@ class App:
         }
 
     def _plugin_summaries(self) -> list[Mapping[str, object]]:
-        """Plugins connus, état de chargement et Tools attribués au propriétaire."""
+        """Registre lisible : état, Déclaration, panne, retente et Instruction.
+
+        L'instantané ne fait aucune I/O : tout a été observé au démarrage par
+        le chargeur. Un dossier ``missing`` n'a pas de Déclaration lue, donc
+        ``declaration`` vaut ``None`` plutôt qu'une identité inventée.
+        """
         plugins = self._plugins
         if plugins is None:
             return []
@@ -297,11 +457,7 @@ class App:
             if owner is not None:
                 tools_by_owner.setdefault(owner, []).append(spec.name)
         return [
-            {
-                "name": name,
-                "state": state,
-                "tools": sorted(tools_by_owner.get(name, [])),
-            }
+            _plugin_summary(plugins, name, state, tools_by_owner.get(name, []))
             for name, state in sorted(plugins.states.items())
         ]
 

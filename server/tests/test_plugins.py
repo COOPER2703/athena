@@ -5,7 +5,17 @@ from typing import Mapping
 
 import pytest
 
-from server.core.plugins import PluginBinding, PluginRegistry, ToolBinding
+from server.core.plugins import (
+    ConfigField,
+    ConfigValue,
+    PluginBinding,
+    PluginDeclaration,
+    PluginObservation,
+    PluginRegistry,
+    SecretField,
+    SecretPresence,
+    ToolBinding,
+)
 from server.core.ports import ToolSpec
 from server.core.session_tools import END_SESSION, register_session_tools
 from server.core.tools import ToolNameConflict
@@ -96,14 +106,14 @@ def test_instruction_is_empty_when_no_plugin_provides_one() -> None:
     assert registry.instruction() == ""
 
 
-def test_instruction_disappears_with_the_disabled_plugin() -> None:
+def test_instruction_disappears_when_the_registry_is_rebuilt_without_the_plugin() -> None:
     enabled = _binding("alpha", "alpha__ping", instruction="Instruction alpha.")
     registry = PluginRegistry()
     registry.add(enabled)
     assert registry.instruction() == "Instruction alpha."
 
-    # Désactiver un plugin, c'est reconstruire le registre sans son binding :
-    # ses Tools et son instruction disparaissent ensemble.
+    # Reconstruire le registre sans le binding d'un plugin (parce qu'il n'est
+    # pas retenu) fait disparaître ses Tools et son instruction ensemble.
     rebuilt = PluginRegistry()
     assert rebuilt.tools.specs() == ()
     assert rebuilt.instruction() == ""
@@ -155,3 +165,114 @@ def test_registry_refuses_an_unknown_plugin_state() -> None:
         registry.mark_state("alpha", "activatd")
 
     assert "activatd" in str(excinfo.value)
+
+
+def test_registry_knows_the_six_service_states_and_no_disabled_one() -> None:
+    """Les six États de service du glossaire ; ``disabled`` n'en fait plus partie."""
+    registry = PluginRegistry()
+
+    for state in (
+        "activated",
+        "failed",
+        "missing",
+        "inactive",
+        "unsupported",
+        "invalid",
+    ):
+        registry.mark_state(f"plugin-{state}", state)
+
+    assert set(registry.states.values()) == {
+        "activated",
+        "failed",
+        "missing",
+        "inactive",
+        "unsupported",
+        "invalid",
+    }
+    with pytest.raises(ValueError):
+        registry.mark_state("legacy", "disabled")
+
+
+def test_registry_keeps_the_failure_reason_and_retry_beside_the_state() -> None:
+    """La raison et la retente vivent à côté de l'état, lisibles sans relire la Trace."""
+    registry = PluginRegistry()
+    registry.mark_state(
+        "websearch",
+        "failed",
+        reason="PluginUnavailable: Tavily ne répond pas",
+        retry=True,
+    )
+
+    assert registry.state_of("websearch") == "failed"
+    assert registry.reason_of("websearch") == "PluginUnavailable: Tavily ne répond pas"
+    assert registry.retry_of("websearch") is True
+    assert registry.reason_of("absent") is None
+    assert registry.retry_of("absent") is False
+
+    # Une transition qui n'échoue plus efface la raison et la retente : sinon
+    # la fiche continuerait d'afficher une panne réparée.
+    registry.mark_state("websearch", "activated")
+
+    assert registry.reason_of("websearch") is None
+    assert registry.retry_of("websearch") is False
+
+
+def test_registry_exposes_the_instruction_of_a_loaded_plugin() -> None:
+    """L'Instruction se lit par plugin ; un plugin non chargé n'en a pas."""
+    registry = PluginRegistry()
+    registry.add(_binding("websearch", "websearch__search", instruction="Cherche."))
+
+    assert registry.instruction_of("websearch") == "Cherche."
+    assert registry.instruction_of("notion") == ""
+    assert registry.instruction() == "Cherche."
+
+
+def test_registry_keeps_the_declaration_alongside_the_service_state() -> None:
+    """Tout dossier installé est observable par sa Déclaration, même non chargé."""
+    declaration = PluginDeclaration(
+        description="Cherche sur le web via Tavily",
+        version="1.0.0",
+        api_version=1,
+        platform="server",
+        directory="plugins/websearch",
+        config=(ConfigField(key="base_url", type="url", required=False),),
+        secrets=(SecretField(key="api_key", required=True),),
+    )
+    registry = PluginRegistry()
+    registry.declare("websearch", declaration)
+    registry.mark_state("websearch", "inactive")
+
+    assert registry.declaration_of("websearch") is declaration
+    assert registry.declaration_of("absent") is None
+    assert dict(registry.declarations) == {"websearch": declaration}
+    assert registry.state_of("websearch") == "inactive"
+
+
+def test_registry_keeps_observed_settings_read_only_beside_the_declaration() -> None:
+    """Les valeurs effectives et la présence vivent à côté, jamais dans la Déclaration."""
+    declaration = PluginDeclaration(
+        directory="plugins/websearch",
+        config=(ConfigField(key="base_url", type="url", required=False),),
+        secrets=(SecretField(key="api_key", required=True),),
+    )
+    observation = PluginObservation(
+        config=(ConfigValue(key="base_url", value=None),),
+        secrets=(
+            SecretPresence(
+                key="api_key",
+                variable="ATHENA_PLUGIN_WEBSEARCH_API_KEY",
+                present=False,
+            ),
+        ),
+    )
+    registry = PluginRegistry()
+    registry.declare("websearch", declaration)
+    registry.observe("websearch", observation)
+
+    assert registry.observation_of("websearch") is observation
+    assert registry.observation_of("absent") is None
+    assert dict(registry.observations) == {"websearch": observation}
+    # Aucune valeur de secret n'est représentable : seule la présence existe.
+    assert not hasattr(observation.secrets[0], "value")
+    with pytest.raises(TypeError):
+        registry.observations["websearch"] = observation  # type: ignore[index]

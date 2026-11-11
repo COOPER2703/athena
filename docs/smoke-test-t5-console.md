@@ -167,7 +167,7 @@ liste blanche, sans secret :
   },
   "clients": [],
   "plugins": [
-    { "name": "homeassistant", "state": "disabled", "tools": [] }
+    { "name": "homeassistant", "state": "inactive", "tools": [] }
   ],
   "config": {
     "model": "gemini-3.1-flash-live-preview",
@@ -627,7 +627,7 @@ l'état du serveur. Ce sont des résultats observés, pas des invariants du cont
    `POST /api/events` `202`.
 
 3. **API réelle** — `/api/status` renvoie l'enveloppe exacte ci-dessus (`v: 1`, Session
-   `Idle`, `clients: []`, plugin `homeassistant` `disabled`, `config` sans secret) ;
+   `Idle`, `clients: []`, plugin `homeassistant` `inactive`, `config` sans secret) ;
    `/api/unknown` et `/api` renvoient `404 {"error": "not found"}` ; `/api/stream` sans
    `Upgrade` renvoie `400 {"error": "websocket required"}` ; l'injection sans Source est
    tracée `[console] event_received {"chars": 35, "source": "console"}`, l'injection avec

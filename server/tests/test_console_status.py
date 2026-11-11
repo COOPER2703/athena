@@ -216,6 +216,67 @@ def test_a_reconnecting_client_starts_from_the_current_state() -> None:
     asyncio.run(scenario())
 
 
+def test_a_plugin_declaration_or_failure_change_pushes_a_status_frame() -> None:
+    """L'empreinte porte sur tout l'instantané : la fiche se rafraîchit seule."""
+
+    async def scenario() -> None:
+        state = _state()
+        plugin: dict[str, object] = {
+            "name": "websearch",
+            "state": "inactive",
+            "tools": [],
+            "declaration": {
+                "description": "Cherche sur le web via Tavily",
+                "version": "1.0.0",
+                "api_version": 1,
+                "platform": "server",
+                "directory": "plugins/websearch",
+                "invalid_reason": None,
+            },
+            "reason": None,
+            "retry": False,
+            "instruction": "",
+        }
+        state["plugins"] = [plugin]
+        adapter = ConsoleAdapter(port=0, status_interval=TICK)
+        await adapter.start(lambda: state)
+        try:
+            async with aiohttp.ClientSession() as http:
+                async with http.ws_connect(_ws_url(adapter)) as ws:
+                    hello = await _receive(ws)
+                    assert hello["data"]["snapshot"]["plugins"] == [plugin]
+                    await _expect_silence(ws)
+
+                    declaration = plugin["declaration"]
+                    assert isinstance(declaration, dict)
+                    declaration["version"] = "1.1.0"
+                    frame = await _receive(ws)
+                    assert frame["data"]["plugins"][0]["declaration"]["version"] == (
+                        "1.1.0"
+                    )
+                    await _expect_silence(ws)
+
+                    plugin["state"] = "failed"
+                    plugin["reason"] = "PluginUnavailable: Tavily ne répond pas"
+                    plugin["retry"] = True
+                    frame = await _receive(ws)
+                    [entry] = frame["data"]["plugins"]
+                    assert entry["state"] == "failed"
+                    assert "Tavily" in entry["reason"]
+                    assert entry["retry"] is True
+                    await _expect_silence(ws)
+
+                    plugin["instruction"] = "Cherche avant de répondre."
+                    frame = await _receive(ws)
+                    assert frame["data"]["plugins"][0]["instruction"] == (
+                        "Cherche avant de répondre."
+                    )
+        finally:
+            await adapter.stop()
+
+    asyncio.run(scenario())
+
+
 def test_status_and_trace_frames_share_the_stream() -> None:
     """Un changement d'état et une Trace vivante arrivent tous deux, sans se perdre."""
 
@@ -304,6 +365,74 @@ def test_no_status_frame_is_pushed_when_the_snapshot_does_not_change() -> None:
                     assert hello["data"]["snapshot"] == state
 
                     await _expect_silence(ws)
+                    await _expect_silence(ws)
+        finally:
+            await adapter.stop()
+
+    asyncio.run(scenario())
+
+
+def test_a_plugin_config_value_or_secret_presence_change_pushes_a_status_frame() -> None:
+    """Une valeur de configuration ou une présence change : la fiche se rafraîchit."""
+
+    async def scenario() -> None:
+        state = _state()
+        plugin: dict[str, object] = {
+            "name": "websearch",
+            "state": "inactive",
+            "tools": [],
+            "declaration": {
+                "description": "Cherche sur le web via Tavily",
+                "version": "1.0.0",
+                "api_version": 1,
+                "platform": "server",
+                "directory": "plugins/websearch",
+                "invalid_reason": None,
+            },
+            "reason": None,
+            "retry": False,
+            "instruction": "",
+            "config": [
+                {"key": "base_url", "type": "url", "required": False, "value": None}
+            ],
+            "secrets": [
+                {
+                    "key": "api_key",
+                    "variable": "ATHENA_PLUGIN_WEBSEARCH_API_KEY",
+                    "required": True,
+                    "present": False,
+                }
+            ],
+            "ready": {"manifest": True, "config": True, "secrets": False},
+        }
+        state["plugins"] = [plugin]
+        adapter = ConsoleAdapter(port=0, status_interval=TICK)
+        await adapter.start(lambda: state)
+        try:
+            async with aiohttp.ClientSession() as http:
+                async with http.ws_connect(_ws_url(adapter)) as ws:
+                    await _receive(ws)
+
+                    config = plugin["config"]
+                    assert isinstance(config, list)
+                    config[0]["value"] = "http://tavily.local"
+                    frame = await _receive(ws)
+                    assert frame["data"]["plugins"][0]["config"][0]["value"] == (
+                        "http://tavily.local"
+                    )
+
+                    secrets = plugin["secrets"]
+                    assert isinstance(secrets, list)
+                    secrets[0]["present"] = True
+                    plugin["ready"] = {
+                        "manifest": True,
+                        "config": True,
+                        "secrets": True,
+                    }
+                    frame = await _receive(ws)
+                    [entry] = frame["data"]["plugins"]
+                    assert entry["secrets"][0]["present"] is True
+                    assert entry["ready"]["secrets"] is True
                     await _expect_silence(ws)
         finally:
             await adapter.stop()
