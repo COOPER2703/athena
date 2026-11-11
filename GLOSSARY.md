@@ -331,13 +331,6 @@ Le noyau l'exécute par le même round-trip qu'un Tool du noyau, mais l'exécuti
 serveur, vers la plateforme.
 _Avoid_: Tool externe, tool intégré, wrapper
 
-### Notion
-
-**Page Notion**:
-Une page du workspace Notion, seule unité que le plugin `notion` lit et modifie. Une base de
-données ou une data source n'est pas une Page.
-_Avoid_: Note, fiche, document, page web
-
 ### Google Workspace
 
 **Compte Google**:

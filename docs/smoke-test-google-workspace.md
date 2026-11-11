@@ -10,7 +10,7 @@ Le plugin échange des refresh tokens statiques contre des access tokens d'une
 heure, gardés **en mémoire seulement**. Il n'exécute aucun flow OAuth, ne
 persiste aucun token et ne pousse aucun Événement (ni Source ni Watcher en v1).
 
-Voir `docs/smoke-test-notion.md` pour la forme générale d'un smoke test de
+Voir `plugins/notion/docs/smoke-test.md` pour la forme générale d'un smoke test de
 plugin, `docs/smoke-test-t4-plugins.md` pour le contrat des plugins et
 `docs/smoke-test-t5-console.md` pour la Console.
 

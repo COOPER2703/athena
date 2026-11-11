@@ -22,3 +22,4 @@ remplit à chaque déménagement (spec #147, tickets #149 à #154).
 | ------------------ | ---------------- | ------ |
 | `0015` | `plugins/homeassistant/docs/adr/0001-home-assistant-via-mcp.md` | #149 |
 | `0018` | `plugins/websearch/docs/adr/0001-recherche-web-par-plugin.md` | #150 |
+| `0019` | `plugins/notion/docs/adr/0001-notion-en-rest-plutot-que-mcp.md` | #151 |

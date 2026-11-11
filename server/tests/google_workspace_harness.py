@@ -1,6 +1,6 @@
 """Harnais partagé des tests du plugin ``google-workspace``.
 
-Mêmes formes que ``notion_harness.py`` : un faux Gemini Live retient les
+Mêmes formes que les autres tests de plugin : un faux Gemini Live retient les
 Configs ouvertes, l'App tourne pour de vrai sur une socket éphémère, et le
 plugin réel est copié dans ``tmp_path`` pour être activé par ``plugins.json``.
 Les secrets multi-comptes, les fabriques d'objets Gmail et la session de test
