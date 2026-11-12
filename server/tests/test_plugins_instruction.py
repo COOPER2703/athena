@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from typing import Mapping
 
-from conftest import FakeJudge, close_window, drive, handle, opened
+from conftest import close_window, drive, handle, opened
+from testkit import FakeJudge
 from server.core import (
     Coordinator,
     EventReceived,

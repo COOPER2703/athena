@@ -1,4 +1,4 @@
-"""Plugin ``homeassistant`` : client du Serveur MCP HA (ADR-0015).
+"""Plugin ``homeassistant`` : client du Serveur MCP HA (ADR local 0001).
 
 Athena ne parle à Home Assistant que par l'endpoint MCP **Assist**
 (``/api/mcp/assist``), en Streamable HTTP stateless avec un token longue durée.
@@ -10,7 +10,7 @@ appel de Tool) ouvre sa propre session MCP. Rien n'est donc à surveiller, et un
 redémarrage de Home Assistant se répare tout seul à l'appel suivant, sans
 redémarrer Athena.
 
-Délais (ADR-0015) : 5 s pour la découverte et l'instruction, 10 s pour un
+Délais (ADR local 0001) : 5 s pour la découverte et l'instruction, 10 s pour un
 appel. Un appel ne lève jamais vers le noyau (sauf annulation) : une panne de
 la maison devient un résultat d'erreur rendu au modèle. Une découverte
 impossible, elle, lève ``PluginUnavailable`` : le chargeur trace ``failed``,
@@ -42,7 +42,7 @@ from plugin_api import (
 # administrateur et dont le périmètre est exactement l'Exposition Assist.
 ASSIST_PATH = "/api/mcp/assist"
 
-# Budgets de l'ADR-0015. Lus à chaque opération (jamais figés au chargement)
+# Budgets de l'ADR local 0001. Lus à chaque opération (jamais figés au chargement)
 # pour que les tests puissent les réduire sans toucher aux valeurs de prod.
 DISCOVERY_TIMEOUT = 5.0
 CALL_TIMEOUT = 10.0
@@ -107,7 +107,7 @@ async def _discover(
     Ouverture de session, ``tools/list`` et instruction tiennent dans le même
     budget ``DISCOVERY_TIMEOUT``. L'instruction ne reçoit que le temps restant,
     et son échec est absorbé : une panne de ``prompts/get`` ne prive jamais le
-    modèle des Tools déjà découverts (ADR-0015).
+    modèle des Tools déjà découverts (ADR local 0001).
 
     Une découverte impossible lève ``PluginUnavailable`` : le chargeur trace
     ``failed``, démarre en mode dégradé et retente en tâche de fond (#57),
@@ -160,7 +160,7 @@ async def _list_tools(session: ClientSession) -> list[Any]:
 
 
 def _trace_annotations(trace: Trace, tool: Any) -> None:
-    """Trace les annotations MCP d'un Tool ; elles ne filtrent rien (ADR-0015)."""
+    """Trace les annotations MCP d'un Tool ; elles ne filtrent rien (ADR local 0001)."""
     annotations = tool.annotations
     trace(
         "ToolAnnotations",

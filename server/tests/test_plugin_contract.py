@@ -36,9 +36,18 @@ def _imported_modules(tree: ast.AST) -> set[str]:
     return modules
 
 
+def _plugin_code_files() -> list[Path]:
+    """Les modules du plugin, hors tests : les tests, eux, utilisent la couture serveur."""
+    return sorted(
+        path
+        for path in PLUGINS_DIR.rglob("*.py")
+        if "tests" not in path.relative_to(PLUGINS_DIR).parts
+    )
+
+
 def test_no_plugin_imports_a_server_internal() -> None:
-    """Le contrat public suffit : aucun plugin ne touche aux internes du serveur."""
-    files = sorted(PLUGINS_DIR.rglob("*.py"))
+    """Le contrat public suffit : aucun module de plugin ne touche aux internes du serveur."""
+    files = _plugin_code_files()
     assert files, "expected the plugins directory to contain modules"
 
     for path in files:

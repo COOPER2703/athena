@@ -14,7 +14,7 @@ from typing import Any, AsyncIterator
 import pytest
 import websockets
 
-from conftest import RecordingTraceSink, _url, register, wait_until
+from testkit import RecordingTraceSink, register, url, wait_until
 from ha_stub import (
     ASSIST_INSTRUCTION,
     DESTRUCTIVE_TOOL,
@@ -36,7 +36,7 @@ from server.app.root import App
 from server.app.secrets import EnvSecretResolver
 from server.core.plugins import PluginRegistry
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 PLUGIN_DIR = REPO_ROOT / "plugins" / "homeassistant"
 TOKEN = "ha-long-lived-test-token"
 TOKEN_VARIABLE = "ATHENA_PLUGIN_HOMEASSISTANT_TOKEN"
@@ -152,7 +152,7 @@ async def _running_app(
 async def _live_session(
     transport: WebSocketTransport, live: _ToolLiveConnect
 ) -> AsyncIterator[_ScriptedSession]:
-    async with websockets.connect(_url(transport)) as ws:
+    async with websockets.connect(url(transport)) as ws:
         await register(ws, transport, drain=False)
         await ws.send(encode(SessionStart()))
         await wait_until(lambda: bool(live.sessions))

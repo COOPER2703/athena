@@ -1,6 +1,6 @@
 """Harnais partagé des tests du plugin ``notion``.
 
-Mêmes formes que ``test_plugins_websearch.py`` : un faux Gemini Live retient
+Mêmes formes que les autres tests de plugin : un faux Gemini Live retient
 les Configs ouvertes, l'App tourne pour de vrai sur une socket éphémère, et le
 plugin réel est copié dans ``tmp_path`` pour être activé par ``plugins.json``.
 Les projections d'objets Notion et la session de test vivent ici, une seule
@@ -20,7 +20,7 @@ from typing import Any, AsyncIterator, Sequence
 
 import websockets
 
-from conftest import RecordingTraceSink, _url, register, wait_until
+from testkit import RecordingTraceSink, register, url, wait_until
 from protocol import SessionStart, encode
 from server.adapters.gemini import GeminiLiveAdapter
 from server.adapters.plugins import PluginLoader
@@ -31,7 +31,7 @@ from server.app.secrets import EnvSecretResolver
 from server.app.trace import FanOutTraceSink
 from server.core.plugins import PluginRegistry
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 PLUGIN_DIR = REPO_ROOT / "plugins" / "notion"
 
 SECRET = "secret-notion-long-lived-test-token"
@@ -154,7 +154,7 @@ async def live_session(
     transport: WebSocketTransport, live: ToolLiveConnect
 ) -> AsyncIterator[ScriptedSession]:
     """Ouvre une vraie Connexion Live, enregistre le client, démarre la Session."""
-    async with websockets.connect(_url(transport)) as ws:
+    async with websockets.connect(url(transport)) as ws:
         await register(ws, transport, drain=False)
         await ws.send(encode(SessionStart()))
         await wait_until(lambda: bool(live.sessions))

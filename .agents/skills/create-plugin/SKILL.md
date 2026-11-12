@@ -39,13 +39,19 @@ Ask one round, two fields:
 Check that `plugins/<name>/` does not exist. A plugin name must be unique; the loader also
 requires the manifest name to match the directory.
 
+Read `plugins/README.md` before going further: it states the mandatory shape of a plugin
+folder and its amovibility rule. The spec must produce that shape — no test belongs in
+`server/tests/`, and no plugin-specific document belongs in the root `docs/`.
+
 Do not ask the rest of the plugin questions yourself. The grill owns them.
 
 ### 3. Run the grill
 
 Load the `grill-with-docs` skill with the name and purpose in context. Let it run its rounds;
-it will interview the developer, challenge the vocabulary against `GLOSSARY.md`, and write
-ADRs or glossary entries when a decision crystallises.
+it will interview the developer, challenge the vocabulary against `GLOSSARY-MAP.md` and the
+relevant glossaries, and write ADRs or glossary entries when a decision crystallises. Plugin
+terms go into `plugins/<name>/GLOSSARY.md` and plugin decisions into
+`plugins/<name>/docs/adr/`, numbered locally from `0001`; central ADRs are for the system.
 
 Before the grill closes, list the proposed Tool names and check that none is already owned by
 the kernel or another plugin (`server/core`, `plugins/*/plugin.py`). A Tool name collision is a
@@ -61,6 +67,9 @@ The spec must contain, inside *Implementation Decisions*:
 - a **Plugin decisions** block: manifest, platform (`server`), Tools and schemas, non-secret
   config, secret names, startup probe, retryable vs fatal failures, degraded start, traces,
   events, activation, Console visibility;
+- a **Plugin folder** block: the mandatory shape from `plugins/README.md` — `plugin.json`,
+  `plugin.py`, `README.md` (activation and secrets), `GLOSSARY.md`, `tests/`, `docs/` with
+  the smoke test and locally numbered ADRs — and the vocabulary or decisions it introduces;
 - a **Tool contract** block per Tool: name, description, parameters, what the model must and
   must not do, and the error shape it returns.
 
