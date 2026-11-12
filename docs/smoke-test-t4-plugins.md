@@ -8,9 +8,9 @@ lisible dans la Console.
 Ce document ne met en scène **aucun plugin réel**. Le parcours s'appuie sur un plugin
 synthétique, `fixture`, construit ci-dessous à partir d'un manifeste et d'un court
 `plugin.py` — exactement comme le font les tests du chargeur. Il reste donc vrai quand un
-plugin réel est retiré du dépôt. Pour un exemple concret, chaque plugin documente son
-activation dans son propre `README.md` ; la forme obligatoire d'un dossier et la règle
-d'activation sont dans [`plugins/README.md`](../plugins/README.md).
+plugin réel est retiré du dépôt. Chaque plugin documente son activation, sa configuration
+et ses secrets dans `plugins/<nom>/README.md` ; la forme obligatoire d'un dossier et la
+règle d'activation sont dans [`plugins/README.md`](../plugins/README.md).
 
 Le parcours couvre la découverte, l'activation, l'absence de fichier d'état, un échec
 fatal opposé à un démarrage dégradé avec relance, la collision de nom de Tool et

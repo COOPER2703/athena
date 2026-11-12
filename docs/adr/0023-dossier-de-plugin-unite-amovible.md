@@ -47,15 +47,17 @@ serveur, reste le garde-fou de l'isolation du code.
 
 ## Les deux arbitrages assumés
 
-**1. Les tests d'un plugin dépendent de la couture de test du serveur.** Une seule
-dépendance de test sort du dossier : le paquet racine `testkit`, qui expose exactement
-cinq noms (`RecordingTraceSink`, `FakeJudge`, `wait_until`, `url`, `register`). C'est
-intentionnel : les tests de plugin traversent la vraie couture — App, faux Gemini Live,
-registre, plugin copié dans un dossier temporaire, faux serveur externe — et ne peuvent
-pas la reconstruire sans la dupliquer. `testkit` importe les adaptateurs du serveur (le
-transport WebSocket, le contrat d'événements), **pas** `plugin_api` : c'est un nom posé
-sur une dépendance qui existait déjà de façon implicite via le `conftest` du serveur. Le
-`conftest` des tests du noyau ré-exporte ces cinq noms et garde le reste.
+**1. Les tests d'un plugin dépendent de la couture de test du serveur.** Un seul paquet
+d'aide est partagé hors des dossiers : `testkit`, qui nomme exactement cinq aides
+(`RecordingTraceSink`, `FakeJudge`, `wait_until`, `url`, `register`). C'est intentionnel :
+les tests de plugin traversent la vraie couture — App, faux Gemini Live, registre, plugin
+copié dans un dossier temporaire, faux serveur externe — et ne peuvent pas la reconstruire
+sans la dupliquer. `testkit` importe `server.core` (`Judgment`), `server.core.events` et
+`protocol` ; le transport WebSocket n'y entre que pour le typage (`TYPE_CHECKING`). Les
+tests déplacés importent de même directement `server.app`, `server.adapters.*` et
+`server.core.*`. Le seul interdit est `plugin_api` : `testkit` ne l'importe pas, et c'est
+ce qui garde le paquet du côté du test. Le `conftest` des tests du noyau ré-exporte ces
+cinq noms et garde le reste.
 
 **2. Il n'y a volontairement aucun test de conformité de la forme d'un dossier.** La
 présence d'un README, d'un glossaire, d'un smoke test ou d'un dossier de tests n'est
