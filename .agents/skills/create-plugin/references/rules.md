@@ -28,8 +28,9 @@ authority that decides the details.
    Authority: ADR-0014, `server/adapters/plugins/loader.py`.
 
 6. **A Tool handler never raises.** It returns a mapping. A platform failure becomes a French
-   sentence the model can say, and the Session survives. Authority: ADR-0018,
-   `plugins/websearch/plugin.py`, `plugins/homeassistant/plugin.py`.
+   sentence the model can say, and the Session survives. Authority:
+   `plugins/websearch/docs/adr/0001-recherche-web-par-plugin.md`, `plugins/websearch/plugin.py`,
+   `plugins/homeassistant/plugin.py`.
 
 7. **Secrets never leak.** They are resolved by the loader from
    `ATHENA_PLUGIN_<PLUGIN>_<SECRET>` and passed in `context.secrets`. They must never appear in
@@ -44,8 +45,9 @@ authority that decides the details.
 9. **Tests prove observable behaviour.** Fake the external platform locally; exercise the full
    path App → Gemini → registry → plugin → platform; assert on the requests emitted, the
    payload returned to the model, and the Traces. Do not test private helpers directly.
-   Authority: ADR-0018, `plugins/homeassistant/tests/test_plugins_homeassistant.py`,
-   `server/tests/test_plugins_websearch.py`.
+   Authority: `plugins/websearch/docs/adr/0001-recherche-web-par-plugin.md`,
+   `plugins/homeassistant/tests/test_plugins_homeassistant.py`,
+   `plugins/websearch/tests/test_plugins_websearch.py`.
 
 10. **The contract test must stay green.** No `server` import, an exact manifest, and a pure
     `plugin_api`. Authority: `server/tests/test_plugin_contract.py`.
@@ -55,7 +57,11 @@ authority that decides the details.
     declared at the next Live connection. `plugins.json` is not versioned. Authority:
     ADR-0014.
 
-12. **Document the domain.** A new term goes into `GLOSSARY.md`; a durable, surprising,
-    hard-to-reverse trade-off goes into an ADR; a manual end-to-end path goes into a smoke
-    test. User-facing strings are French and use the glossary vocabulary. Authority:
-    `docs/agents/domain.md`, the `domain-modeling` skill, `GLOSSARY.md`.
+12. **Document the domain.** A term that belongs only to a plugin goes into that plugin's
+    `GLOSSARY.md`; a durable, surprising, hard-to-reverse trade-off of the plugin goes into
+    its `docs/adr/`, numbered locally from `0001` (central ADRs are for the system only); a
+    manual end-to-end path goes into the plugin's `docs/smoke-test.md`. Terms of the contract
+    and the kernel stay in the root `GLOSSARY.md`, and system decisions in `docs/adr/`.
+    User-facing strings are French and use the glossary vocabulary. Authority:
+    `plugins/README.md`, `docs/adr/README.md`, `docs/agents/domain.md`, the `domain-modeling`
+    skill, `GLOSSARY-MAP.md`.
