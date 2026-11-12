@@ -1,13 +1,16 @@
-"""Harnais de test partagé : la seule dépendance de test hors d'un dossier de plugin.
+"""Harnais de test partagé : les cinq aides communes aux tests.
 
 Le paquet expose **exactement cinq noms** — ``RecordingTraceSink``, ``FakeJudge``,
 ``wait_until``, ``url`` et ``register`` — et rien d'autre. Un test de plugin les importe
 tels quels ; le ``conftest`` des tests du serveur les ré-exporte et garde le reste
 (Console, horloge, aides de pilotage du Coordinateur).
 
-Cette dépendance est assumée et consignée dans l'ADR-0023 : ``testkit`` importe les
-adaptateurs du serveur (le transport WebSocket, le contrat d'événements), pas
-``plugin_api``. C'est un nom posé sur une couture qui existait déjà.
+Cette dépendance est assumée et consignée dans l'ADR-0023 : ``testkit`` importe
+``server.core`` (``Judgment``), ``server.core.events`` et ``protocol`` ; le transport
+WebSocket n'y entre que pour le typage (``TYPE_CHECKING``). Il n'importe jamais
+``plugin_api``. Les tests de plugin, eux, traversent la vraie couture et importent
+directement ``server.app``, ``server.adapters.*`` et ``server.core.*`` : c'est
+l'arbitrage assumé — le paquet nomme les aides, il ne cache pas le serveur.
 """
 
 import asyncio as _asyncio

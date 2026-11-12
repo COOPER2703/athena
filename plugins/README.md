@@ -31,6 +31,9 @@ plugins/<nom>/
 - Les **tests** importent `testkit` (le harnais partagé, cinq noms) et leur propre
   dossier. Le `conftest.py` local ajoute ce dossier au chemin ; il n'importe pas celui du
   serveur. Chaque plugin garde des noms de modules d'aide uniques.
+- Les **gros harnais partagés** peuvent voisiner les stubs dans `tests/`, sous un nom de
+  module unique (`<nom>_harness.py`, par exemple). Ce ne sont pas des fichiers
+  obligatoires : le `conftest.py` local les rend importables comme le stub.
 - Les **ADR** du plugin se numérotent à partir de `0001`, localement. La correspondance
   ancien numéro central → nouveau numéro local est tenue dans `docs/adr/README.md`.
 
