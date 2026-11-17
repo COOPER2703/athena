@@ -106,6 +106,21 @@ describe("describeError", () => {
       "problème",
     );
   });
+
+  it("traduit les refus de la zone Plugins", () => {
+    expect(describeError(new ApiError(404, "plugin_not_found"))).toContain(
+      "n'existe pas",
+    );
+    expect(
+      describeError(new ApiError(400, "invalid_plugin_config")),
+    ).toContain("configuration");
+    expect(describeError(new ApiError(503, "plugins_unavailable"))).toContain(
+      "n'est pas disponible",
+    );
+    expect(describeError(new ApiError(500, "plugins_state_invalid"))).toContain(
+      "état des Plugins",
+    );
+  });
 });
 
 describe("describeFieldErrors", () => {
@@ -126,6 +141,18 @@ describe("describeFieldErrors", () => {
 
   it("rend un objet vide quand l'erreur ne porte pas de champ", () => {
     expect(describeFieldErrors(new Error("boom"))).toEqual({});
+  });
+
+  it("traduit les codes de champ de la configuration d'un Plugin", () => {
+    const error = ApiError.from(400, {
+      error: "invalid_plugin_config",
+      fields: { base_url: "invalid_url", typo: "unknown_field" },
+    });
+
+    expect(describeFieldErrors(error)).toEqual({
+      base_url: "Attendu : une URL http(s) complète.",
+      typo: "Ce champ n'est pas déclaré par le manifeste du Plugin.",
+    });
   });
 });
 

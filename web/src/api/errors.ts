@@ -110,6 +110,22 @@ const MESSAGES: Readonly<Record<string, string>> = {
   not_implemented:
     "Cette fonction n'est pas encore disponible sur cette instance.",
   not_found: "Cette ressource n'existe pas ou plus.",
+  plugin_not_found: "Ce Plugin n'existe pas dans le répertoire des Plugins.",
+  plugin_manifest_invalid:
+    "Le manifeste de ce Plugin est illisible : corrigez-le sur le serveur.",
+  invalid_plugin_config: "La configuration du Plugin est refusée.",
+  invalid_plugin_secret: "Le Secret du Plugin est refusé.",
+  unknown_secret: "Ce Plugin ne déclare pas ce Secret.",
+  plugins_unavailable:
+    "La gestion des Plugins n'est pas disponible sur cette instance.",
+  plugins_state_invalid:
+    "Le fichier d'état des Plugins est illisible : corrigez-le sur le serveur.",
+  // Codes par champ des formulaires (Plugin, Réglages, Secrets).
+  required: "Ce champ est obligatoire.",
+  invalid_url: "Attendu : une URL http(s) complète.",
+  unknown_field: "Ce champ n'est pas déclaré par le manifeste du Plugin.",
+  invalid_value: "Cette valeur n'est pas valide.",
+  too_long: "Cette valeur est trop longue.",
   invalid_response: "La réponse du serveur est illisible.",
   network:
     "Impossible de joindre le serveur. Vérifiez qu'il est démarré, puis réessayez.",

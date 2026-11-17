@@ -516,6 +516,133 @@ class FakeSecretValidator:
 
 
 # ---------------------------------------------------------------------------
+# Plugins de test : dossiers déposés avant le démarrage
+# ---------------------------------------------------------------------------
+
+#: Code du plugin de fixture : un Tool ``<nom>__echo`` et une instruction.
+#: Il ne lit ni config ni secret, sauf quand le test le demande.
+PLUGIN_CODE = '''
+from plugin_api import PluginBinding, ToolBinding, ToolSpec
+
+
+async def handle(arguments):
+    return {"status": "ok", "plugin": "fixture"}
+
+
+def create(context):
+    return PluginBinding(
+        name=context.name,
+        tools=(
+            ToolBinding(
+                spec=ToolSpec(
+                    name=f"{context.name}__echo",
+                    description="répond à tout",
+                    parameters={"type": "object", "properties": {}},
+                ),
+                handler=handle,
+            ),
+        ),
+        instruction=f"Utilise {context.name}__echo pour répéter.",
+    )
+'''
+
+#: Code d'un plugin qui n'accepte de démarrer que si son secret vaut la valeur
+#: attendue : la seule façon de prouver la précédence sans exposer la valeur.
+SECRET_CHECKING_CODE = '''
+from plugin_api import PluginBinding, PluginUnavailable, ToolBinding, ToolSpec
+
+EXPECTED = "{expected}"
+
+
+async def handle(arguments):
+    return {{"status": "ok"}}
+
+
+def create(context):
+    if context.secrets.get("token") != EXPECTED:
+        raise PluginUnavailable("secret absent ou différent")
+    return PluginBinding(
+        name=context.name,
+        tools=(
+            ToolBinding(
+                spec=ToolSpec(
+                    name=f"{{context.name}}__echo",
+                    description="répond à tout",
+                    parameters={{"type": "object", "properties": {{}}}},
+                ),
+                handler=handle,
+            ),
+        ),
+    )
+'''
+
+
+def plugin_manifest(
+    name: str,
+    *,
+    version: str = "0.1.0",
+    description: str = "Plugin de test",
+    platform: str = "server",
+    entrypoint: str = "plugin.py",
+    config: list[dict[str, object]] | None = None,
+    secrets: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    """Manifeste minimal valide, à surcharger champ par champ."""
+    manifest: dict[str, object] = {
+        "api_version": 1,
+        "name": name,
+        "version": version,
+        "description": description,
+        "platform": platform,
+        "entrypoint": entrypoint,
+    }
+    if config is not None:
+        manifest["config"] = config
+    if secrets is not None:
+        manifest["secrets"] = secrets
+    return manifest
+
+
+def write_plugin(
+    plugins_dir: Path,
+    name: str,
+    *,
+    manifest: Mapping[str, object] | None = None,
+    code: str = PLUGIN_CODE,
+    entrypoint: str = "plugin.py",
+) -> Path:
+    """Dépose un dossier de Plugin complet, prêt pour un démarrage."""
+    directory = plugins_dir / name
+    directory.mkdir(parents=True, exist_ok=True)
+    payload = plugin_manifest(name) if manifest is None else manifest
+    (directory / "plugin.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+    (directory / entrypoint).write_text(code, encoding="utf-8")
+    return directory
+
+
+def write_plugins_state(
+    path: Path,
+    *,
+    enabled: tuple[str, ...] = (),
+    config: Mapping[str, Mapping[str, object]] | None = None,
+    extra: Mapping[str, object] | None = None,
+) -> Path:
+    """Écrit un fichier d'état, avec des clés inconnues si demandé."""
+    payload: dict[str, object] = {
+        "enabled": list(enabled),
+        "config": {name: dict(values) for name, values in (config or {}).items()},
+    }
+    if extra:
+        payload.update(extra)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return path
+
+
+# ---------------------------------------------------------------------------
 # Surfaces du serveur démarré
 # ---------------------------------------------------------------------------
 
@@ -800,6 +927,30 @@ class AthenaServer:
                 "appelez d'abord `await server.install()` pour obtenir un Ticket"
             )
         return self._session
+
+    async def login(
+        self,
+        *,
+        username: str = "admin",
+        password: str = TEST_PASSWORD,
+    ) -> aiohttp.ClientSession:
+        """Ouvre un Ticket sur une instance déjà installée (second démarrage)."""
+        http = self.console()
+        async with http.post(
+            f"{self.url}/api/login",
+            json={"username": username, "password": password},
+        ) as response:
+            assert response.status == 200, await response.text()
+            await response.json()
+        self._session = http
+        return http
+
+    def plugins_state(self) -> dict[str, Any]:
+        """Le fichier d'état des Plugins, déjà décodé (vide s'il est absent)."""
+        path = self.paths.plugins_state
+        if not path.is_file():
+            return {}
+        return json.loads(path.read_text(encoding="utf-8"))
 
     async def access_token(
         self,

@@ -72,4 +72,5 @@ export function createQueryClient(): QueryClient {
 export const queryKeys = {
   session: ["session"] as const,
   status: ["status"] as const,
+  plugins: ["plugins"] as const,
 } as const;

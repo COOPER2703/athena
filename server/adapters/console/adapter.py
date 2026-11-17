@@ -34,6 +34,7 @@ from server.adapters.console.contract import (
     LOGOUT_ALL_PATH,
     LOGOUT_PATH,
     PASSWORD_PATH,
+    PLUGINS_PATH,
     SECRETS_PATH,
     SESSION_PATH,
     SETUP_PATH,
@@ -43,6 +44,7 @@ from server.adapters.console.contract import (
     TOKENS_PATH,
 )
 from server.adapters.console.events import EventInjection
+from server.adapters.console.plugins import PluginsRoutes
 from server.adapters.console.secrets import SecretsRoutes
 from server.adapters.console.status import (
     DEFAULT_STATUS_INTERVAL,
@@ -52,6 +54,7 @@ from server.adapters.console.stream import stream_handler
 from server.adapters.console.thread import ThreadRoutes
 from server.adapters.console.trace_buffer import TraceBuffer
 from server.adapters.event_body import MAX_BODY_BYTES
+from server.adapters.plugins.admin import PluginAdmin
 from server.adapters.trace import NullTraceSink
 from server.core.ports import (
     AuthService,
@@ -141,6 +144,7 @@ class ConsoleAdapter:
         installation: Callable[[], InstallationStatus] | None = None,
         master_key: Callable[[], str | None] | None = None,
         thread: ThreadReader | None = None,
+        plugin_admin: PluginAdmin | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -160,6 +164,10 @@ class ConsoleAdapter:
         self._secrets_routes = SecretsRoutes(
             secrets=secrets, validator=secret_validator
         )
+        # Zone Plugins : activation, configuration et Secrets. Le service est
+        # construit par la racine de composition, qui seule connaît le
+        # répertoire et le fichier d'état des Plugins.
+        self._plugins_routes = PluginsRoutes(plugin_admin)
         self._chat = ChatEndpoint(installation=self._installation)
         # Fil de la Conversation : lecture paginée du Journal, sans état du
         # noyau. Absent, la route explique que le fil n'est pas disponible.
@@ -312,6 +320,20 @@ class ConsoleAdapter:
         )
         app.router.add_delete(
             f"{SECRETS_PATH}/{{name}}", self._secrets_routes.handle_delete
+        )
+        # Zone Plugins : liste, activation/config et Secrets d'un Plugin.
+        # Enregistrées avant le repli ``/api/*`` (ticket #176).
+        app.router.add_get(PLUGINS_PATH, self._plugins_routes.handle_list)
+        app.router.add_put(
+            f"{PLUGINS_PATH}/{{name}}", self._plugins_routes.handle_update
+        )
+        app.router.add_put(
+            f"{PLUGINS_PATH}/{{name}}/secrets/{{key}}",
+            self._plugins_routes.handle_secret_set,
+        )
+        app.router.add_delete(
+            f"{PLUGINS_PATH}/{{name}}/secrets/{{key}}",
+            self._plugins_routes.handle_secret_delete,
         )
         # Conversation : refusée côté serveur tant que l'Installation n'est pas
         # terminée, puis Tour complet en ``text/event-stream`` (ADR-0023).

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
 
@@ -28,6 +29,7 @@ __all__ = [
     "ConfigField",
     "PluginBinding",
     "PluginContext",
+    "PluginDescription",
     "PluginManifest",
     "PluginRegistry",
     "PluginUnavailable",
@@ -39,6 +41,41 @@ __all__ = [
 # États de chargement observables d'un plugin (GLOSSARY, section Plugins) :
 # activé, désactivé, dossier manquant, ou en échec de chargement.
 PLUGIN_STATES = ("activated", "disabled", "missing", "failed")
+
+
+@dataclass(frozen=True, slots=True)
+class PluginDescription:
+    """Métadonnées d'un plugin, telles que la Console les affiche.
+
+    Elle ne porte **jamais** de valeur de Secret : seulement les noms de clés
+    déclarés par le manifeste. ``error`` dit pourquoi un manifeste est illisible
+    ou pourquoi le chargement a échoué ; la raison est déjà expurgée par le
+    chargeur. Une description existe même quand le plugin n'a pas été chargé,
+    pour qu'un dossier cassé reste lisible sans faire échouer le démarrage.
+    """
+
+    name: str
+    version: str = ""
+    platform: str = ""
+    description: str = ""
+    config: tuple[ConfigField, ...] = ()
+    secrets: tuple[SecretField, ...] = ()
+    error: str = ""
+
+    @classmethod
+    def from_manifest(
+        cls, manifest: PluginManifest, *, error: str = ""
+    ) -> PluginDescription:
+        """Décrit un manifeste lu ; ``error`` documente un chargement en échec."""
+        return cls(
+            name=manifest.name,
+            version=manifest.version,
+            platform=manifest.platform,
+            description=manifest.description,
+            config=manifest.config,
+            secrets=manifest.secrets,
+            error=error,
+        )
 
 
 class PluginRegistry:
@@ -59,6 +96,7 @@ class PluginRegistry:
         self._tools = ToolRegistry()
         self._instructions: dict[str, str] = {}
         self._states: dict[str, str] = {}
+        self._descriptions: dict[str, PluginDescription] = {}
 
     @property
     def tools(self) -> ToolRegistry:
@@ -69,21 +107,83 @@ class PluginRegistry:
         """États connus des plugins, en lecture seule."""
         return MappingProxyType(self._states)
 
+    @property
+    def descriptions(self) -> Mapping[str, PluginDescription]:
+        """Métadonnées connues des plugins, en lecture seule."""
+        return MappingProxyType(self._descriptions)
+
     def state_of(self, plugin: str) -> str | None:
         """État de chargement d'un plugin, ``None`` s'il n'a jamais été vu."""
         return self._states.get(plugin)
 
-    def mark_state(self, plugin: str, state: str) -> None:
+    def description_of(self, plugin: str) -> PluginDescription | None:
+        """Métadonnées d'un plugin, ``None`` s'il n'a jamais été décrit."""
+        return self._descriptions.get(plugin)
+
+    def describe(self, description: PluginDescription) -> None:
+        """Enregistre les métadonnées d'un plugin, sans état de chargement.
+
+        Le catalogue peut décrire un dossier que le chargeur n'a jamais ouvert
+        (plugin non listé ou manifeste cassé) : la Console reste ainsi capable
+        de le montrer sans que le démarrage en dépende.
+        """
+        name = description.name.strip()
+        if not name:
+            raise ValueError("plugin name is required")
+        self._descriptions[name] = description
+
+    def instruction_of(self, plugin: str) -> str:
+        """Instruction d'usage d'un plugin, vide s'il n'en déclare pas."""
+        return self._instructions.get(plugin, "")
+
+    def tools_of(self, plugin: str) -> tuple[str, ...]:
+        """Noms des Tools réellement attribués à un plugin, triés."""
+        return tuple(
+            sorted(
+                spec.name
+                for spec in self._tools.specs()
+                if self._tools.owner_of(spec.name) == plugin
+            )
+        )
+
+    def mark_state(
+        self,
+        plugin: str,
+        state: str,
+        *,
+        manifest: PluginManifest | None = None,
+        error: str = "",
+    ) -> None:
         """Enregistre l'état de chargement d'un plugin.
 
         Les états sont ceux du glossaire ; une valeur inconnue signale une
-        dérive du chargeur, pas une donnée utilisateur.
+        dérive du chargeur, pas une donnée utilisateur. Un manifeste fourni
+        enrichit le catalogue (version, plateforme, description, exigences) ;
+        ``error`` porte une raison lisible, jamais une valeur de Secret.
         """
         if state not in PLUGIN_STATES:
             raise ValueError(
                 f"unknown plugin state {state!r} (known: {', '.join(PLUGIN_STATES)})"
             )
-        self._states[plugin.strip()] = state
+        name = plugin.strip()
+        self._states[name] = state
+        if manifest is not None:
+            self._descriptions[name] = PluginDescription.from_manifest(
+                manifest, error=error
+            )
+        elif error:
+            known = self._descriptions.get(name)
+            self._descriptions[name] = (
+                PluginDescription(
+                    name=name,
+                    version=known.version if known else "",
+                    platform=known.platform if known else "",
+                    description=known.description if known else "",
+                    config=known.config if known else (),
+                    secrets=known.secrets if known else (),
+                    error=error,
+                )
+            )
 
     def add(self, binding: PluginBinding) -> None:
         """Enregistre tous les Tools d'un binding, attribués à son plugin.

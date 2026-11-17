@@ -22,6 +22,9 @@ from server.adapters.memory import (
     SqliteMemoryStore,
 )
 from server.adapters.plugins import PluginLoader
+from server.adapters.plugins.admin import PluginAdmin
+from server.adapters.plugins.catalogue import PluginCatalogue
+from server.adapters.plugins.state import PluginStateStore
 from server.adapters.settings import LayeredSecretResolver, SqliteSettingsStore
 from server.adapters.trace import emit
 from server.adapters.transport import ClientConnection, WebSocketTransport
@@ -940,6 +943,16 @@ def build_app(
         secrets=secret_resolver,
         trace_sink=trace_sink,
     )
+    # Gestion des Plugins (ticket #176) : le catalogue décrit tous les
+    # dossiers, y compris cassés ou non listés ; le service écrit l'état et
+    # les Secrets, sans jamais recharger un plugin à chaud.
+    plugin_admin = PluginAdmin(
+        catalogue=PluginCatalogue(config.plugins.directory),
+        state=PluginStateStore(config.plugins.state_path),
+        registry=plugins,
+        loader=plugin_loader,
+        secrets=settings_store,
+    )
 
     webhook: WebhookAdapter | None = None
     if config.webhook.enabled and gemini_enabled:
@@ -979,6 +992,7 @@ def build_app(
                 user_id=config.memory.user_id,
                 retention_days=config.memory.journal_retention_days,
             ),
+            plugin_admin=plugin_admin,
         )
 
     return App(
