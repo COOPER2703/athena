@@ -64,6 +64,16 @@ export async function fetchSession(fetcher?: Fetcher): Promise<AuthSession> {
   return normalizeAuth(await requestJson("/api/session", {}, fetcher));
 }
 
+/**
+ * Lit l'instantané étendu du Diagnostic.
+ *
+ * Le corps reste brut : sa normalisation appartient au module qui l'affiche, et
+ * l'instantané peut s'étendre sans casser une Console plus ancienne.
+ */
+export async function fetchStatus(fetcher?: Fetcher): Promise<unknown> {
+  return requestJson("/api/status", {}, fetcher);
+}
+
 /** Identifiants de connexion. */
 export interface Credentials {
   username: string;
