@@ -122,6 +122,15 @@ describe("describeError", () => {
       "état des Plugins",
     );
   });
+
+  it("explique un magasin de réglages indisponible sans écran cassé", () => {
+    expect(
+      describeError(new ApiError(503, "settings_unavailable")),
+    ).toContain("magasin de réglages");
+    expect(describeError(new ApiError(400, "invalid_settings"))).toContain(
+      "réglages",
+    );
+  });
 });
 
 describe("describeFieldErrors", () => {
@@ -153,6 +162,23 @@ describe("describeFieldErrors", () => {
     expect(describeFieldErrors(error)).toEqual({
       base_url: "Attendu : une URL http(s) complète.",
       typo: "Ce champ n'est pas déclaré par le manifeste du Plugin.",
+    });
+  });
+
+  it("affiche la phrase d'un champ de Réglages et jamais un code inconnu", () => {
+    const error = ApiError.from(400, {
+      error: "invalid_settings",
+      fields: {
+        recall_k: "La valeur minimale est 1.",
+        confirm_url: "Confirmez la nouvelle adresse : http://x.test:9.",
+        futur: "code_du_futur",
+      },
+    });
+
+    expect(describeFieldErrors(error)).toEqual({
+      recall_k: "La valeur minimale est 1.",
+      confirm_url: "Confirmez la nouvelle adresse : http://x.test:9.",
+      futur: "Une erreur inattendue est survenue. Réessayez ; si cela persiste, consultez le journal du serveur.",
     });
   });
 });

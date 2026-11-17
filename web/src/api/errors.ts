@@ -119,6 +119,10 @@ const MESSAGES: Readonly<Record<string, string>> = {
   secret_not_found: "Ce Secret n'existe pas ou n'est plus enregistré.",
   secrets_unavailable:
     "Le magasin de Secrets n'est pas disponible sur cette instance.",
+  settings_unavailable:
+    "Le magasin de réglages n'est pas disponible sur cette instance : les Réglages ne peuvent pas être lus ni modifiés pour l'instant.",
+  invalid_settings:
+    "Certains réglages sont refusés : corrigez les champs signalés, puis réessayez.",
   not_implemented:
     "Cette fonction n'est pas encore disponible sur cette instance.",
   not_found: "Cette ressource n'existe pas ou plus.",
@@ -158,6 +162,21 @@ function messageForCode(code: string): string {
   return MESSAGES[code] ?? MESSAGES[code.replaceAll(" ", "_")] ?? UNEXPECTED;
 }
 
+/**
+ * Phrase d'une erreur **par champ**.
+ *
+ * Certaines routes de formulaire — les Réglages — renvoient directement une
+ * phrase française dans `fields`, alors que d'autres renvoient un code stable.
+ * Un code inconnu, lui, ne fuit jamais : seule une phrase lisible est reprise.
+ */
+function messageForField(value: string): string {
+  const known = MESSAGES[value] ?? MESSAGES[value.replaceAll(" ", "_")];
+  if (known !== undefined) {
+    return known;
+  }
+  return /\s/.test(value) ? value : UNEXPECTED;
+}
+
 /** Phrase française d'une erreur, sans jamais afficher son code. */
 export function describeError(error: unknown): string {
   if (!isApiError(error)) {
@@ -185,7 +204,7 @@ export function describeFieldErrors(error: unknown): Record<string, string> {
   }
   const messages: Record<string, string> = {};
   for (const [name, code] of Object.entries(error.fields)) {
-    messages[name] = messageForCode(code);
+    messages[name] = messageForField(code);
   }
   return messages;
 }
