@@ -7,28 +7,15 @@ import socket
 from pathlib import Path
 from typing import Callable, TypeVar
 
-import aiohttp
-import websockets
-
-from conftest import (
-    FakeJudge,
-    RecordingTraceSink,
-    console_session,
-    install_console,
-    wait_until,
-)
-from protocol import Register, Registered, SessionEndReason, decode, encode
+from conftest import FakeJudge, RecordingTraceSink, wait_until
+from protocol import SessionEndReason
 from server import __version__
-from server.adapters.auth import SqliteAuthStore
 from server.adapters.console import ConsoleAdapter
 from server.app.config import (
     AppConfig,
     AuthConfig,
     ConsoleConfig,
     GeminiConfig,
-    PluginsConfig,
-    ServerConfig,
-    WebhookConfig,
 )
 from server.app.root import (
     App,
@@ -37,11 +24,9 @@ from server.app.root import (
     load_judge_prompt,
     load_system_prompt,
 )
-from server.app.secrets import EnvSecretResolver
 from server.core.commands import (
     AnnounceSessionEnded,
     AnnounceSessionStarted,
-    CancelIdleTimer,
     CloseLiveConnection,
     Command,
     OpenLiveConnection,
@@ -50,7 +35,6 @@ from server.core.commands import (
     SendAnnouncementToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
-    StartIdleTimer,
 )
 from server.core.events import (
     ClientAudio,
@@ -74,6 +58,7 @@ from server.core.coordinator import (
     EVENT_WINDOW_TIMEOUT,
     ANNOUNCE_TIMEOUT,
 )
+from server_harness import ServerPaths, running_server
 
 _CommandT = TypeVar("_CommandT", bound=Command)
 
@@ -798,9 +783,9 @@ def create(context):
 '''
 
 
-def _install_fixture_plugin(tmp_path: Path) -> tuple[Path, Path]:
-    plugins_dir = tmp_path / "plugins"
-    plugin_dir = plugins_dir / "fixture"
+def _prepare_fixture_plugin(paths: ServerPaths) -> None:
+    """Dépose le plugin de fixture dans les répertoires du harnais."""
+    plugin_dir = paths.plugins_dir / "fixture"
     plugin_dir.mkdir(parents=True)
     (plugin_dir / "plugin.json").write_text(
         json.dumps(
@@ -815,14 +800,10 @@ def _install_fixture_plugin(tmp_path: Path) -> tuple[Path, Path]:
         ),
         encoding="utf-8",
     )
-    (plugin_dir / "plugin.py").write_text(
-        FIXTURE_PLUGIN_CODE, encoding="utf-8"
-    )
-    state_path = tmp_path / "plugins.json"
-    state_path.write_text(
+    (plugin_dir / "plugin.py").write_text(FIXTURE_PLUGIN_CODE, encoding="utf-8")
+    paths.plugins_state.write_text(
         json.dumps({"enabled": ["fixture"], "config": {}}), encoding="utf-8"
     )
-    return plugins_dir, state_path
 
 
 def _free_port() -> int:
@@ -831,73 +812,23 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-async def _connect_when_ready(
-    url: str, *, headers: dict[str, str] | None = None
-) -> websockets.ClientConnection:
-    """Attend que le transport serveur écoute, puis ouvre la connexion."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + 1.0
-    while True:
-        try:
-            return await websockets.connect(url, additional_headers=headers)
-        except OSError:
-            if loop.time() > deadline:
-                raise
-            await asyncio.sleep(0.01)
-
-
 def test_build_app_announces_the_kernel_and_plugin_tools_on_registration(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path,
 ) -> None:
     """``Registered.server_tools`` suit le registre construit par ``build_app``."""
 
     async def scenario() -> None:
-        plugins_dir, state_path = _install_fixture_plugin(tmp_path)
-        # La mémoire et l'embedder ne sont pas le sujet : on évite de charger
-        # un modèle réel pour n'ouvrir qu'une connexion de transport.
-        monkeypatch.setattr(
-            "server.app.root.SentenceTransformerEmbedder", lambda *a, **k: None
-        )
-        monkeypatch.setattr(
-            "server.app.root.SqliteMemoryStore", lambda *a, **k: FakeMemory()
-        )
-        port = _free_port()
-        config = AppConfig(
-            gemini=GeminiConfig(api_key="test-key"),
-            server=ServerConfig(host="127.0.0.1", port=port),
-            console=ConsoleConfig(enabled=False),
-            webhook=WebhookConfig(enabled=False),
-            plugins=PluginsConfig(
-                directory=str(plugins_dir), state_path=str(state_path)
-            ),
-            log_dir=str(tmp_path),
-            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
-        )
-        app = build_app(config, secrets=EnvSecretResolver({}), env={}, env_file=None)
-        # Le transport exige un Jeton de nature ``client`` : il est créé dans la
-        # même base que celle que ``build_app`` ouvre.
-        store = SqliteAuthStore(db_path=str(tmp_path / "auth.db"))
-        issued = await store.create_token(name="desktop", kind="client")
-        runner = asyncio.create_task(app.run())
-        try:
-            async with await _connect_when_ready(
-                f"ws://127.0.0.1:{port}",
-                headers={"Authorization": f"Bearer {issued.secret}"},
-            ) as ws:
-                await ws.send(
-                    encode(Register(client_name="desktop", platform="linux"))
-                )
-                response = decode(await asyncio.wait_for(ws.recv(), 1.0))
-                assert isinstance(response, Registered)
-                assert response.server_tools == [
+        async with running_server(
+            tmp_path, prepare=_prepare_fixture_plugin
+        ) as server:
+            await server.install()
+            async with server.client() as client:
+                assert client.registered.server_tools == [
                     "save_memory",
                     "forget_memory",
                     "end_session",
                     "fixture__echo",
                 ]
-        finally:
-            app.request_shutdown()
-            await asyncio.wait_for(runner, 1.0)
 
     asyncio.run(scenario())
 
@@ -928,115 +859,38 @@ def test_build_app_wires_an_enabled_console(tmp_path: Path) -> None:
     assert isinstance(app.console, ConsoleAdapter)
 
 
-async def _snapshot_when_ready(
-    http: aiohttp.ClientSession, url: str
-) -> dict:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + 2.0
-    while True:
-        try:
-            async with http.get(url) as response:
-                assert response.status == 200
-                return await response.json()
-        except aiohttp.ClientConnectorError:
-            if loop.time() > deadline:
-                raise
-            await asyncio.sleep(0.01)
-
-
-def test_build_app_serves_the_configured_build_at_the_root(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_build_app_serves_the_configured_build_at_the_root(tmp_path: Path) -> None:
     """Câblage réel : le répertoire statique de la configuration est servi."""
 
     async def scenario() -> None:
-        monkeypatch.setattr(
-            "server.app.root.SentenceTransformerEmbedder", lambda *a, **k: None
-        )
-        monkeypatch.setattr(
-            "server.app.root.SqliteMemoryStore", lambda *a, **k: FakeMemory()
-        )
         static_dir = tmp_path / "dist"
         static_dir.mkdir()
         (static_dir / "index.html").write_text(
             "<!doctype html><div id=\"root\"></div>", encoding="utf-8"
         )
-        port = _free_port()
-        console_port = _free_port()
-        config = AppConfig(
-            gemini=GeminiConfig(api_key="test-key"),
-            server=ServerConfig(host="127.0.0.1", port=port),
-            console=ConsoleConfig(port=console_port, static_dir=str(static_dir)),
-            webhook=WebhookConfig(enabled=False),
-            plugins=PluginsConfig(
-                directory=str(tmp_path / "plugins"),
-                state_path=str(tmp_path / "plugins.json"),
-            ),
-            log_dir=str(tmp_path),
-            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
-        )
-        app = build_app(config, secrets=EnvSecretResolver({}), env={}, env_file=None)
-        runner = asyncio.create_task(app.run())
-        try:
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + 2.0
-            while True:
-                try:
-                    async with aiohttp.ClientSession() as http:
-                        async with http.get(
-                            f"http://127.0.0.1:{console_port}/"
-                        ) as response:
-                            assert response.status == 200
-                            assert 'id="root"' in await response.text()
-                            break
-                except aiohttp.ClientConnectorError:
-                    if loop.time() > deadline:
-                        raise
-                    await asyncio.sleep(0.01)
-        finally:
-            app.request_shutdown()
-            await asyncio.wait_for(runner, 1.0)
+
+        async with running_server(tmp_path, static_dir=static_dir) as server:
+            async with server.anonymous() as http:
+                async with http.get(f"{server.url}/") as response:
+                    assert response.status == 200
+                    assert 'id="root"' in await response.text()
 
     asyncio.run(scenario())
 
 
 def test_build_app_serves_plugins_and_safe_config_in_the_snapshot(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path,
 ) -> None:
     """Câblage réel : build_app injecte l'instantané, sans secret."""
 
     async def scenario() -> None:
-        plugins_dir, state_path = _install_fixture_plugin(tmp_path)
-        monkeypatch.setattr(
-            "server.app.root.SentenceTransformerEmbedder", lambda *a, **k: None
-        )
-        monkeypatch.setattr(
-            "server.app.root.SqliteMemoryStore", lambda *a, **k: FakeMemory()
-        )
-        port = _free_port()
-        console_port = _free_port()
-        config = AppConfig(
-            gemini=GeminiConfig(
-                api_key="test-key", model="gemini-live", voice="Aoede"
-            ),
-            server=ServerConfig(host="127.0.0.1", port=port),
-            console=ConsoleConfig(port=console_port),
-            webhook=WebhookConfig(enabled=False),
-            plugins=PluginsConfig(
-                directory=str(plugins_dir), state_path=str(state_path)
-            ),
-            log_dir=str(tmp_path),
-            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
-        )
-        app = build_app(config, secrets=EnvSecretResolver({}), env={}, env_file=None)
-        runner = asyncio.create_task(app.run())
-        try:
-            base_url = f"http://127.0.0.1:{console_port}"
-            async with console_session(base_url) as http:
-                await install_console(http, base_url, tmp_path / "server.log")
-                snapshot = await _snapshot_when_ready(
-                    http, f"{base_url}/api/status"
-                )
+        async with running_server(
+            tmp_path, prepare=_prepare_fixture_plugin
+        ) as server:
+            await server.install()
+            async with server.http.get(f"{server.url}/api/status") as response:
+                assert response.status == 200
+                snapshot = await response.json()
 
             assert snapshot["v"] == 1
             assert snapshot["plugins"] == [
@@ -1047,17 +901,14 @@ def test_build_app_serves_plugins_and_safe_config_in_the_snapshot(
                 }
             ]
             assert snapshot["config"] == {
-                "model": "gemini-live",
-                "voice": "Aoede",
+                "model": "gemini-live-test",
+                "voice": "Leda",
                 "user_id": "owner",
-                "memory_db": "athena_memory.db",
-                "log_dir": str(tmp_path),
+                "memory_db": str(server.paths.memory_db),
+                "log_dir": str(server.paths.log_dir),
                 "version": __version__,
             }
             assert "api_key" not in snapshot["config"]
             assert "test-key" not in json.dumps(snapshot)
-        finally:
-            app.request_shutdown()
-            await asyncio.wait_for(runner, 1.0)
 
     asyncio.run(scenario())

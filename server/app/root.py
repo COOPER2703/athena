@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping, Protocol
 
@@ -8,7 +9,11 @@ from server import __version__
 from server.adapters.auth import SqliteAuthStore
 from server.adapters.console import ConsoleAdapter
 from server.adapters.console.trace_buffer import TraceBuffer
-from server.adapters.gemini import GeminiEventJudge, GeminiLiveAdapter
+from server.adapters.gemini import (
+    GeminiEventJudge,
+    GeminiLiveAdapter,
+    LiveConnect,
+)
 from server.adapters.memory import (
     GeminiFactExtractor,
     SentenceTransformerEmbedder,
@@ -48,7 +53,13 @@ from server.core.coordinator import Coordinator
 from server.core.events import Event, EventReceived, ShutdownRequested
 from server.core.memory_tools import register_memory_tools
 from server.core.plugins import PluginRegistry
-from server.core.ports import AuthService, EventJudge, MemoryStore, TraceSink
+from server.core.ports import (
+    AuthService,
+    Embedder,
+    EventJudge,
+    MemoryStore,
+    TraceSink,
+)
 from server.core.session_tools import register_session_tools
 from server.core.tools import ToolRegistry
 
@@ -147,6 +158,22 @@ class Transport(Protocol):
     async def execute(self, command: Command) -> None: ...
 
 
+class Clock(Protocol):
+    """Couture de l'horloge d'inactivité (minuteurs de Session et de fenêtre).
+
+    L'horloge de production est ``AsyncioClock`` ; les tests peuvent fournir
+    une horloge virtuelle qui n'attend pas le temps réel.
+    """
+
+    def schedule(self, connection_id: str, timeout: float) -> None: ...
+
+    def cancel(self, connection_id: str) -> None: ...
+
+    async def recv(self) -> Event: ...
+
+    def close(self) -> None: ...
+
+
 class ConsoleServer(Protocol):
     """Couture de la Console web : instantané de lecture et injection d'Événement.
 
@@ -180,7 +207,7 @@ class App:
         *,
         transport: Transport,
         gemini: GeminiLiveAdapter,
-        clock: AsyncioClock,
+        clock: Clock,
         trace_sink: TraceSink,
         memory: MemoryStore | None = None,
         user_id: str = "owner",
@@ -461,6 +488,10 @@ def build_app(
     secrets: SecretResolver | None = None,
     env: Mapping[str, str] | None = None,
     env_file: str | Path | None = None,
+    live_connect: LiveConnect | None = None,
+    clock: Clock | None = None,
+    embedder: Embedder | None = None,
+    auth_now: Callable[[], float] | None = None,
 ) -> App:
     """Construit explicitement : config → trace → adaptateurs → Coordinator.
 
@@ -471,6 +502,12 @@ def build_app(
     jeton posé dans le ``.env`` est donc visible des plugins sans être passé par
     ``AppConfig``. La racine de composition fournit aussi le ``TraceSink`` au
     chargeur, pour que les états de plugin entrent dans le flux unique.
+
+    ``live_connect``, ``clock``, ``embedder`` et ``auth_now`` sont les coutures
+    laissées ouvertes au harnais de test serveur : le serveur garde tous ses
+    autres adaptateurs réels (transport, Console, auth, mémoire SQLite), et seul
+    le modèle Live, l'horloge (noyau et auth) ou le modèle d'embedding sont
+    remplacés.
     """
     # Tampon de traces de la Console : consommateur borné du flux unique, gardé
     # seulement quand la surface est servie. Le fan-out y pousse chaque entrée,
@@ -496,6 +533,7 @@ def build_app(
     auth = SqliteAuthStore(
         db_path=config.auth.db_path,
         trace_sink=trace_sink,
+        now=auth_now if auth_now is not None else time.time,
         ticket_ttl_seconds=config.auth.ticket_days * 24 * 60 * 60,
         ticket_refresh_seconds=config.auth.ticket_refresh_seconds,
         password_min_length=config.auth.password_min_length,
@@ -535,11 +573,16 @@ def build_app(
         api_key=config.gemini.api_key,
         model=config.gemini.model,
         voice=config.gemini.voice,
+        live_connect=live_connect,
         trace_sink=trace_sink,
     )
-    clock = AsyncioClock()
+    clock = clock if clock is not None else AsyncioClock()
 
-    embedder = SentenceTransformerEmbedder(config.memory.embed_model)
+    embedder = (
+        embedder
+        if embedder is not None
+        else SentenceTransformerEmbedder(config.memory.embed_model)
+    )
     memory = SqliteMemoryStore(
         db_path=config.memory.db_path,
         embedder=embedder,
