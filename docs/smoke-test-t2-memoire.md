@@ -32,8 +32,9 @@ ATHENA_USER_ID=owner
 # ATHENA_CONSOLIDATION_HOURS=0,12
 ```
 
-Le serveur refuse de démarrer si `GEMINI_API_KEY` manque : il affiche
-`Erreur de configuration` et sort avec le code 2.
+Le serveur démarre aussi sans clé Gemini : il reste alors en **Installation** (ADR-0025) et la
+mémoire, la Consolidation et la Conversation ne s'ouvrent qu'une fois la clé enregistrée puis
+le processus redémarré.
 
 ## 1. Démarrer le serveur
 
