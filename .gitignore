@@ -12,6 +12,10 @@ settings.db
 master.key
 node_modules/
 web/dist/
+# Rapports et traces des parcours navigateur (#179).
+web/test-results/
+web/playwright-report/
+web/blob-report/
 plugins.json
 
 # Skills tiers installés par `npx skills add` et épinglés dans `skills-lock.json`.

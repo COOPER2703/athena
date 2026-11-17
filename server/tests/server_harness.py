@@ -35,11 +35,16 @@ API publique
     processus pour la configuration effective, ``secrets`` remplace le
     résolveur à trois couches, ``settings`` remplace le magasin de réglages,
     ``webhook`` ouvre aussi la surface Webhook, et ``secret_validator``
-    remplace la validation réelle d'une clé Gemini. ``restart_on_apply``,
-    ``restart_command`` et ``restart`` règlent l'application des Réglages : la
-    callable injectée remplace la sortie du processus, pour qu'un test observe
-    le redémarrage sans tuer pytest. Le serveur est arrêté proprement à la
-    sortie du bloc, et le logging racine est restauré.
+    remplace la validation réelle d'une clé Gemini. ``model`` remplace le faux
+    modèle Live : les parcours navigateur y branchent un script déterministe
+    qui répond seul aux messages reçus. ``console_port`` et
+    ``transport_port`` fixent les ports au lieu d'en réserver des éphémères,
+    ce qui permet à un superviseur de relancer le serveur à la même adresse
+    après un redémarrage. ``restart_on_apply``, ``restart_command`` et
+    ``restart`` règlent l'application des Réglages : la callable injectée
+    remplace la sortie du processus, pour qu'un test observe le redémarrage
+    sans tuer pytest. Le serveur est arrêté proprement à la sortie du bloc, et
+    le logging racine est restauré.
 
 ``AthenaServer`` (ce que rend la fixture)
     ``root`` / ``url`` / ``transport_url``  : le répertoire et les deux surfaces.
@@ -1104,12 +1109,15 @@ class AthenaServer:
         """Attend qu'une condition synchrone devienne vraie."""
         await wait_until(predicate, timeout)
 
-    async def wait_stopped(self, timeout: float = 2.0) -> None:
+    async def wait_stopped(self, timeout: float | None = 2.0) -> None:
         """Attend la fin de la boucle du serveur (sortie propre).
 
         L'application des Réglages redémarre le processus en demandant l'arrêt
         du serveur : un test peut observer cette sortie sans tuer pytest, le
-        serveur n'étant qu'une tâche de la boucle du test.
+        serveur n'étant qu'une tâche de la boucle du test. ``timeout=None``
+        attend aussi longtemps que le serveur vit : c'est ce qu'utilise le
+        superviseur des parcours navigateur pour relancer le serveur à chaque
+        sortie propre.
         """
         await asyncio.wait_for(asyncio.shield(self._runner), timeout)
 
@@ -1273,6 +1281,9 @@ async def running_server(
     settings: SecretStore | None = None,
     webhook: bool = False,
     secret_validator: SecretValidator | None = None,
+    model: FakeLiveModel | None = None,
+    console_port: int | None = None,
+    transport_port: int | None = None,
     restart_on_apply: bool = False,
     restart_command: str = "docker restart athena",
     restart: Callable[[], None] | None = None,
@@ -1285,6 +1296,11 @@ async def running_server(
     plugin, un fichier d'état ou un build. Aucun port n'est fixe, aucun secret
     réel n'est lu, et l'ordre des tests n'a aucune importance.
 
+    ``model`` remplace le faux modèle : un scénario navigateur y branche un
+    script qui répond seul, sans qu'un test Python ait à appeler ``reply``.
+    ``console_port`` et ``transport_port`` figent les deux ports, pour qu'un
+    superviseur relance le serveur à la même adresse après une sortie propre.
+
     Les coutures ``env``, ``secrets``, ``settings`` et ``secret_validator``
     remplacent la configuration effective **sans relancer** de processus : un
     test peut ainsi prouver la précédence de l'environnement ou jouer une clé
@@ -1294,11 +1310,18 @@ async def running_server(
     paths = _paths(root, static_dir)
     if prepare is not None:
         prepare(paths)
-    ports = _free_ports(3 if webhook else 2)
-    console_port, transport_port = ports[0], ports[1]
-    webhook_port = ports[2] if webhook else None
+    if (console_port is None) != (transport_port is None):
+        raise ValueError(
+            "console_port et transport_port vont ensemble : les deux ou aucun."
+        )
+    if console_port is None:
+        ports = _free_ports(3 if webhook else 2)
+        console_port, transport_port = ports[0], ports[1]
+        webhook_port = ports[2] if webhook else None
+    else:
+        webhook_port = _free_ports(1)[0] if webhook else None
 
-    model = FakeLiveModel()
+    model = FakeLiveModel() if model is None else model
     clock = ManualClock()
     validator = FakeSecretValidator()
     root_logger = logging.getLogger()
