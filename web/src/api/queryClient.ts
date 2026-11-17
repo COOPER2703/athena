@@ -72,8 +72,11 @@ export function createQueryClient(): QueryClient {
 export const queryKeys = {
   session: ["session"] as const,
   status: ["status"] as const,
+  /** Occupation d'Athena lue par la Conversation (Session vocale en cours). */
+  voiceSession: ["status", "voice-session"] as const,
   plugins: ["plugins"] as const,
   settings: ["settings"] as const,
   secrets: ["secrets"] as const,
   tokens: ["tokens"] as const,
+  thread: ["thread"] as const,
 } as const;
