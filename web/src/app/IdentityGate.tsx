@@ -42,16 +42,16 @@ export function IdentityGate({ children }: { children: ReactNode }) {
       if (path !== "/login") {
         navigate("/login", {
           replace: true,
-          state:
-            path === "/installation"
-              ? undefined
-              : { from: `${path}${location.search}` },
+          state: { from: `${path}${location.search}` },
         });
       }
       return;
     }
 
-    if (path === "/login" || path === "/installation") {
+    if (path === "/login") {
+      // L'écran d'Installation reste atteignable tant que l'Installation n'est
+      // pas terminée : il porte le parcours, et se redirige lui-même vers
+      // l'application une fois la clé Gemini enregistrée.
       navigate(returnPath(location.state) ?? defaultZone().path, {
         replace: true,
       });

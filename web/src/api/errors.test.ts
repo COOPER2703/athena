@@ -49,7 +49,6 @@ describe("describeError", () => {
       ["setup_required", "installation"],
       ["invalid_credentials", "Identifiants"],
       ["already_installed", "Compte"],
-      ["invalid_code", "Code d'installation"],
       ["invalid_password", "mot de passe actuel"],
       ["weak_password", "mot de passe"],
       ["invalid_username", "nom d'utilisateur"],
@@ -61,6 +60,12 @@ describe("describeError", () => {
       ["invalid_kind", "nature"],
       ["invalid_source", "source"],
       ["token_not_found", "Jeton"],
+      ["installation_incomplete", "Installation"],
+      ["invalid_secret", "Secret"],
+      ["invalid_secret_name", "Secret"],
+      ["secret_not_found", "Secret"],
+      ["secrets_unavailable", "magasin"],
+      ["not_implemented", "pas encore disponible"],
     ];
 
     for (const [code, fragment] of cases) {

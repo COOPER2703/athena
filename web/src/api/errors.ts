@@ -85,7 +85,6 @@ const MESSAGES: Readonly<Record<string, string>> = {
     "L'instance n'est pas encore installée : terminez l'installation pour continuer.",
   invalid_credentials: "Identifiants incorrects.",
   already_installed: "Un Compte existe déjà : connectez-vous.",
-  invalid_code: "Le Code d'installation est invalide ou a déjà servi.",
   invalid_password: "Le mot de passe actuel est incorrect.",
   weak_password: "Le mot de passe est trop court : choisissez-en un plus long.",
   invalid_username: "Le nom d'utilisateur ne peut pas être vide.",
@@ -99,6 +98,17 @@ const MESSAGES: Readonly<Record<string, string>> = {
   invalid_source:
     "Une source est obligatoire pour un Jeton « source » et interdite pour un Jeton « client ».",
   token_not_found: "Ce Jeton d'accès n'existe pas.",
+  installation_incomplete:
+    "L'Installation n'est pas terminée : enregistrez une clé Gemini dans les Réglages pour qu'Athena puisse parler.",
+  invalid_secret:
+    "Ce Secret a été refusé : vérifiez sa valeur, puis réessayez.",
+  invalid_secret_name:
+    "Le nom d'un Secret doit être une variable en majuscules.",
+  secret_not_found: "Ce Secret n'existe pas ou n'est plus enregistré.",
+  secrets_unavailable:
+    "Le magasin de Secrets n'est pas disponible sur cette instance.",
+  not_implemented:
+    "Cette fonction n'est pas encore disponible sur cette instance.",
   not_found: "Cette ressource n'existe pas ou plus.",
   invalid_response: "La réponse du serveur est illisible.",
   network:
