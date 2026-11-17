@@ -30,6 +30,12 @@ TOKENS_PATH = "/api/tokens"
 LOGOUT_PATH = "/api/logout"
 LOGOUT_ALL_PATH = "/api/logout-all"
 PASSWORD_PATH = "/api/password"
+# Réglages et Secrets (ADR-0024) : lecture des noms seulement, écriture et
+# effacement par nom. La Conversation est refusée côté serveur tant que
+# l'Installation n'est pas terminée (ADR-0025).
+SETTINGS_PATH = "/api/settings"
+SECRETS_PATH = "/api/secrets"
+CHAT_PATH = "/api/chat"
 # Sonde de supervision : publique, réponse fixe, aucun état applicatif.
 HEALTH_PATH = "/healthz"
 # Nom stable et explicite du cookie qui porte le Ticket Console. Le préfixe

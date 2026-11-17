@@ -30,8 +30,13 @@ API publique
     (``tmp_path``) ; tout l'état vit dessous. ``static_dir`` remplace le build
     de la SPA servi par la Console. ``prepare(paths)`` s'exécute avant le
     démarrage avec les chemins déjà calculés (déposer un plugin, un build, un
-    fichier d'état). Le serveur est arrêté proprement à la sortie du bloc, et le
-    logging racine est restauré.
+    fichier d'état). ``gemini_key`` règle la clé lue au démarrage (``""`` pour
+    une instance en Installation). ``env`` remplace l'environnement du
+    processus pour la configuration effective, ``secrets`` remplace le
+    résolveur à trois couches, ``settings`` remplace le magasin de réglages,
+    ``webhook`` ouvre aussi la surface Webhook, et ``secret_validator``
+    remplace la validation réelle d'une clé Gemini. Le serveur est arrêté
+    proprement à la sortie du bloc, et le logging racine est restauré.
 
 ``AthenaServer`` (ce que rend la fixture)
     ``root`` / ``url`` / ``transport_url``  : le répertoire et les deux surfaces.
@@ -39,6 +44,7 @@ API publique
     ``model``                    : le faux modèle Live (``FakeLiveModel``).
     ``clock``                    : l'horloge virtuelle (``ManualClock``), qui
                                    règle aussi le temps de l'authentification.
+    ``validator``                : le faux validateur de Secrets (aucun réseau).
     ``anonymous()``              : client HTTP sans cookie ni ``Origin``.
     ``console()``                : client HTTP « navigateur » (cookie + ``Origin``)
                                    avant installation, pour installer ou se connecter.
@@ -82,8 +88,8 @@ HTTP utilisent cette fixture (``test_app_root``, ``test_app_auth``,
 unitaires du noyau et des adaptateurs continuent de se construire à la main :
 ils ne démarrent pas le serveur complet.
 
-Le Code d'installation n'est lu **que** dans ``install()`` : le ticket #170, qui
-le supprime, n'aura à adapter que cette méthode.
+Le Code d'installation a disparu (ADR-0025) : ``install()`` crée l'unique
+Compte sans code et garde le Ticket Console.
 """
 
 from __future__ import annotations
@@ -123,10 +129,12 @@ from server.app.config import (
     MemoryConfig,
     PluginsConfig,
     ServerConfig,
+    SettingsConfig,
     WebhookConfig,
 )
 from server.app.root import App, build_app
 from server.core.events import TimerFired
+from server.core.ports import SecretResolver, SecretStore, SecretValidator
 
 # Logs du harnais : même niveau que la configuration par défaut.
 _LOG_LEVEL = "INFO"
@@ -134,7 +142,6 @@ _TRACE_LINE = re.compile(
     r"^\S+ +(?P<level>[A-Z]+) +\[(?P<source>[^\]]+)\] +(?P<kind>\S+)"
     r"(?: (?P<payload>\{.*\}))?$"
 )
-_INSTALLATION_CODE = re.compile(r'"code": "([^"]+)"')
 _EMBEDDING_DIM = 384
 
 
@@ -460,6 +467,28 @@ def _turn_text(turns: object) -> str:
     return "".join(getattr(part, "text", "") or "" for part in parts)
 
 
+class FakeSecretValidator:
+    """Validateur de Secrets de test : aucun réseau, refus explicites.
+
+    Il accepte tout sauf les valeurs marquées ``reject`` et peut simuler un
+    service injoignable. La valeur reçue est conservée pour que les tests
+    puissent prouver qu'aucune réponse ne la reprend, jamais pour l'afficher.
+    """
+
+    def __init__(self, *, reject: tuple[str, ...] = ()) -> None:
+        self.rejected = set(reject)
+        self.unavailable = False
+        self.seen: list[tuple[str, str]] = []
+
+    async def validate(self, name: str, value: str) -> str | None:
+        self.seen.append((name, value))
+        if self.unavailable:
+            return "Le service Gemini est injoignable pour le moment."
+        if value in self.rejected:
+            return "Cette clé Gemini est refusée par le service."
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Surfaces du serveur démarré
 # ---------------------------------------------------------------------------
@@ -472,6 +501,8 @@ class ServerPaths:
     root: Path
     memory_db: Path
     auth_db: Path
+    settings_db: Path
+    master_key: Path
     plugins_dir: Path
     plugins_state: Path
     log_dir: Path
@@ -652,22 +683,28 @@ class AthenaServer:
         runner: asyncio.Task[None],
         model: FakeLiveModel,
         clock: ManualClock,
+        validator: FakeSecretValidator,
         paths: ServerPaths,
         console_port: int,
         transport_port: int,
+        webhook_port: int | None,
         saved_logging: tuple[list[logging.Handler], int],
     ) -> None:
         self.app = app
         self.model = model
         self.clock = clock
+        self.validator = validator
         self.paths = paths
         self._runner = runner
         self._console_port = console_port
         self._transport_port = transport_port
+        self._webhook_port = webhook_port
         self._saved_logging = saved_logging
         self._session: aiohttp.ClientSession | None = None
         self._client_token: str | None = None
         self._stopped = False
+        #: Corps de la réponse d'Installation (dont la clé maître, une fois).
+        self.setup_response: dict[str, Any] = {}
 
     # --- adresses -----------------------------------------------------------
 
@@ -684,6 +721,13 @@ class AthenaServer:
     def transport_url(self) -> str:
         """URL WebSocket du transport audio."""
         return f"ws://127.0.0.1:{self._transport_port}"
+
+    @property
+    def webhook_port(self) -> int:
+        """Port du Webhook, quand la surface a été demandée."""
+        if self._webhook_port is None:
+            raise AssertionError("le Webhook n'est pas activé dans ce serveur")
+        return self._webhook_port
 
     # --- clients HTTP -------------------------------------------------------
 
@@ -708,18 +752,17 @@ class AthenaServer:
     ) -> aiohttp.ClientSession:
         """Crée l'unique Compte par la vraie route et garde le Ticket Console.
 
-        Le Code d'installation est lu dans ``logs/server.log`` — le même journal
-        que celui que lit un administrateur. C'est le seul endroit du harnais qui
-        connaît ce mécanisme : le ticket #170, qui le supprime, n'adapte que
-        cette méthode.
+        Aucun code n'est demandé (ADR-0025) : le premier visiteur devient
+        propriétaire. La réponse d'Installation porte la clé maître une seule
+        fois ; le harnais la laisse dans la réponse, que les tests peuvent lire.
         """
         http = self.console()
-        code = await self._installation_code()
         async with http.post(
             f"{self.url}/api/setup",
-            json={"code": code, "username": username, "password": password},
+            json={"username": username, "password": password},
         ) as response:
             assert response.status == 200, await response.text()
+            self.setup_response = await response.json()
         self._session = http
         return http
 
@@ -890,19 +933,6 @@ class AthenaServer:
             root.handlers[:] = handlers
             root.setLevel(level)
 
-    async def _installation_code(self) -> str:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + 5.0
-        while True:
-            match = _INSTALLATION_CODE.search(self.read_log())
-            if match is not None:
-                return match.group(1)
-            if loop.time() > deadline:
-                raise AssertionError(
-                    f"aucun Code d'installation dans {self.paths.log_file}"
-                )
-            await asyncio.sleep(0.01)
-
 
 # ---------------------------------------------------------------------------
 # Démarrage
@@ -934,6 +964,8 @@ def _paths(root: Path, static_dir: Path | None) -> ServerPaths:
         root=root,
         memory_db=root / "memory.db",
         auth_db=root / "auth.db",
+        settings_db=root / "settings.db",
+        master_key=root / "master.key",
         plugins_dir=root / "plugins",
         plugins_state=root / "plugins.json",
         log_dir=log_dir,
@@ -942,9 +974,16 @@ def _paths(root: Path, static_dir: Path | None) -> ServerPaths:
     )
 
 
-def _config(paths: ServerPaths, *, console_port: int, transport_port: int) -> AppConfig:
+def _config(
+    paths: ServerPaths,
+    *,
+    console_port: int,
+    transport_port: int,
+    webhook_port: int | None,
+    gemini_key: str,
+) -> AppConfig:
     return AppConfig(
-        gemini=GeminiConfig(api_key="test-key", model="gemini-live-test"),
+        gemini=GeminiConfig(api_key=gemini_key, model="gemini-live-test"),
         server=ServerConfig(host="127.0.0.1", port=transport_port),
         console=ConsoleConfig(
             enabled=True,
@@ -952,12 +991,20 @@ def _config(paths: ServerPaths, *, console_port: int, transport_port: int) -> Ap
             port=console_port,
             static_dir=str(paths.static_dir),
         ),
-        webhook=WebhookConfig(enabled=False),
+        webhook=WebhookConfig(
+            enabled=webhook_port is not None,
+            host="127.0.0.1",
+            port=webhook_port or 1,
+        ),
         auth=AuthConfig(db_path=str(paths.auth_db)),
         memory=MemoryConfig(db_path=str(paths.memory_db)),
         plugins=PluginsConfig(
             directory=str(paths.plugins_dir),
             state_path=str(paths.plugins_state),
+        ),
+        settings=SettingsConfig(
+            db_path=str(paths.settings_db),
+            master_key_file=str(paths.master_key),
         ),
         log_dir=str(paths.log_dir),
         log_level=_LOG_LEVEL,
@@ -1016,30 +1063,52 @@ async def running_server(
     *,
     static_dir: Path | None = None,
     prepare: Callable[[ServerPaths], None] | None = None,
+    gemini_key: str = "test-key",
+    env: Mapping[str, str] | None = None,
+    secrets: SecretResolver | None = None,
+    settings: SecretStore | None = None,
+    webhook: bool = False,
+    secret_validator: SecretValidator | None = None,
 ) -> AsyncIterator[AthenaServer]:
     """Démarre le serveur complet sur des ports éphémères et l'arrête à la sortie.
 
-    ``root`` isole tout l'état du test : bases mémoire et auth, plugins,
-    journaux, build statique. ``prepare`` s'exécute avant le démarrage, avec les
-    chemins déjà calculés : c'est là qu'un test dépose un plugin, un fichier
-    d'état ou un build. Aucun port n'est fixe, aucun secret réel n'est lu, et
-    l'ordre des tests n'a aucune importance.
+    ``root`` isole tout l'état du test : bases mémoire, auth et réglages,
+    plugins, journaux, build statique et clé maître. ``prepare`` s'exécute avant
+    le démarrage, avec les chemins déjà calculés : c'est là qu'un test dépose un
+    plugin, un fichier d'état ou un build. Aucun port n'est fixe, aucun secret
+    réel n'est lu, et l'ordre des tests n'a aucune importance.
+
+    Les coutures ``env``, ``secrets``, ``settings`` et ``secret_validator``
+    remplacent la configuration effective **sans relancer** de processus : un
+    test peut ainsi prouver la précédence de l'environnement ou jouer une clé
+    maître perdue.
     """
     root.mkdir(parents=True, exist_ok=True)
     paths = _paths(root, static_dir)
     if prepare is not None:
         prepare(paths)
-    console_port, transport_port = _free_ports(2)
+    ports = _free_ports(3 if webhook else 2)
+    console_port, transport_port = ports[0], ports[1]
+    webhook_port = ports[2] if webhook else None
 
     model = FakeLiveModel()
     clock = ManualClock()
+    validator = FakeSecretValidator()
     root_logger = logging.getLogger()
     saved_logging = (root_logger.handlers[:], root_logger.level)
 
     app = build_app(
-        _config(paths, console_port=console_port, transport_port=transport_port),
-        secrets=None,
-        env={},
+        _config(
+            paths,
+            console_port=console_port,
+            transport_port=transport_port,
+            webhook_port=webhook_port,
+            gemini_key=gemini_key,
+        ),
+        secrets=secrets,
+        settings=settings,
+        secret_validator=secret_validator or validator,
+        env={} if env is None else env,
         env_file=None,
         live_connect=model,
         clock=clock,
@@ -1052,9 +1121,11 @@ async def running_server(
         runner=runner,
         model=model,
         clock=clock,
+        validator=validator,
         paths=paths,
         console_port=console_port,
         transport_port=transport_port,
+        webhook_port=webhook_port,
         saved_logging=saved_logging,
     )
     try:

@@ -25,13 +25,13 @@ from server.app.config import (
     MemoryConfig,
     PluginsConfig,
     ServerConfig,
+    SettingsConfig,
     WebhookConfig,
     load_config,
 )
-from server.app.secrets import MissingSecretError
 
 
-def test_defaults_with_only_required_secret() -> None:
+def test_defaults_with_a_gemini_key() -> None:
     cfg = load_config(env={"GEMINI_API_KEY": "k"}, env_file=None)
     assert isinstance(cfg, AppConfig)
     assert cfg.server == ServerConfig(host="0.0.0.0", port=8765)
@@ -69,10 +69,11 @@ def test_reads_and_coerces_environment() -> None:
     assert cfg.gemini.judge_model == "custom-judge"
 
 
-def test_missing_api_key_raises_clear_startup_error() -> None:
-    with pytest.raises(MissingSecretError) as excinfo:
-        load_config(env={}, env_file=None)
-    assert "GEMINI_API_KEY" in str(excinfo.value)
+def test_a_missing_api_key_is_allowed_by_the_configuration() -> None:
+    """ADR-0025 : une instance neuve démarre sans clé, en mode Installation."""
+    cfg = load_config(env={}, env_file=None)
+
+    assert cfg.gemini.api_key == ""
 
 
 def test_invalid_port_is_a_validation_error() -> None:
@@ -321,7 +322,6 @@ def test_auth_defaults_are_safe_and_live_in_a_separate_database() -> None:
     assert cfg.auth.password_min_length == 12
     assert cfg.auth.login_max_attempts == 5
     assert cfg.auth.login_block_minutes == 15
-    assert cfg.auth.setup_max_attempts == 5
 
 
 def test_auth_reads_and_coerces_its_environment() -> None:
@@ -334,7 +334,6 @@ def test_auth_reads_and_coerces_its_environment() -> None:
             "ATHENA_AUTH_PASSWORD_MIN_LENGTH": "16",
             "ATHENA_AUTH_LOGIN_MAX_ATTEMPTS": "3",
             "ATHENA_AUTH_LOGIN_BLOCK_MINUTES": "5",
-            "ATHENA_AUTH_SETUP_MAX_ATTEMPTS": "2",
         },
         env_file=None,
     )
@@ -344,7 +343,6 @@ def test_auth_reads_and_coerces_its_environment() -> None:
     assert cfg.auth.password_min_length == 16
     assert cfg.auth.login_max_attempts == 3
     assert cfg.auth.login_block_minutes == 5
-    assert cfg.auth.setup_max_attempts == 2
 
 
 @pytest.mark.parametrize(
@@ -356,7 +354,6 @@ def test_auth_reads_and_coerces_its_environment() -> None:
         {"ATHENA_AUTH_PASSWORD_MIN_LENGTH": "0"},
         {"ATHENA_AUTH_LOGIN_MAX_ATTEMPTS": "0"},
         {"ATHENA_AUTH_LOGIN_BLOCK_MINUTES": "0"},
-        {"ATHENA_AUTH_SETUP_MAX_ATTEMPTS": "0"},
         {"ATHENA_CONSOLE_TICKET_DAYS": "not-a-number"},
     ],
 )
@@ -385,3 +382,37 @@ def test_plugin_paths_are_configurable_from_the_environment() -> None:
 
     assert cfg.plugins.directory == "var/plugins"
     assert cfg.plugins.state_path == "var/plugins.json"
+
+
+def test_settings_paths_default_next_to_the_other_databases() -> None:
+    cfg = load_config(env={}, env_file=None)
+
+    assert cfg.settings == SettingsConfig()
+    assert cfg.settings.db_path == "settings.db"
+    assert cfg.settings.master_key_file == "master.key"
+    assert cfg.settings.db_path not in (cfg.auth.db_path, cfg.memory.db_path)
+
+
+def test_settings_paths_are_configurable_and_stripped() -> None:
+    cfg = load_config(
+        env={
+            "ATHENA_SETTINGS_DB": " var/settings.db ",
+            "ATHENA_MASTER_KEY_FILE": " var/master.key ",
+        },
+        env_file=None,
+    )
+
+    assert cfg.settings.db_path == "var/settings.db"
+    assert cfg.settings.master_key_file == "var/master.key"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"ATHENA_SETTINGS_DB": "   "},
+        {"ATHENA_MASTER_KEY_FILE": "   "},
+    ],
+)
+def test_invalid_settings_paths_are_a_validation_error(overrides) -> None:
+    with pytest.raises(ValidationError):
+        load_config(env=overrides, env_file=None)

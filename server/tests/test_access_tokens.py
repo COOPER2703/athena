@@ -40,9 +40,7 @@ async def _installed_store(
 ) -> SqliteAuthStore:
     """Store installé : les Jetons n'existent que dans une instance configurée."""
     store = _store(tmp_path, clock=clock)
-    code = store.announce_installation_code()
-    assert code is not None
-    await store.install(code, "admin", TEST_PASSWORD)
+    await store.install("admin", TEST_PASSWORD)
     return store
 
 
