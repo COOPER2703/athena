@@ -77,6 +77,23 @@ class TransportListener(Protocol):
     async def on_disconnect(self) -> None: ...
 
 
+class TransportObserver(Protocol):
+    """Observateur synchrone de l'état de la connexion.
+
+    Séparé du ``TransportListener`` : celui-ci reçoit des messages du Protocole,
+    celui-là alimente la page locale de couplage. Aucun message ne porte le
+    Jeton.
+    """
+
+    def on_connecting(self) -> None: ...
+
+    def on_connected(self) -> None: ...
+
+    def on_connect_failed(self, reason: str) -> None: ...
+
+    def on_disconnected(self) -> None: ...
+
+
 class Transport(Protocol):
     """Interface du transport consommée par l'orchestrateur."""
 
@@ -118,10 +135,12 @@ class WsTransport:
         *,
         connect: Connector | None = None,
         sleep: Sleeper | None = None,
+        observer: TransportObserver | None = None,
     ) -> None:
         self._client = client
         self._connect = connect or websockets.connect
         self._sleep_fn = sleep or asyncio.sleep
+        self._observer = observer
 
         self._ws: ClientConnection | None = None
         self._client_id: str | None = None
@@ -154,16 +173,19 @@ class WsTransport:
         self._running = True
         delays = self._client.reconnect.delays()
         while self._running:
+            self._notify("on_connecting")
             try:
                 await self.connect()
-            except AccessTokenError:
+            except AccessTokenError as exc:
                 # Un Jeton absent ou refusé ne se répare pas en réessayant :
                 # retenter en boucle masquerait la cause derrière du bruit.
                 self._running = False
+                self._notify("on_connect_failed", str(exc))
                 raise
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                self._notify("on_connect_failed", str(exc))
                 delay = next(delays)
                 log.warning(
                     "Connexion échouée, nouvel essai dans %.1fs: %s", delay, exc
@@ -172,16 +194,28 @@ class WsTransport:
                 continue
 
             delays = self._client.reconnect.delays()
+            self._notify("on_connected")
             log.info("Connecté au serveur (client_id=%s)", self.client_id)
             await self._closed.wait()
             if not self._running:
                 break
 
+            self._notify("on_disconnected")
             delay = next(delays)
             log.warning("Connexion perdue, reconnexion dans %.1fs", delay)
             await self._sleep(delay)
 
         self._running = False
+
+    def _notify(self, method: str, *args: str) -> None:
+        """Prévient l'observateur sans jamais compromettre la connexion."""
+        observer = self._observer
+        if observer is None:
+            return
+        try:
+            getattr(observer, method)(*args)
+        except Exception:
+            log.exception("Erreur de l'observateur de connexion ignorée")
 
     async def connect(self) -> None:
         token = require_access_token(self._client)
