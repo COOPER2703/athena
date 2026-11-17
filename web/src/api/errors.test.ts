@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ApiError,
+  describeCode,
   describeError,
   describeFieldErrors,
   errorCode,
@@ -174,5 +175,20 @@ describe("prédicats d'erreur", () => {
     expect(isApiError(null)).toBe(false);
     expect(errorStatus(null)).toBeNull();
     expect(errorCode(null)).toBe("");
+  });
+});
+
+describe("describeCode", () => {
+  it("traduit un code de flux SSE sans passer par une réponse HTTP", () => {
+    expect(describeCode("busy")).toContain("Athena");
+    expect(describeCode("llm_failed")).toContain("modèle");
+    expect(describeCode("tour_failed")).toContain("Tour");
+    expect(describeCode("invalid_message")).toContain("message");
+    expect(describeCode("thread_unavailable")).toContain("fil");
+  });
+
+  it("ne fuit jamais un code inconnu", () => {
+    expect(describeCode("code_du_futur")).toContain("inattendue");
+    expect(describeCode("code_du_futur")).not.toContain("code_du_futur");
   });
 });

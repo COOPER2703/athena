@@ -50,6 +50,22 @@ export function formatDate(
   }).format(date);
 }
 
+/**
+ * Horodatage ISO 8601 du fil (`jj/mm/aaaa hh:mm`), ou un tiret s'il est
+ * illisible : le Journal date ses entrées en ISO UTC, pas en secondes.
+ */
+export function formatIsoDate(value: string, timeZone?: string): string {
+  const millis = Date.parse(value);
+  if (!Number.isFinite(millis)) {
+    return "—";
+  }
+  return new Intl.DateTimeFormat("fr-FR", {
+    dateStyle: "short",
+    timeStyle: "short",
+    timeZone,
+  }).format(new Date(millis));
+}
+
 /** Durée lisible : secondes, minutes, heures, jours — la plus grande unité. */
 export function formatDuration(seconds: number | null): string {
   if (seconds === null || !Number.isFinite(seconds) || seconds < 0) {
