@@ -301,16 +301,17 @@ instruction d'usage. Le noyau (session, mémoire) n'est pas un plugin.
 
 **Plugin**:
 Un module chargé par le serveur ou un Client, exposant des Tools à Gemini. Chaque plugin a
-une seule plateforme (server, desktop, android, ios). Peut être activé, désactivé ou
-supprimé. Un plugin activé est du code de confiance : il tourne dans le serveur avec ses
-privilèges.
+une seule plateforme (server, desktop, android, ios). Un plugin **installé** sur le serveur
+n'est pas pour autant en service : encore faut-il que la liste d'activation le retienne. Un
+plugin activé est du code de confiance : il tourne dans le serveur avec ses privilèges.
 _Avoid_: Extension, addon, module
 
 **Plugin Registry**:
-Le catalogue des plugins installés sur le serveur et de leur état (activé, désactivé, en
-échec). Il n'existe pas de catalogue de plugins disponibles : installer un plugin, c'est le
-rendre présent sur le serveur.
-_Avoid_: Plugin list, plugin catalog, marketplace
+L'ensemble des plugins **installés** sur le serveur — tous les dossiers présents — avec leur
+**État de service** et, pour chacun, sa **Déclaration**. Un plugin installé mais non activé
+n'expose ni Tool ni Instruction. Il n'existe pas de catalogue de plugins *disponibles* :
+installer un plugin, c'est le rendre présent sur le serveur.
+_Avoid_: Plugin list, plugin catalog, marketplace, registre des plugins chargés
 
 **Plugin Manifest**:
 La description d'un plugin : nom, version, description, plateforme, configuration requise
@@ -318,6 +319,23 @@ et noms des secrets requis. Il ne contient jamais de valeur de secret, ne liste 
 Tools que le plugin expose — ils sont découverts à l'exécution — et ne déclare pas les
 Sources qu'il émet : une Source est nommée au moment où l'Événement est poussé.
 _Avoid_: Plugin config, plugin metadata
+
+**Déclaration**:
+Ce qu'un plugin annonce de lui-même par son **Plugin Manifest** : identité, champs de
+configuration attendus, noms des secrets requis. Elle se lit sans importer ni exécuter le
+code du plugin, et s'oppose à ce qu'il produit en tournant — ses Tools et son **Instruction
+de plugin**.
+_Avoid_: Metadata, fiche, config
+
+**État de service**:
+La situation d'un plugin installé vis-à-vis du service : **activé** (chargé, ses Tools sont
+offerts), **en échec** (retenu par la liste d'activation, mais sa plateforme ne répond pas ;
+le serveur retente), **manquant** (retenu, mais son dossier a disparu), **inactif**
+(installé, absent de la liste d'activation), **non supporté** (plugin d'une autre plateforme
+que le serveur, donc jamais chargé), **invalide** (son manifeste ne tient pas debout, donc
+jamais chargé). Un plugin activé dont le manifeste est invalide fait échouer le démarrage :
+il n'y a pas de serveur pour observer son état.
+_Avoid_: Status, health, disabled, désactivé
 
 **Instruction de plugin**:
 Le texte qu'un plugin fournit pour expliquer à Gemini comment utiliser ses Tools. Le noyau

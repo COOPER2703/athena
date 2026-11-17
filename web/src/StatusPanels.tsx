@@ -4,12 +4,7 @@ import {
   shortClientId,
   type ClientInfo,
 } from "./session";
-import {
-  formatPluginState,
-  pluginStateClass,
-  type ConsoleConfig,
-  type PluginInfo,
-} from "./status";
+import type { ConsoleConfig } from "./status";
 
 /** Panneau des Clients branchés, avec le badge du Client actif. */
 export function ClientsPanel({
@@ -54,46 +49,6 @@ export function ClientsPanel({
               </li>
             );
           })}
-        </ul>
-      )}
-    </section>
-  );
-}
-
-/** Panneau des Plugins connus, de leur état et de leurs Tools exposés. */
-export function PluginsPanel({ plugins }: { plugins: readonly PluginInfo[] }) {
-  return (
-    <section className="panel" aria-labelledby="plugins-title">
-      <div className="panel__header">
-        <h2 className="panel__title" id="plugins-title">
-          Plugins
-        </h2>
-        <span className="badge">{plugins.length}</span>
-      </div>
-
-      {plugins.length === 0 ? (
-        <p className="notice">Aucun Plugin chargé.</p>
-      ) : (
-        <ul className="plugin-list">
-          {plugins.map((plugin) => (
-            <li className="plugin" key={plugin.name}>
-              <div className="plugin__head">
-                <span className="plugin__name">{plugin.name}</span>
-                <span
-                  className={`badge badge--plugin-${pluginStateClass(
-                    plugin.state,
-                  )}`}
-                >
-                  {formatPluginState(plugin.state)}
-                </span>
-              </div>
-              <span className="plugin__tools mono">
-                {plugin.tools.length > 0
-                  ? plugin.tools.join(", ")
-                  : "Aucun Tool"}
-              </span>
-            </li>
-          ))}
         </ul>
       )}
     </section>

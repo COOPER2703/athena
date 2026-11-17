@@ -1,19 +1,17 @@
 /**
- * Instantané d'état de la Console : types et libellés français.
+ * Instantané d'état de la Console : types et normalisation générale.
  *
  * Le contrat JSON reste en `snake_case` côté serveur. Ces fonctions pures
  * normalisent un instantané reçu par WebSocket (dont les champs sont inconnus
- * à la compilation) et traduisent les états de Plugin pour l'affichage.
+ * à la compilation) et délèguent la fiche des Plugins à `plugins.ts`, qui porte
+ * aussi les libellés français de leurs États de service.
  */
 
+import { normalizePlugins, type PluginInfo } from "./plugins";
 import type { ClientInfo, SessionStatus } from "./session";
 
-/** Plugin tel que l'instantané le décrit. */
-export interface PluginInfo {
-  name: string;
-  state: string;
-  tools: string[];
-}
+/** Plugin tel que l'instantané le décrit (voir `plugins.ts`). */
+export type { PluginInfo } from "./plugins";
 
 /** Configuration non sensible exposée par l'instantané. */
 export type ConsoleConfig = Record<string, string>;
@@ -78,15 +76,7 @@ export function normalizeStatus(raw: unknown): StatusData {
         client_name: asText(client.client_name),
         platform: asText(client.platform),
       })),
-    plugins: asList(root.plugins)
-      .filter(isRecord)
-      .map((plugin) => ({
-        name: asText(plugin.name),
-        state: asText(plugin.state),
-        tools: asList(plugin.tools).filter(
-          (tool): tool is string => typeof tool === "string",
-        ),
-      })),
+    plugins: normalizePlugins(root.plugins),
     config: Object.fromEntries(
       Object.entries(config).filter(
         (entry): entry is [string, string] => typeof entry[1] === "string",
@@ -103,32 +93,4 @@ export function normalizeStatus(raw: unknown): StatusData {
  */
 export function statusFromHello(frame: HelloLike): StatusData {
   return normalizeStatus(frame.data?.snapshot);
-}
-
-/** États connus du Plugin Registry, et leur présentation française. */
-export type PluginState = "activated" | "disabled" | "missing" | "failed";
-
-const PLUGIN_STATES: Readonly<Record<PluginState, { label: string }>> = {
-  activated: { label: "Activé" },
-  disabled: { label: "Désactivé" },
-  missing: { label: "Manquant" },
-  failed: { label: "En échec" },
-};
-
-/** Vrai si l'état est un état connu du Plugin Registry. */
-export function isPluginState(state: string): state is PluginState {
-  return Object.prototype.hasOwnProperty.call(PLUGIN_STATES, state);
-}
-
-/** Libellé d'un état de Plugin ; l'état brut passe s'il est inconnu. */
-export function formatPluginState(state: string): string {
-  if (!state) {
-    return "Inconnu";
-  }
-  return isPluginState(state) ? PLUGIN_STATES[state].label : state;
-}
-
-/** Classe CSS bornée d'un état de Plugin (aucune injection de valeur brute). */
-export function pluginStateClass(state: string): string {
-  return isPluginState(state) ? state : "unknown";
 }

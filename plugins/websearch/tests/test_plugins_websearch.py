@@ -489,13 +489,12 @@ def test_web_search_is_declared_and_returns_sourced_excerpts(tmp_path: Path) -> 
             ):
                 assert app.plugins.states["websearch"] == "activated"
                 # Le Tool est visible dans l'instantané de lecture de la Console.
-                assert app.snapshot()["plugins"] == [
-                    {
-                        "name": "websearch",
-                        "state": "activated",
-                        "tools": ["web_search"],
-                    }
-                ]
+                [websearch] = app.snapshot()["plugins"]
+                assert websearch["name"] == "websearch"
+                assert websearch["state"] == "activated"
+                assert websearch["tools"] == ["web_search"]
+                assert websearch["declaration"]["description"]
+                assert websearch["instruction"]
 
                 async with _live_session(transport, live) as session:
                     declared = _declared(live)

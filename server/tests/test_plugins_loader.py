@@ -10,7 +10,13 @@ from testkit import RecordingTraceSink
 
 from server.adapters.plugins import PluginLoadError, PluginLoader
 from server.app.secrets import EnvSecretResolver
-from server.core.plugins import PluginRegistry
+from server.core.plugins import (
+    ConfigField,
+    ConfigValue,
+    PluginRegistry,
+    SecretField,
+    SecretPresence,
+)
 
 FIXTURE_NAME = "fixture"
 
@@ -113,6 +119,13 @@ def _loader(root: Path, sink: RecordingTraceSink, env: dict[str, str] | None = N
     )
 
 
+class _BrokenSecretResolver:
+    """Résolveur qui échoue pour autre chose qu'un secret absent."""
+
+    def resolve(self, variable: str) -> str:
+        raise RuntimeError(f"résolveur cassé pour {variable}")
+
+
 def _load(
     loader: PluginLoader,
     registry: PluginRegistry | None = None,
@@ -159,7 +172,7 @@ def test_plugin_present_but_not_enabled_is_never_imported(tmp_path: Path) -> Non
     registry = _load(_loader(tmp_path, sink))
 
     assert registry.tools.specs() == ()
-    assert _states(sink) == [(FIXTURE_NAME, "disabled")]
+    assert _states(sink) == [(FIXTURE_NAME, "inactive")]
 
 
 def test_enabled_plugin_without_a_directory_is_traced_missing(tmp_path: Path) -> None:
@@ -198,8 +211,122 @@ def test_plugin_declared_for_a_client_platform_is_skipped(tmp_path: Path) -> Non
     registry = _load(_loader(tmp_path, sink))
 
     assert registry.tools.specs() == ()
-    assert _states(sink) == [(FIXTURE_NAME, "disabled")]
+    assert _states(sink) == [(FIXTURE_NAME, "unsupported")]
     assert sink.of_kind("PluginState")[0].payload["platform"] == "desktop"
+
+
+def test_a_client_platform_plugin_outside_the_enabled_list_is_unsupported(
+    tmp_path: Path,
+) -> None:
+    _write_plugin(tmp_path, code=EXPLODING_CODE, manifest=_manifest(platform="android"))
+    _write_state(tmp_path, enabled=[])
+    sink = RecordingTraceSink()
+
+    registry = _load(_loader(tmp_path, sink))
+
+    assert registry.tools.specs() == ()
+    assert _states(sink) == [(FIXTURE_NAME, "unsupported")]
+    assert registry.declaration_of(FIXTURE_NAME) is not None
+    assert registry.declaration_of(FIXTURE_NAME).platform == "android"
+
+
+SENTINEL_CODE = '''
+from pathlib import Path
+
+Path(__file__).with_name("imported.txt").write_text("imported", encoding="utf-8")
+'''
+
+
+def test_no_module_of_a_plugin_outside_the_enabled_list_is_imported(
+    tmp_path: Path,
+) -> None:
+    """Déposer un dossier n'exécute rien : le balayage lit le manifeste seul."""
+    _write_plugin(tmp_path, code=SENTINEL_CODE)
+    _write_state(tmp_path, enabled=[])
+    sink = RecordingTraceSink()
+
+    registry = _load(_loader(tmp_path, sink))
+
+    assert not (tmp_path / "plugins" / FIXTURE_NAME / "imported.txt").exists()
+    assert registry.declaration_of(FIXTURE_NAME) is not None
+
+
+def test_a_directory_without_a_manifest_is_invalid_and_does_not_stop_startup(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "plugins" / FIXTURE_NAME
+    directory.mkdir(parents=True)
+    (directory / "plugin.py").write_text(SENTINEL_CODE, encoding="utf-8")
+    _write_state(tmp_path, enabled=[])
+    sink = RecordingTraceSink()
+
+    registry = _load(_loader(tmp_path, sink))
+
+    [state] = sink.of_kind("PluginState")
+    assert state.payload["plugin"] == FIXTURE_NAME
+    assert state.payload["state"] == "invalid"
+    assert "manifest" in state.payload["reason"]
+    assert not (directory / "imported.txt").exists()
+    assert registry.state_of(FIXTURE_NAME) == "invalid"
+    assert registry.declaration_of(FIXTURE_NAME).invalid_reason is not None
+
+
+def test_a_broken_manifest_outside_the_enabled_list_is_invalid_not_fatal(
+    tmp_path: Path,
+) -> None:
+    _write_plugin(tmp_path, manifest="{pas du JSON")
+    _write_state(tmp_path, enabled=[])
+    sink = RecordingTraceSink()
+
+    registry = _load(_loader(tmp_path, sink))
+
+    [state] = sink.of_kind("PluginState")
+    assert state.payload["state"] == "invalid"
+    assert "JSON" in state.payload["reason"]
+    assert registry.declaration_of(FIXTURE_NAME) is not None
+    assert registry.declaration_of(FIXTURE_NAME).invalid_reason is not None
+
+
+def test_a_manifest_inconsistent_with_its_directory_is_invalid_when_not_enabled(
+    tmp_path: Path,
+) -> None:
+    _write_plugin(tmp_path, manifest=_manifest("un-autre-nom"))
+    _write_state(tmp_path, enabled=[])
+    sink = RecordingTraceSink()
+
+    _load(_loader(tmp_path, sink))
+
+    [state] = sink.of_kind("PluginState")
+    assert state.payload["state"] == "invalid"
+    assert "un-autre-nom" in state.payload["reason"]
+
+
+def test_scanning_records_the_declaration_of_every_installed_directory(
+    tmp_path: Path,
+) -> None:
+    _write_plugin(
+        tmp_path,
+        manifest=_manifest(
+            config=[{"key": "base_url", "type": "url", "required": False}],
+            secrets=[{"key": "api_key", "required": True}],
+        ),
+    )
+    _write_state(tmp_path, enabled=[])
+
+    registry = _load(_loader(tmp_path, RecordingTraceSink()))
+
+    declaration = registry.declaration_of(FIXTURE_NAME)
+    assert declaration is not None
+    assert declaration.description == "Plugin de fixture"
+    assert declaration.version == "0.1.0"
+    assert declaration.api_version == 1
+    assert declaration.platform == "server"
+    assert declaration.directory.endswith("plugins/fixture")
+    assert declaration.config == (
+        ConfigField(key="base_url", type="url", required=False),
+    )
+    assert declaration.secrets == (SecretField(key="api_key", required=True),)
+    assert declaration.invalid_reason is None
 
 
 def test_unknown_api_version_fails_the_startup(tmp_path: Path) -> None:
@@ -534,6 +661,8 @@ def test_a_failing_create_is_traced_failed_and_kept_for_retry(tmp_path: Path) ->
     assert failed.payload["state"] == "failed"
     assert "PluginUnavailable" in failed.payload["reason"]
     assert "unreachable" in failed.payload["reason"]
+    # Une retente est encore attendue : la trace le dit, comme le registre.
+    assert failed.payload["retry"] is True
     assert loader.pending == (FIXTURE_NAME,)
 
     remaining = asyncio.run(
@@ -546,6 +675,8 @@ def test_a_failing_create_is_traced_failed_and_kept_for_retry(tmp_path: Path) ->
     assert registry.state_of(FIXTURE_NAME) == "activated"
     states = [entry.payload["state"] for entry in sink.of_kind("PluginState")]
     assert states == ["failed", "activated"]
+    # Réparé : plus aucune retente à annoncer, donc pas de champ ``retry``.
+    assert "retry" not in sink.of_kind("PluginState")[-1].payload
 
 
 def test_a_retry_that_fails_again_is_traced_and_kept(tmp_path: Path) -> None:
@@ -563,6 +694,7 @@ def test_a_retry_that_fails_again_is_traced_and_kept(tmp_path: Path) -> None:
     states = [entry.payload["state"] for entry in sink.of_kind("PluginState")]
     assert states == ["failed", "failed"]
     assert "toujours injoignable" in sink.of_kind("PluginState")[-1].payload["reason"]
+    assert sink.of_kind("PluginState")[-1].payload["retry"] is True
 
 
 def test_a_retry_never_retries_a_structural_defect(tmp_path: Path) -> None:
@@ -676,6 +808,74 @@ def test_a_fatal_defect_discovered_at_retry_is_permanently_dropped(
     assert retry.level == "error"
     assert "TypeError" in retry.payload["reason"]
     assert "bogue du plugin" in retry.payload["reason"]
+    # Le plugin est oublié de la retente : le registre et la trace disent
+    # tous deux ``false``, sans qu'une tentative à venir soit annoncée.
+    assert registry.retry_of(FIXTURE_NAME) is False
+    assert retry.payload["retry"] is False
+
+
+def test_a_failing_plugin_exposes_its_reason_and_pending_retry(tmp_path: Path) -> None:
+    """La fiche lit la panne et la retente dans le registre, pas dans la Trace."""
+    _write_plugin(tmp_path, code=FLAKY_CODE)
+    _write_state(tmp_path, enabled=[FIXTURE_NAME])
+    loader = _loader(tmp_path, RecordingTraceSink())
+    registry = _load(loader)
+
+    assert registry.state_of(FIXTURE_NAME) == "failed"
+    assert "PluginUnavailable" in registry.reason_of(FIXTURE_NAME)
+    assert registry.retry_of(FIXTURE_NAME) is True
+
+    asyncio.run(
+        loader.retry_pending(registry, push_event=lambda source, content: None)
+    )
+
+    # Réparé : la raison et la retente ne doivent pas survivre à la guérison.
+    assert registry.state_of(FIXTURE_NAME) == "activated"
+    assert registry.reason_of(FIXTURE_NAME) is None
+    assert registry.retry_of(FIXTURE_NAME) is False
+
+
+def test_a_fatal_defect_at_retry_keeps_its_reason_without_a_retry(
+    tmp_path: Path,
+) -> None:
+    _write_plugin(tmp_path, code=DEFECT_ON_RETRY_CODE)
+    _write_state(tmp_path, enabled=[FIXTURE_NAME])
+    loader = _loader(tmp_path, RecordingTraceSink())
+    registry = _load(loader)
+
+    asyncio.run(
+        loader.retry_pending(registry, push_event=lambda source, content: None)
+    )
+
+    assert registry.state_of(FIXTURE_NAME) == "failed"
+    assert "TypeError" in registry.reason_of(FIXTURE_NAME)
+    assert registry.retry_of(FIXTURE_NAME) is False
+
+
+def test_an_invalid_directory_exposes_its_reason_and_neither_retries_nor_loads(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "plugins" / FIXTURE_NAME
+    directory.mkdir(parents=True)
+    _write_state(tmp_path, enabled=[])
+
+    registry = _load(_loader(tmp_path, RecordingTraceSink()))
+
+    assert registry.state_of(FIXTURE_NAME) == "invalid"
+    assert "manifest" in registry.reason_of(FIXTURE_NAME)
+    assert registry.retry_of(FIXTURE_NAME) is False
+    assert registry.instruction_of(FIXTURE_NAME) == ""
+
+
+def test_an_inactive_plugin_has_no_reason_and_no_retry(tmp_path: Path) -> None:
+    _write_plugin(tmp_path)
+    _write_state(tmp_path, enabled=[])
+
+    registry = _load(_loader(tmp_path, RecordingTraceSink()))
+
+    assert registry.state_of(FIXTURE_NAME) == "inactive"
+    assert registry.reason_of(FIXTURE_NAME) is None
+    assert registry.retry_of(FIXTURE_NAME) is False
 
 
 LEAKY_CODE = '''
@@ -747,7 +947,7 @@ def test_startup_traces_every_plugin_state_in_one_deterministic_pass(
         ("disparu", "missing"),
         ("gamma", "activated"),
         ("beta", "failed"),
-        ("delta", "disabled"),
+        ("delta", "inactive"),
     ]
     # Le registre porte le même état, lisible sans relire la trace.
     assert dict(registry.states) == {
@@ -755,5 +955,181 @@ def test_startup_traces_every_plugin_state_in_one_deterministic_pass(
         "disparu": "missing",
         "gamma": "activated",
         "beta": "failed",
-        "delta": "disabled",
+        "delta": "inactive",
     }
+
+
+# -- Réglages observés et diagnostic (#158) ----------------------------------
+
+
+def test_an_inactive_plugin_exposes_its_settings_without_being_imported(
+    tmp_path: Path,
+) -> None:
+    """Valeurs effectives et présence des secrets, sans jamais importer le code."""
+    secret = "unique-secret-value-158"
+    _write_plugin(
+        tmp_path,
+        code=EXPLODING_CODE,
+        manifest=_manifest(
+            config=[
+                {"key": "base_url", "type": "url"},
+                {"key": "parent_page_id", "type": "string", "required": True},
+            ],
+            secrets=[{"key": "api_key", "required": True}],
+        ),
+    )
+    _write_state(
+        tmp_path,
+        enabled=[],
+        config={FIXTURE_NAME: {"base_url": "http://tavily.local"}},
+    )
+    sink = RecordingTraceSink()
+
+    registry = _load(
+        _loader(
+            tmp_path,
+            sink,
+            env={"ATHENA_PLUGIN_FIXTURE_API_KEY": secret},
+        )
+    )
+
+    observation = registry.observation_of(FIXTURE_NAME)
+    assert observation is not None
+    # La clé requise absente vaut ``None`` (défaut du plugin), jamais ``""``.
+    assert observation.config == (
+        ConfigValue(key="base_url", value="http://tavily.local"),
+        ConfigValue(key="parent_page_id", value=None),
+    )
+    assert observation.secrets == (
+        SecretPresence(
+            key="api_key",
+            variable="ATHENA_PLUGIN_FIXTURE_API_KEY",
+            present=True,
+        ),
+    )
+    assert secret not in repr(observation)
+    assert not (tmp_path / "plugins" / FIXTURE_NAME / "imported.txt").exists()
+
+
+def test_a_gap_in_the_settings_of_an_inactive_plugin_never_stops_the_scan(
+    tmp_path: Path,
+) -> None:
+    """Clé requise absente, URL invalide et secret manquant ne lèvent jamais."""
+    _write_plugin(
+        tmp_path,
+        manifest=_manifest(
+            config=[
+                {"key": "url", "type": "url", "required": True},
+                {"key": "parent_page_id", "type": "string", "required": True},
+            ],
+            secrets=[{"key": "token", "required": True}],
+        ),
+    )
+    _write_state(
+        tmp_path,
+        enabled=[],
+        config={FIXTURE_NAME: {"url": "homeassistant.local:8123"}},
+    )
+
+    registry = _load(_loader(tmp_path, RecordingTraceSink()))
+
+    assert registry.state_of(FIXTURE_NAME) == "inactive"
+    observation = registry.observation_of(FIXTURE_NAME)
+    assert observation is not None
+    assert observation.config == (
+        ConfigValue(key="url", value="homeassistant.local:8123"),
+        ConfigValue(key="parent_page_id", value=None),
+    )
+    assert observation.secrets == (
+        SecretPresence(
+            key="token",
+            variable="ATHENA_PLUGIN_FIXTURE_TOKEN",
+            present=False,
+        ),
+    )
+
+
+def test_a_broken_secret_resolver_is_never_swallowed_as_absent(
+    tmp_path: Path,
+) -> None:
+    """Seul ``MissingSecretError`` vaut « absent » : un bogue du résolveur remonte."""
+    _write_plugin(
+        tmp_path,
+        manifest=_manifest(secrets=[{"key": "token", "required": True}]),
+    )
+    _write_state(tmp_path, enabled=[])
+    loader = PluginLoader(
+        directory=tmp_path / "plugins",
+        state_path=tmp_path / "plugins.json",
+        secrets=_BrokenSecretResolver(),
+        trace_sink=RecordingTraceSink(),
+    )
+
+    with pytest.raises(RuntimeError, match="résolveur cassé"):
+        _load(loader)
+
+
+def test_every_installed_directory_is_observed_including_unsupported_and_invalid(
+    tmp_path: Path,
+) -> None:
+    """Le balayage sonde les réglages de tous les dossiers, retenus ou non."""
+    _write_plugin(
+        tmp_path,
+        "mobile",
+        manifest=_manifest(
+            "mobile",
+            platform="desktop",
+            config=[{"key": "room", "type": "string"}],
+            secrets=[{"key": "device_token", "required": True}],
+        ),
+        code=EXPLODING_CODE,
+    )
+    _write_plugin(
+        tmp_path,
+        "broken",
+        manifest=_manifest(
+            "broken",
+            api_version=2,
+            secrets=[{"key": "api_key", "required": True}],
+        ),
+        code=EXPLODING_CODE,
+    )
+    _write_state(
+        tmp_path,
+        enabled=[],
+        config={"mobile": {"room": "salon"}},
+    )
+
+    registry = _load(_loader(tmp_path, RecordingTraceSink()))
+
+    # Non supporté : identité, réglages et présence sont lisibles.
+    assert registry.state_of("mobile") == "unsupported"
+    mobile = registry.observation_of("mobile")
+    assert mobile is not None
+    assert mobile.config == (ConfigValue(key="room", value="salon"),)
+    assert mobile.secrets == (
+        SecretPresence(
+            key="device_token",
+            variable="ATHENA_PLUGIN_MOBILE_DEVICE_TOKEN",
+            present=False,
+        ),
+    )
+
+    # Invalide : seules les exigences que le manifeste permet encore de lire
+    # sont exposées, et elles sont sondées comme les autres.
+    assert registry.state_of("broken") == "invalid"
+    declaration = registry.declaration_of("broken")
+    assert declaration is not None
+    assert declaration.invalid_reason is not None
+    assert declaration.secrets == (SecretField(key="api_key", required=True),)
+    broken = registry.observation_of("broken")
+    assert broken is not None
+    assert broken.secrets == (
+        SecretPresence(
+            key="api_key",
+            variable="ATHENA_PLUGIN_BROKEN_API_KEY",
+            present=False,
+        ),
+    )
+    assert not (tmp_path / "plugins" / "mobile" / "imported.txt").exists()
+    assert not (tmp_path / "plugins" / "broken" / "imported.txt").exists()

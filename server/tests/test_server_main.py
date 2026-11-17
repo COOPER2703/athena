@@ -310,3 +310,72 @@ def test_cli_reports_an_entrypoint_failing_at_import(
 
     assert "fixture" in error
     assert "dépendance absente à l'import" in error
+
+
+def test_server_starts_with_a_broken_manifest_outside_the_activated_list(
+    tmp_path: Path,
+) -> None:
+    """Un essai de plugin ne rend pas Athena muette : il apparaît invalide."""
+    plugins_dir = tmp_path / "plugins"
+    broken = plugins_dir / "broken"
+    broken.mkdir(parents=True)
+    (broken / "plugin.json").write_text("{pas du json", encoding="utf-8")
+    (broken / "plugin.py").write_text(
+        "raise RuntimeError('jamais importé')", encoding="utf-8"
+    )
+    (tmp_path / "plugins.json").write_text(
+        json.dumps({"enabled": [], "config": {}}), encoding="utf-8"
+    )
+    env = {
+        **os.environ,
+        "GEMINI_API_KEY": "test-key",
+        "WS_HOST": "127.0.0.1",
+        "WS_PORT": str(_free_port()),
+        "ATHENA_MEMORY_DB": str(tmp_path / "memory.db"),
+        "ATHENA_AUTH_DB": str(tmp_path / "auth.db"),
+        "ATHENA_LOG_DIR": str(tmp_path / "logs"),
+        "ATHENA_CONSOLE_ENABLED": "0",
+        "ATHENA_WEBHOOK_ENABLED": "0",
+        "ATHENA_PLUGINS_DIR": str(plugins_dir),
+        "ATHENA_PLUGINS_STATE": str(tmp_path / "plugins.json"),
+        "LOG_LEVEL": "INFO",
+    }
+    process = subprocess.Popen(
+        [sys.executable, "-m", "server"],
+        cwd=REPO_ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    lines: list[str] = []
+
+    def _drain() -> None:
+        assert process.stderr is not None
+        for line in process.stderr:
+            lines.append(line)
+
+    reader = threading.Thread(target=_drain, daemon=True)
+    reader.start()
+    try:
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            if any("started" in line for line in lines):
+                break
+            time.sleep(0.02)
+
+        assert process.poll() is None, f"server exited early: {''.join(lines)}"
+        assert any("started" in line for line in lines), "".join(lines)
+        log = (tmp_path / "logs" / "server.log").read_text(encoding="utf-8")
+        assert '"plugin": "broken"' in log
+        assert '"state": "invalid"' in log
+
+        process.send_signal(signal.SIGINT)
+        process.wait(timeout=5.0)
+        assert process.returncode == 0, "".join(lines)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5.0)

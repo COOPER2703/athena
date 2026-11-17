@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import socket
 from pathlib import Path
 from typing import Callable, TypeVar
@@ -820,6 +821,47 @@ def _install_fixture_plugin(tmp_path: Path) -> tuple[Path, Path]:
     return plugins_dir, state_path
 
 
+FAILING_PLUGIN_CODE = '''
+from plugin_api import PluginUnavailable
+
+
+def create(context):
+    raise PluginUnavailable("home assistant injoignable")
+'''
+
+
+def _write_declared_plugin(
+    plugins_dir: Path,
+    name: str,
+    *,
+    platform: str = "server",
+    code: str | None = None,
+    manifest: str | None = None,
+) -> None:
+    """Installe un dossier avec manifeste et code, ou un manifeste brut."""
+    plugin_dir = plugins_dir / name
+    plugin_dir.mkdir(parents=True)
+    if manifest is not None:
+        (plugin_dir / "plugin.json").write_text(manifest, encoding="utf-8")
+    else:
+        (plugin_dir / "plugin.json").write_text(
+            json.dumps(
+                {
+                    "api_version": 1,
+                    "name": name,
+                    "version": "0.1.0",
+                    "description": f"Plugin {name}",
+                    "platform": platform,
+                    "entrypoint": "plugin.py",
+                }
+            ),
+            encoding="utf-8",
+        )
+    (plugin_dir / "plugin.py").write_text(
+        FAILING_PLUGIN_CODE if code is None else code, encoding="utf-8"
+    )
+
+
 def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -1039,8 +1081,27 @@ def test_build_app_serves_plugins_and_safe_config_in_the_snapshot(
                     "name": "fixture",
                     "state": "activated",
                     "tools": ["fixture__echo"],
+                    "declaration": {
+                        "description": "Plugin de fixture",
+                        "version": "0.1.0",
+                        "api_version": 1,
+                        "platform": "server",
+                        "directory": str(plugins_dir / "fixture"),
+                        "invalid_reason": None,
+                    },
+                    "reason": None,
+                    "retry": False,
+                    "instruction": "Utilise fixture__echo pour répéter.",
+                    "config": [],
+                    "secrets": [],
+                    "ready": {
+                        "manifest": True,
+                        "config": True,
+                        "secrets": True,
+                    },
                 }
             ]
+            assert "disabled" not in json.dumps(snapshot)
             assert snapshot["config"] == {
                 "model": "gemini-live",
                 "voice": "Aoede",
@@ -1051,6 +1112,377 @@ def test_build_app_serves_plugins_and_safe_config_in_the_snapshot(
             }
             assert "api_key" not in snapshot["config"]
             assert "test-key" not in json.dumps(snapshot)
+        finally:
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+
+    asyncio.run(scenario())
+
+
+def test_build_app_serves_the_six_service_states_without_disabled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Câblage réel : le registre expose chaque dossier installé, chargé ou non."""
+
+    async def scenario() -> None:
+        plugins_dir, state_path = _install_fixture_plugin(tmp_path)
+        # En échec retentable, mais retenu.
+        _write_declared_plugin(plugins_dir, "failing")
+        # Installé, jamais retenu : seul son manifeste est lu.
+        _write_declared_plugin(plugins_dir, "dormant", code="raise RuntimeError('jamais importé')")
+        # Plateforme cliente : jamais chargée non plus.
+        _write_declared_plugin(plugins_dir, "mobile", platform="desktop")
+        # Manifeste cassé, hors liste d'activation : invalide, pas fatal.
+        (plugins_dir / "broken").mkdir()
+        (plugins_dir / "broken" / "plugin.json").write_text(
+            "{pas du json", encoding="utf-8"
+        )
+        state_path.write_text(
+            json.dumps(
+                {
+                    "enabled": ["failing", "fixture", "ghost"],
+                    "config": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "server.app.root.SentenceTransformerEmbedder", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            "server.app.root.SqliteMemoryStore", lambda *a, **k: FakeMemory()
+        )
+        port = _free_port()
+        console_port = _free_port()
+        config = AppConfig(
+            gemini=GeminiConfig(api_key="test-key"),
+            server=ServerConfig(host="127.0.0.1", port=port),
+            console=ConsoleConfig(port=console_port),
+            webhook=WebhookConfig(enabled=False),
+            plugins=PluginsConfig(
+                directory=str(plugins_dir), state_path=str(state_path)
+            ),
+            log_dir=str(tmp_path),
+            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
+        )
+        app = build_app(config, secrets=EnvSecretResolver({}), env={}, env_file=None)
+        runner = asyncio.create_task(app.run())
+        try:
+            base_url = f"http://127.0.0.1:{console_port}"
+            async with console_session(base_url) as http:
+                await install_console(http, base_url, tmp_path / "server.log")
+                snapshot = await _snapshot_when_ready(
+                    http, f"{base_url}/api/status"
+                )
+
+            plugins = snapshot["plugins"]
+            assert [
+                (plugin["name"], plugin["state"], plugin["tools"])
+                for plugin in plugins
+            ] == [
+                ("broken", "invalid", []),
+                ("dormant", "inactive", []),
+                ("failing", "failed", []),
+                ("fixture", "activated", ["fixture__echo"]),
+                ("ghost", "missing", []),
+                ("mobile", "unsupported", []),
+            ]
+
+            by_name = {plugin["name"]: plugin for plugin in plugins}
+            # Un dossier dont le manifeste est cassé garde une identité vide
+            # plutôt qu'inventée, et la raison expurgée qui l'explique.
+            broken = by_name["broken"]
+            assert broken["declaration"] == {
+                "description": "",
+                "version": "",
+                "api_version": 0,
+                "platform": "",
+                "directory": str(plugins_dir / "broken"),
+                "invalid_reason": broken["reason"],
+            }
+            assert broken["reason"] is not None
+            assert "manifest is not valid JSON" in broken["reason"]
+            assert broken["retry"] is False
+            assert broken["instruction"] == ""
+            # Un manifeste illisible n'invente aucune exigence : listes vides,
+            # donc les marqueurs de configuration/secrets restent satisfaits
+            # faute d'exigence lisible ; seul le manifeste est en défaut.
+            assert broken["config"] == []
+            assert broken["secrets"] == []
+            assert broken["ready"] == {
+                "manifest": False,
+                "config": True,
+                "secrets": True,
+            }
+
+            dormant = by_name["dormant"]
+            assert dormant["declaration"]["description"] == "Plugin dormant"
+            assert dormant["declaration"]["platform"] == "server"
+            assert dormant["declaration"]["invalid_reason"] is None
+            assert dormant["reason"] is None
+            assert dormant["instruction"] == ""
+
+            failing = by_name["failing"]
+            assert failing["declaration"]["version"] == "0.1.0"
+            assert "home assistant injoignable" in failing["reason"]
+            assert failing["retry"] is True
+
+            assert by_name["fixture"]["declaration"]["api_version"] == 1
+            assert by_name["fixture"]["instruction"] == (
+                "Utilise fixture__echo pour répéter."
+            )
+
+            # Dossier retenu mais disparu : rien n'a pu être lu, donc aucune
+            # Déclaration, et la Console devra le dire sans inventer.
+            ghost = by_name["ghost"]
+            assert ghost["declaration"] is None
+            assert ghost["reason"] is None
+            assert ghost["instruction"] == ""
+            # Sans Déclaration, rien n'est assertable : listes vides et trois
+            # marqueurs faux plutôt qu'un « prêt » fondé sur des exigences
+            # qu'on n'a pas pu lire.
+            assert ghost["config"] == []
+            assert ghost["secrets"] == []
+            assert ghost["ready"] == {
+                "manifest": False,
+                "config": False,
+                "secrets": False,
+            }
+
+            mobile = by_name["mobile"]
+            assert mobile["declaration"]["platform"] == "desktop"
+            assert mobile["reason"] is None
+
+            assert "disabled" not in json.dumps(snapshot)
+            # Aucun secret, aucun en-tête ni corps de requête dans l'instantané.
+            assert "test-key" not in json.dumps(snapshot)
+            for forbidden in ("Authorization", "headers", "body"):
+                assert forbidden not in json.dumps(snapshot)
+            # L'instantané sert un état observé au démarrage : supprimer les
+            # dossiers ne le change pas, aucune I/O n'a lieu à sa construction.
+            shutil.rmtree(plugins_dir)
+            assert app.snapshot()["plugins"] == snapshot["plugins"]
+        finally:
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+
+    asyncio.run(scenario())
+
+
+def test_build_app_serves_plugin_settings_and_readiness_without_secret_values(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Câblage réel : réglages effectifs, présence des secrets et trois marqueurs."""
+
+    async def scenario() -> None:
+        plugins_dir = tmp_path / "plugins"
+        secret = "unique-websearch-secret-158"
+        websearch = plugins_dir / "websearch"
+        websearch.mkdir(parents=True)
+        (websearch / "plugin.json").write_text(
+            json.dumps(
+                {
+                    "api_version": 1,
+                    "name": "websearch",
+                    "version": "1.0.0",
+                    "description": "Cherche sur le web via Tavily",
+                    "platform": "server",
+                    "entrypoint": "plugin.py",
+                    "config": [
+                        {"key": "base_url", "type": "url"},
+                        {"key": "search_depth", "type": "string"},
+                    ],
+                    "secrets": [{"key": "api_key", "required": True}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (websearch / "plugin.py").write_text(
+            "raise RuntimeError('jamais importé')", encoding="utf-8"
+        )
+
+        notion = plugins_dir / "notion"
+        notion.mkdir(parents=True)
+        (notion / "plugin.json").write_text(
+            json.dumps(
+                {
+                    "api_version": 1,
+                    "name": "notion",
+                    "version": "0.1.0",
+                    "description": "Pages Notion",
+                    "platform": "server",
+                    "entrypoint": "plugin.py",
+                    "config": [
+                        {"key": "parent_page_id", "type": "string", "required": True},
+                        {"key": "base_url", "type": "url"},
+                    ],
+                    "secrets": [{"key": "token", "required": True}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (notion / "plugin.py").write_text(
+            "raise RuntimeError('jamais importé')", encoding="utf-8"
+        )
+
+        broken = plugins_dir / "broken"
+        broken.mkdir()
+        (broken / "plugin.json").write_text("{pas du json", encoding="utf-8")
+
+        state_path = tmp_path / "plugins.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    # Seul un dossier disparu est retenu : les trois autres
+                    # restent des dossiers installés à diagnostiquer.
+                    "enabled": ["ghost"],
+                    "config": {
+                        "websearch": {
+                            "base_url": "http://tavily.local",
+                            "search_depth": "",
+                        },
+                        "notion": {"base_url": "pas-une-url"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(
+            "server.app.root.SentenceTransformerEmbedder", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            "server.app.root.SqliteMemoryStore", lambda *a, **k: FakeMemory()
+        )
+        port = _free_port()
+        console_port = _free_port()
+        config = AppConfig(
+            gemini=GeminiConfig(api_key="test-key"),
+            server=ServerConfig(host="127.0.0.1", port=port),
+            console=ConsoleConfig(port=console_port),
+            webhook=WebhookConfig(enabled=False),
+            plugins=PluginsConfig(
+                directory=str(plugins_dir), state_path=str(state_path)
+            ),
+            log_dir=str(tmp_path),
+            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
+        )
+        app = build_app(
+            config,
+            secrets=EnvSecretResolver({"ATHENA_PLUGIN_WEBSEARCH_API_KEY": secret}),
+            env={},
+            env_file=None,
+        )
+        runner = asyncio.create_task(app.run())
+        try:
+            base_url = f"http://127.0.0.1:{console_port}"
+            async with console_session(base_url) as http:
+                await install_console(http, base_url, tmp_path / "server.log")
+                snapshot = await _snapshot_when_ready(
+                    http, f"{base_url}/api/status"
+                )
+
+            by_name = {plugin["name"]: plugin for plugin in snapshot["plugins"]}
+            assert set(by_name) == {"broken", "ghost", "notion", "websearch"}
+
+            # Renseignée contre défaut : une valeur vide vaut ``null``.
+            websearch_entry = by_name["websearch"]
+            assert websearch_entry["config"] == [
+                {
+                    "key": "base_url",
+                    "type": "url",
+                    "required": False,
+                    "value": "http://tavily.local",
+                },
+                {
+                    "key": "search_depth",
+                    "type": "string",
+                    "required": False,
+                    "value": None,
+                },
+            ]
+            assert websearch_entry["secrets"] == [
+                {
+                    "key": "api_key",
+                    "variable": "ATHENA_PLUGIN_WEBSEARCH_API_KEY",
+                    "required": True,
+                    "present": True,
+                }
+            ]
+            assert websearch_entry["ready"] == {
+                "manifest": True,
+                "config": True,
+                "secrets": True,
+            }
+
+            # Clé requise absente et URL invalide : la configuration n'est pas
+            # prête, et le secret requis manque.
+            notion_entry = by_name["notion"]
+            assert notion_entry["config"] == [
+                {
+                    "key": "parent_page_id",
+                    "type": "string",
+                    "required": True,
+                    "value": None,
+                },
+                {
+                    "key": "base_url",
+                    "type": "url",
+                    "required": False,
+                    "value": "pas-une-url",
+                },
+            ]
+            assert notion_entry["secrets"] == [
+                {
+                    "key": "token",
+                    "variable": "ATHENA_PLUGIN_NOTION_TOKEN",
+                    "required": True,
+                    "present": False,
+                }
+            ]
+            assert notion_entry["ready"] == {
+                "manifest": True,
+                "config": False,
+                "secrets": False,
+            }
+
+            # Ni manifeste lisible ni exigences connues : aucune liste inventée,
+            # et aucun marqueur n'affirme un « prêt » invérifiable.
+            ghost_entry = by_name["ghost"]
+            assert ghost_entry["declaration"] is None
+            assert ghost_entry["config"] == []
+            assert ghost_entry["secrets"] == []
+            assert ghost_entry["ready"] == {
+                "manifest": False,
+                "config": False,
+                "secrets": False,
+            }
+
+            # Un manifeste invalide n'a pas de Déclaration exploitable : listes
+            # vides, donc seuls les marqueurs sans exigence restent satisfaits.
+            broken_entry = by_name["broken"]
+            assert broken_entry["declaration"]["invalid_reason"] is not None
+            assert broken_entry["config"] == []
+            assert broken_entry["secrets"] == []
+            assert broken_entry["ready"] == {
+                "manifest": False,
+                "config": True,
+                "secrets": True,
+            }
+
+            # Une entrée secret ne porte jamais de valeur, et la valeur de
+            # l'environnement de test n'apparaît nulle part dans l'instantané.
+            for entry in snapshot["plugins"]:
+                for secret_entry in entry["secrets"]:
+                    assert set(secret_entry) == {
+                        "key",
+                        "variable",
+                        "required",
+                        "present",
+                    }
+            serialized = json.dumps(snapshot)
+            assert secret not in serialized
+            assert "test-key" not in serialized
         finally:
             app.request_shutdown()
             await asyncio.wait_for(runner, 1.0)

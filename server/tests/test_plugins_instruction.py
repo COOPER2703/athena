@@ -140,17 +140,17 @@ def test_a_plugin_without_instruction_still_serves_its_tools() -> None:
     assert [spec.name for spec in live.tools] == ["hass__turn_on"]
 
 
-def test_disabled_plugin_removes_its_tools_and_its_instruction_together() -> None:
+def test_without_a_plugin_binding_its_tools_and_instruction_disappear() -> None:
     enabled = Coordinator(system_prompt="SYSTÈME", plugins=_plugin_registry())
-    disabled = Coordinator(system_prompt="SYSTÈME", plugins=PluginRegistry())
+    empty = Coordinator(system_prompt="SYSTÈME", plugins=PluginRegistry())
 
     enabled_live = opened(drive(enabled, [SessionRequested(client_id="c1")]))
-    disabled_live = opened(drive(disabled, [SessionRequested(client_id="c1")]))
+    empty_live = opened(drive(empty, [SessionRequested(client_id="c1")]))
 
     assert PLUGIN_INSTRUCTION in enabled_live.instruction
     assert enabled_live.tools
-    assert disabled_live.instruction == "SYSTÈME"
-    assert disabled_live.tools == ()
+    assert empty_live.instruction == "SYSTÈME"
+    assert empty_live.tools == ()
 
 
 def test_without_plugins_the_instruction_is_the_same_as_before() -> None:

@@ -5116,11 +5116,10 @@ def test_the_six_tools_have_their_exact_schemas_and_console_row(
                     assert tools[name].description == DESCRIPTIONS[name], name
 
                 [notion] = app.snapshot()["plugins"]
-                assert notion == {
-                    "name": "notion",
-                    "state": "activated",
-                    "tools": TOOL_NAMES,
-                }
+                assert notion["name"] == "notion"
+                assert notion["state"] == "activated"
+                assert notion["tools"] == TOOL_NAMES
+                assert notion["declaration"]["api_version"] == 1
 
     asyncio.run(scenario())
 
