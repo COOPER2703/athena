@@ -100,6 +100,18 @@ const MESSAGES: Readonly<Record<string, string>> = {
   token_not_found: "Ce Jeton d'accès n'existe pas.",
   installation_incomplete:
     "L'Installation n'est pas terminée : enregistrez une clé Gemini dans les Réglages pour qu'Athena puisse parler.",
+  // Conversation (ADR-0023) : refus et pannes du Tour.
+  busy: "Athena est déjà en train de répondre. Réessayez quand elle aura terminé.",
+  llm_failed:
+    "Le modèle n'a pas pu répondre. Votre message est conservé : réessayez dans un instant.",
+  tour_failed:
+    "Le Tour s'est interrompu. Votre message est conservé : réessayez dans un instant.",
+  invalid_message:
+    "Le message ne peut pas être vide et ne doit pas dépasser 4096 caractères.",
+  thread_unavailable:
+    "Le fil de la Conversation n'est pas disponible pour l'instant.",
+  invalid_limit: "La taille de page demandée est invalide.",
+  invalid_cursor: "Le curseur de pagination est invalide.",
   invalid_secret:
     "Ce Secret a été refusé : vérifiez sa valeur, puis réessayez.",
   invalid_secret_name:
@@ -159,6 +171,11 @@ export function describeError(error: unknown): string {
     return `Trop de tentatives : réessayez dans ${seconds} s.`;
   }
   return messageForCode(error.code);
+}
+
+/** Phrase française d'un code stable, sans dépendre d'une réponse HTTP. */
+export function describeCode(code: string): string {
+  return messageForCode(code);
 }
 
 /** Phrase française de chaque erreur par champ, prête pour un formulaire. */

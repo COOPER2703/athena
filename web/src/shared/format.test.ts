@@ -4,6 +4,7 @@ import {
   formatBytes,
   formatDate,
   formatDuration,
+  formatIsoDate,
   formatTimestamp,
   pluralize,
   shortId,
@@ -59,5 +60,15 @@ describe("pluralize", () => {
     expect(pluralize(1, "Trace")).toBe("1 Trace");
     expect(pluralize(2, "Trace")).toBe("2 Traces");
     expect(pluralize(2, "Jeton", "Jetons")).toBe("2 Jetons");
+  });
+});
+
+describe("horodatage ISO du fil", () => {
+  it("met en forme une date ISO, ou un tiret si elle est illisible", () => {
+    expect(formatIsoDate("2026-11-17T10:00:00Z", "UTC")).toBe(
+      "17/11/2026 10:00",
+    );
+    expect(formatIsoDate("pas une date", "UTC")).toBe("—");
+    expect(formatIsoDate("", "UTC")).toBe("—");
   });
 });

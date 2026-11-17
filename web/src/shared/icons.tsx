@@ -158,3 +158,38 @@ export function BrandMark({ className }: IconProps) {
     </svg>
   );
 }
+
+export function SendIcon({ className }: IconProps) {
+  return (
+    <svg {...svgProps(className)}>
+      <path d="M4 12 20 5l-3.5 14L12 13l-8-1Z" />
+      <path d="M12 13l3.5-6" />
+    </svg>
+  );
+}
+
+export function StopIcon({ className }: IconProps) {
+  return (
+    <svg {...svgProps(className)}>
+      <rect x="7" y="7" width="10" height="10" rx="1.5" />
+    </svg>
+  );
+}
+
+export function SoundOnIcon({ className }: IconProps) {
+  return (
+    <svg {...svgProps(className)}>
+      <path d="M4 10v4h3l4 3.5v-11L7 10H4Z" />
+      <path d="M15 9.5a3.5 3.5 0 0 1 0 5M17.5 7a7 7 0 0 1 0 10" />
+    </svg>
+  );
+}
+
+export function SoundOffIcon({ className }: IconProps) {
+  return (
+    <svg {...svgProps(className)}>
+      <path d="M4 10v4h3l4 3.5v-11L7 10H4Z" />
+      <path d="m15 9.5 5 5M20 9.5l-5 5" />
+    </svg>
+  );
+}
