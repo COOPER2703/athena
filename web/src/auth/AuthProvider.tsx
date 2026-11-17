@@ -13,6 +13,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { fetchSession, login, logout, type Credentials } from "../api/client";
 import { isUnauthorized } from "../api/errors";
 import { onUnauthorized, queryKeys } from "../api/queryClient";
+import { setupAccount } from "../api/setup";
 import { defaultZone, safeReturnPath } from "../app/routing";
 import { ANONYMOUS_SESSION, type AuthSession } from "./session";
 
@@ -23,8 +24,11 @@ interface AuthContextValue {
   error: unknown;
   refetch: () => void;
   signIn: (credentials: Credentials) => Promise<void>;
+  /** Crée l'unique Compte ; rend la clé maître, à afficher une seule fois. */
+  installAccount: (credentials: Credentials) => Promise<string | null>;
   signOut: () => Promise<void>;
   signingIn: boolean;
+  installing: boolean;
   signingOut: boolean;
 }
 
@@ -65,6 +69,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const loginMutation = useMutation({
     mutationFn: (credentials: Credentials) => login(credentials),
   });
+  const setupMutation = useMutation({
+    mutationFn: (credentials: Credentials) => setupAccount(credentials),
+  });
   const logoutMutation = useMutation({ mutationFn: () => logout() });
 
   const resetPrivateState = useCallback(() => {
@@ -79,10 +86,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const session = await loginMutation.mutateAsync(credentials);
       resetPrivateState();
       queryClient.setQueryData(queryKeys.session, session);
+      // La réponse de connexion ne décrit pas l'Installation : on relit l'état
+      // avant d'afficher la coquille, pour que le rappel de la clé Gemini soit
+      // juste dès la première image.
+      await sessionQuery.refetch();
       const from = returnPath(locationRef.current.state);
       navigate(from ?? defaultZone().path, { replace: true });
     },
-    [loginMutation, navigate, queryClient, resetPrivateState],
+    [
+      loginMutation,
+      navigate,
+      queryClient,
+      resetPrivateState,
+      sessionQuery.refetch,
+    ],
+  );
+
+  const installAccount = useCallback(
+    async (credentials: Credentials) => {
+      const { session, masterKey } = await setupMutation.mutateAsync(credentials);
+      resetPrivateState();
+      queryClient.setQueryData(queryKeys.session, session);
+      // La clé Gemini n'est pas dans la réponse d'Installation : la relecture
+      // donne l'état exact, mais l'écran guidé reste maître de sa progression.
+      await sessionQuery.refetch();
+      return masterKey;
+    },
+    [queryClient, resetPrivateState, sessionQuery.refetch, setupMutation],
   );
 
   const signOut = useCallback(async () => {
@@ -106,12 +136,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const current = locationRef.current;
         resetPrivateState();
         queryClient.setQueryData(queryKeys.session, ANONYMOUS_SESSION);
-        if (
-          current.pathname === "/login" ||
-          current.pathname === "/installation"
-        ) {
+        if (current.pathname === "/login") {
           return;
         }
+        // Un Ticket peut expirer au milieu du parcours d'Installation : on
+        // revient à la connexion avec la route demandée, pour reprendre à
+        // l'étape en cours (la saisie secrète, elle, n'est jamais conservée).
         navigate("/login", {
           replace: true,
           state: {
@@ -132,17 +162,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         void sessionQuery.refetch();
       },
       signIn,
+      installAccount,
       signOut,
       signingIn: loginMutation.isPending,
+      installing: setupMutation.isPending,
       signingOut: logoutMutation.isPending,
     }),
     [
+      installAccount,
       loginMutation.isPending,
       logoutMutation.isPending,
       sessionQuery.data,
       sessionQuery.error,
       sessionQuery.isPending,
       sessionQuery.refetch,
+      setupMutation.isPending,
       signIn,
       signOut,
     ],

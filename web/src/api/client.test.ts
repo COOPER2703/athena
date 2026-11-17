@@ -104,12 +104,22 @@ describe("endpoints d'identité", () => {
         v: 1,
         setup_required: true,
         authenticated: false,
+        gemini_configured: false,
+        installation_complete: false,
+        restart_required: false,
+        secrets_unreadable: false,
+        password_min_length: 14,
       }),
     );
     await expect(fetchSession(fetcher)).resolves.toEqual({
       setupRequired: true,
       authenticated: false,
       username: null,
+      geminiConfigured: false,
+      installationComplete: false,
+      restartRequired: false,
+      secretsUnreadable: false,
+      passwordMinLength: 14,
     });
   });
 
@@ -123,6 +133,11 @@ describe("endpoints d'identité", () => {
       setupRequired: false,
       authenticated: true,
       username: "admin",
+      geminiConfigured: false,
+      installationComplete: false,
+      restartRequired: false,
+      secretsUnreadable: false,
+      passwordMinLength: null,
     });
     const [path, init] = (fetcher.mock.calls[0] ?? []) as Call;
     expect(path).toBe("/api/login");

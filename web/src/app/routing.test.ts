@@ -12,7 +12,7 @@ import {
 } from "./routing";
 
 const AUTHENTICATED: AuthSession = {
-  setupRequired: false,
+  ...ANONYMOUS_SESSION,
   authenticated: true,
   username: "admin",
 };
@@ -34,6 +34,14 @@ describe("screenFor", () => {
 
   it("ouvre l'application avec un Ticket Console valide", () => {
     expect(screenFor(AUTHENTICATED)).toBe("app");
+  });
+
+  it("ouvre l'application même si la clé Gemini manque encore", () => {
+    // L'Installation incomplète ne verrouille pas la Console : la bannière
+    // permanente et la Conversation désactivée portent le rappel.
+    expect(
+      screenFor({ ...AUTHENTICATED, installationComplete: false }),
+    ).toBe("app");
   });
 
   it("affiche la connexion sinon", () => {
