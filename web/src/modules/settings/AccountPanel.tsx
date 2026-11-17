@@ -57,6 +57,7 @@ export function AccountPanel() {
     mutationFn: () => signOutEverywhere(),
     onError: (reason) => {
       setConfirmingAll(false);
+      setChanged(false);
       setMessage(
         `La déconnexion globale a échoué. ${describeError(reason)}`,
       );
@@ -188,7 +189,11 @@ export function AccountPanel() {
               size="sm"
               disabled={signingOut}
               onClick={() => {
-                void signOut();
+                setChanged(false);
+                setMessage(null);
+                signOut().catch((reason: unknown) => {
+                  setMessage(describeError(reason));
+                });
               }}
             >
               {signingOut ? "Déconnexion…" : "Se déconnecter"}
