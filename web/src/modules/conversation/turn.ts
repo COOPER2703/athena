@@ -3,7 +3,7 @@
  *
  * Module **pur** : aucun DOM, aucun `fetch`. Le flux ne dit que des morceaux de
  * texte, de l'audio, des appels de Tools et une fin ; cet état rassemble ce qui
- * s'affiche pendant la réponse et ce qui reste après elle (ADR-0023).
+ * s'affiche pendant la réponse et ce qui reste après elle (ADR-0024).
  */
 
 import type { SseEvent } from "../../api/sse";

@@ -234,7 +234,7 @@ class ConsoleServer(Protocol):
     par la racine de composition au moment de la requête (ADR-0016). ``push``
     est le même ``App.push_event`` que celui du Webhook : l'Événement injecté
     entre dans le Canal d'événements unique, sans file propre à la Console.
-    ``tour`` est la couture du **Tour** (ADR-0023) : la Console soumet et annule,
+    ``tour`` est la couture du **Tour** (ADR-0024) : la Console soumet et annule,
     elle n'atteint jamais le Coordinator.
     """
 
@@ -269,7 +269,7 @@ class _DeferredTraceSink:
 
 
 class Installation:
-    """État d'Installation d'une instance (ADR-0025), recalculé à la demande.
+    """État d'Installation d'une instance (ADR-0026), recalculé à la demande.
 
     ``setup_required`` appartient toujours au module d'auth : « aucun Compte ».
     L'Installation est plus large — elle se termine quand le Compte existe **et**
@@ -371,7 +371,7 @@ class App:
     ) -> None:
         # Le transport et Gemini peuvent être **absents** : sans clé Gemini,
         # l'instance est en Installation et ces surfaces d'exécution restent
-        # fermées (ADR-0025). Le noyau ne reçoit alors aucun Événement d'eux.
+        # fermées (ADR-0026). Le noyau ne reçoit alors aucun Événement d'eux.
         self._transport = transport
         self._gemini = gemini
         self._clock = clock
@@ -380,7 +380,7 @@ class App:
         self._scheduler = scheduler
         self._webhook = webhook
         self._console = console
-        # Destination des Tours (ADR-0023) : l'adaptateur Console l'implémente,
+        # Destination des Tours (ADR-0024) : l'adaptateur Console l'implémente,
         # la racine la lui injecte ici. Absente, un Tour se déroule sans être
         # diffusé — jamais une erreur du noyau.
         self._tour_destination = tour_destination
@@ -628,7 +628,7 @@ class App:
         self._events.put_nowait(EventReceived(source=source, content=content))
 
     def submit_tour(self, tour_id: str, text: str) -> None:
-        """Dépose un Tour texte dans le Canal (couture ``TourControl``, ADR-0023).
+        """Dépose un Tour texte dans le Canal (couture ``TourControl``, ADR-0024).
 
         La Console ne connaît ni le Coordinator ni l'état de Session : elle
         demande, le noyau décide — y compris de refuser quand il est occupé.
@@ -789,13 +789,13 @@ def build_app(
 
     ``secrets`` résout les secrets des plugins et la clé Gemini ; par défaut un
     résolveur à trois couches (environnement du processus > magasin > ``.env``)
-    applique la précédence de l'ADR-0024. ``settings`` remplace le magasin
+    applique la précédence de l'ADR-0025. ``settings`` remplace le magasin
     construit depuis ``config.settings`` (seam de test). ``secret_validator``
     remplace la validation réelle d'une clé Gemini.
 
     Sans clé Gemini utilisable, l'instance démarre en **Installation** : le
     transport, le Webhook et Gemini ne sont pas construits, la Console et ses
-    routes de Réglages et de Secrets restent servies (ADR-0025).
+    routes de Réglages et de Secrets restent servies (ADR-0026).
 
     ``live_connect``, ``clock``, ``embedder``, ``auth_now``, ``monotonic``,
     ``settings`` et ``secret_validator`` sont les coutures laissées ouvertes au
@@ -805,7 +805,7 @@ def build_app(
     par l'application des Réglages : le harnais observe le redémarrage sans
     tuer pytest.
     """
-    # Magasin de réglages et de Secrets (ADR-0024) : base dédiée à côté de la
+    # Magasin de réglages et de Secrets (ADR-0025) : base dédiée à côté de la
     # mémoire et de l'auth. Il précède le flux de traces — il porte
     # ``log_level`` — et reçoit un relais dont la cible n'est connue qu'après
     # l'application du magasin.
@@ -844,7 +844,7 @@ def build_app(
     )
     # La couche « magasin » s'applique **avant** le premier adaptateur : une
     # valeur enregistrée prend effet au démarrage, sinon le GET annoncerait une
-    # valeur que le processus n'utilise pas (ADR-0024).
+    # valeur que le processus n'utilise pas (ADR-0025).
     config, applied_settings = config_with_stored_settings(
         config, store=_settings_values(settings_store), process_env=process_env
     )
@@ -996,7 +996,7 @@ def build_app(
             auth=auth,
         )
 
-    # État d'Installation : Compte + Secret Gemini utilisable (ADR-0025).
+    # État d'Installation : Compte + Secret Gemini utilisable (ADR-0026).
     installation = Installation(auth=auth, secrets=settings_store, runtime_key=api_key)
     validator = (
         secret_validator
@@ -1047,7 +1047,7 @@ def build_app(
             installation=installation.status,
             master_key=ensure_master_key,
             # Fil de la Conversation : lecture paginée du Journal, bornée à la
-            # rétention de la mémoire courte (ADR-0023).
+            # rétention de la mémoire courte (ADR-0024).
             thread=ThreadView(
                 memory=memory,
                 user_id=config.memory.user_id,

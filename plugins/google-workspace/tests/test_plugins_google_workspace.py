@@ -28,7 +28,7 @@ from typing import Any
 
 import pytest
 
-from conftest import RecordingTraceSink, wait_until
+from testkit import RecordingTraceSink, wait_until
 from google_stub import GoogleStub
 from google_workspace_harness import (
     ACCESS_TOKEN_PERSO,

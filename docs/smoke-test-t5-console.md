@@ -72,7 +72,7 @@ Attendu :
   dans `logs/server.log`).
 - Au **premier** démarrage, sans Compte, l'écran d'installation s'affiche : aucun code n'est
   demandé, le premier visiteur crée l'unique Compte. La clé maître est rendue **une seule
-  fois** dans la réponse d'installation (ADR-0025).
+  fois** dans la réponse d'installation (ADR-0026).
 - `GET http://127.0.0.1:8767/healthz` répond `200 {"status": "ok"}` **sans** authentification
   ni instantané. La Console écoute sur le port configuré ; le Webhook reste sur le sien.
 - `GET http://127.0.0.1:8767/api/status` **sans** Ticket répond `401` JSON : la surface est
@@ -95,7 +95,7 @@ connexion.
 
 ### 1.1 Installer le Compte (premier démarrage)
 
-Aucun code n'est à recopier (ADR-0025) : le premier visiteur devient propriétaire. Les
+Aucun code n'est à recopier (ADR-0026) : le premier visiteur devient propriétaire. Les
 exemples ci-dessous installent le Compte en `curl` puis réutilisent le cookie de la Console
 (`/tmp/athena-cookies.txt`) ; un navigateur suit le même chemin à l'étape 4.
 
@@ -392,9 +392,9 @@ exponentiel (500 ms → 30 s, plafonné) ; chaque `hello` **remplace** l'état e
 Ouvrez `http://127.0.0.1:8767/`. La page HTML est publique ; c'est elle qui porte les écrans
 d'identité. Attendu :
 
-0. **Identité** : sans Compte, l'écran d'installation demande le Code d'installation (lu dans
-   `logs/server.log`), un nom d'utilisateur et un mot de passe ; avec un Compte, l'écran de
-   connexion s'affiche d'abord. Après connexion, la Console ci-dessous apparaît. Un `401` en
+0. **Identité** : sans Compte, l'écran d'installation demande un nom d'utilisateur et un mot
+   de passe — aucun Code d'installation (ADR-0026) ; avec un Compte, l'écran de connexion
+   s'affiche d'abord. Après connexion, la Console ci-dessous apparaît. Un `401` en
    cours d'usage (Ticket expiré ou révoqué) ramène à l'écran de connexion avec un message. Le
    panneau Compte permet de changer le mot de passe et de se déconnecter (ou « déconnecter
    partout ») ; le panneau Jetons crée un Jeton `client` ou `source`, affiche son secret **une
@@ -489,8 +489,8 @@ Avec le build (`make web` puis lancement par défaut) :
 ### Client audio (Protocole partagé)
 
 Le Protocole partagé n'est pas modifié par la Console. Pour le prouver sans micro, enregistrez
-un client factice sur le WebSocket du serveur (même extrait qu'au smoke test T4, étape 12).
-Le handshake exige un **Jeton `client`** (créé dans la Console) :
+un client factice sur le WebSocket du serveur. Le handshake exige un **Jeton `client`**
+(créé dans la Console) :
 
 ```sh
 export ATHENA_ACCESS_TOKEN=ath_…   # Jeton de nature client
@@ -555,8 +555,8 @@ seuil est atteint), avec les lignes `[app] started`, `[console] event_received`,
 `[webhook] event_received`, `[app] stopped`. La Console ne crée **aucun** fichier de traces
 propre : elle consomme le flux unique (ADR-0004). Aucun secret de configuration
 (`GEMINI_API_KEY` factice inclus, Jetons d'accès, secrets de plugin) n'apparaît dans
-l'instantané ni dans les logs. Seule exception assumée : le **Code d'installation**, écrit une
-fois au démarrage tant qu'aucun Compte n'existe — jamais ensuite (ADR-0017).
+l'instantané ni dans les logs. Aucun **Code d'installation** n'est plus écrit : l'Installation
+ne demande aucune preuve (ADR-0026).
 
 ## Vérification automatisée
 

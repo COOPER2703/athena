@@ -8,7 +8,7 @@ generate:
 	$(PYTHON) protocol/proto/generate.py
 
 test:
-	$(PYTHON) -m pytest protocol/tests server/tests client/tests
+	$(PYTHON) -m pytest
 
 # Dépendances du front : `npm ci` seulement quand `node_modules` manque, pour
 # que `make web` reste rapide après une première installation.

@@ -9,7 +9,7 @@ import { Facts, Panel } from "./Panel";
  * Session du noyau et Client propriétaire.
  *
  * Aucune Session n'existe hors d'une conversation : « Inactive » est l'état
- * normal, et un Tour texte ne crée jamais de Session (ADR-0023).
+ * normal, et un Tour texte ne crée jamais de Session (ADR-0024).
  */
 export function SessionPanel({ snapshot }: { snapshot: DiagnosticSnapshot }) {
   const summary = sessionSummary(snapshot.session, snapshot.clients);

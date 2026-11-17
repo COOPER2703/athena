@@ -1,5 +1,5 @@
 /**
- * Fil de la Conversation : lecture paginée du Journal (ADR-0023).
+ * Fil de la Conversation : lecture paginée du Journal (ADR-0024).
  *
  * Le fil n'est pas un état du noyau : c'est une lecture, marquée par l'origine
  * de chaque tour (clavier, micro, Annonce). La pagination remonte vers le passé

@@ -1,6 +1,6 @@
 """Résolution des Secrets : environnement du processus, puis magasin, puis ``.env``.
 
-L'ADR-0024 fixe la précédence : **environnement > magasin > ``.env`` > défauts**.
+L'ADR-0025 fixe la précédence : **environnement > magasin > ``.env`` > défauts**.
 Le fichier ``.env`` doit donc rester une couche distincte de l'environnement, et
 non une simple fusion : un Secret saisi dans la Console ne doit pas être masqué
 par une vieille valeur du fichier, tandis qu'un Secret d'environnement garde la

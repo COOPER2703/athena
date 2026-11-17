@@ -99,7 +99,7 @@ class CancelIdleTimer:
 
 @dataclass(frozen=True, slots=True)
 class SendTextToTour:
-    """Texte du Tour, poussé vers la destination qui l'a demandé (ADR-0023)."""
+    """Texte du Tour, poussé vers la destination qui l'a demandé (ADR-0024)."""
 
     tour_id: str
     text: str

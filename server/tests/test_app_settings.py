@@ -5,7 +5,7 @@ réelle, vrais répertoires. Les scénarios observent ce qu'un navigateur et un
 opérateur voient — la valeur effective, sa source, ce qui attend un redémarrage,
 et jamais une valeur de Secret.
 
-La règle de précédence est celle de l'ADR-0024 : **environnement du processus >
+La règle de précédence est celle de l'ADR-0025 : **environnement du processus >
 magasin > ``.env`` > défauts**. « Changements en attente » est l'écart entre les
 valeurs stockées et celles que le processus a chargées au démarrage.
 """
@@ -18,7 +18,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Mapping
 
-from conftest import TEST_PASSWORD
+from harness import TEST_PASSWORD
 from server.adapters.console.contract import (
     LOGIN_PATH,
     SECRETS_PATH,

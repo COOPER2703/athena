@@ -8,7 +8,7 @@ qu'un arrêt brutal ne laisse jamais un JSON tronqué : au pire, l'ancien état
 reste en place.
 
 Le fichier n'est **jamais** relu par le serveur en marche : une modification
-prend effet au redémarrage (ADR-0024). Ce module ne fait que lire et écrire ;
+prend effet au redémarrage (ADR-0025). Ce module ne fait que lire et écrire ;
 il ne décide ni de l'activation ni de la validation.
 """
 

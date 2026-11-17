@@ -7,7 +7,7 @@ import pytest
 
 from protocol import SessionEndReason
 
-from conftest import drive, effects
+from harness import drive, effects
 from server.core import (
     IDLE_TIMEOUT,
     AnnounceSessionEnded,

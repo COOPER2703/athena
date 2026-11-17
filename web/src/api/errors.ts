@@ -100,7 +100,7 @@ const MESSAGES: Readonly<Record<string, string>> = {
   token_not_found: "Ce Jeton d'accès n'existe pas.",
   installation_incomplete:
     "L'Installation n'est pas terminée : enregistrez une clé Gemini dans les Réglages pour qu'Athena puisse parler.",
-  // Conversation (ADR-0023) : refus et pannes du Tour.
+  // Conversation (ADR-0024) : refus et pannes du Tour.
   busy: "Athena est déjà en train de répondre. Réessayez quand elle aura terminé.",
   llm_failed:
     "Le modèle n'a pas pu répondre. Votre message est conservé : réessayez dans un instant.",

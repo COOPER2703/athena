@@ -1,15 +1,16 @@
 # Smoke test — Plugin Notion (pages en voix)
 
-Vérification manuelle de bout en bout du plugin serveur `notion` (spec #111, ADR-0019) :
+Vérification manuelle de bout en bout du plugin serveur `notion` (spec #111, ADR local 0001) :
 préparer une connexion Notion, partager une page racine, activer le plugin dans Athena, puis
 dérouler le parcours vocal complet — chercher une page, la lire, la modifier, la mettre à la
 corbeille et la restaurer. Le plugin parle directement à la **REST Notion** avec un jeton
 d'intégration statique : Gemini ne voit jamais Notion, seulement six Tools de page.
 
-Voir `docs/smoke-test-t4-plugins.md` pour le contrat des plugins et `websearch`,
-`docs/smoke-test-t5-console.md` pour la Console, `docs/smoke-test-t3-evenements.md` pour les
-Événements, `docs/smoke-test-t2-memoire.md` pour la mémoire et
-`docs/smoke-test-t1-composition.md` pour la boucle serveur/client d'origine.
+Voir `docs/smoke-test-t4-plugins.md` pour le contrat du système de plugins et la forme
+d'un smoke test de plugin, `docs/smoke-test-t5-console.md` pour la Console,
+`docs/smoke-test-t3-evenements.md` pour les Événements, `docs/smoke-test-t2-memoire.md`
+pour la mémoire et `docs/smoke-test-t1-composition.md` pour la boucle serveur/client
+d'origine.
 
 ## Prérequis
 
@@ -519,13 +520,13 @@ c'est une erreur de configuration fatale.
 
 ```sh
 make generate
-.venv/bin/python -m pytest protocol/tests server/tests client/tests -q
+.venv/bin/python -m pytest plugins/notion/tests -q
 ```
 
 Aucun test ne contacte le vrai Notion : un **faux serveur en processus** enregistre chaque
 requête (méthode, chemin, en-têtes, corps) et programme les réponses.
 
-- `server/tests/test_plugins_notion.py` — un seul fichier, organisé par sections :
+- `plugins/notion/tests/test_plugins_notion.py` — un seul fichier, organisé par sections :
   - manifeste exact, secret absent, jeton refusé, Notion injoignable, `5xx` de sonde
     (compte et page parente), `parent_page_id` absent/invalide/non partagé, recherche,
     plafond de dix résultats, curseur, erreurs françaises sans retry, jeton absent des

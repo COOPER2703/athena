@@ -1,4 +1,4 @@
-"""Fil de la Conversation : lecture paginée du Journal (ticket #172, ADR-0023).
+"""Fil de la Conversation : lecture paginée du Journal (ticket #172, ADR-0024).
 
 Le fil n'est **pas** un état du noyau : c'est une lecture du Journal, qui montre
 les Tours texte, les transcriptions des Sessions vocales et les Annonces, chacun

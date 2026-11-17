@@ -52,7 +52,7 @@ def test_python_m_server_starts_without_a_gemini_key_and_shuts_down_cleanly(
         # Le test vérifie le cycle de vie du serveur, pas le Webhook : ne pas
         # dépendre du port fixe 8766 (occupé par une instance de dev).
         "ATHENA_WEBHOOK_ENABLED": "0",
-        # ADR-0025 : aucune clé Gemini n'est nécessaire pour démarrer.
+        # ADR-0026 : aucune clé Gemini n'est nécessaire pour démarrer.
         "LOG_LEVEL": "INFO",
     }
     env.pop("GEMINI_API_KEY", None)

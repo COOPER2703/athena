@@ -4,7 +4,7 @@ Le harnais démarre le vrai serveur (racine de composition + Console) sur des
 ports éphémères. ``setup_required`` ne veut dire qu'une chose : aucun Compte.
 Une fois le premier visiteur installé, la route d'installation est fermée pour
 de bon et aucun Code d'installation n'apparaît jamais dans le journal
-(ADR-0025).
+(ADR-0026).
 """
 
 from __future__ import annotations

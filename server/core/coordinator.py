@@ -84,7 +84,7 @@ EVENT_QUEUE_MAX = 120
 # Taille maximale d'un Événement : un contenu plus long est rejeté à l'arrivée
 # (jamais mis en File) et le rejet est tracé.
 EVENT_MAX_CHARS = 4096
-# Garde-fou d'un Tour texte (ADR-0023) : le Tour se referme de lui-même si le
+# Garde-fou d'un Tour texte (ADR-0024) : le Tour se referme de lui-même si le
 # modèle ne rend rien, pour que le noyau ne reste jamais occupé par une réponse
 # qui n'arrive pas. Un Tour qui répond se termine bien avant.
 TOUR_TIMEOUT = 30.0
@@ -161,7 +161,7 @@ class Coordinator:
         self._judging = False
         self._session_counter = 0
         self._audio_buffer: list[bytes] = []
-        # Tour texte en cours (ADR-0023) : un Tour n'est pas une Session, il ne
+        # Tour texte en cours (ADR-0024) : un Tour n'est pas une Session, il ne
         # franchit jamais ``_become_visible`` et ne possède aucun Client. Le
         # compteur d'identité est distinct de celui des Sessions pour qu'une
         # ``LlmClosed`` tardive d'une Session ne referme pas un Tour.
@@ -605,7 +605,7 @@ class Coordinator:
         crée aucune Session : ``_visible`` reste faux, ``owner_client_id`` reste
         vide, et le retour au Repos passe par ``_end_tour``, jamais par
         ``_teardown``. Un Tour demandé alors que le noyau est occupé est refusé
-        avec un motif lisible, sans mise en file (ADR-0023).
+        avec un motif lisible, sans mise en file (ADR-0024).
         """
         if self._state is not SessionState.IDLE:
             return [
@@ -765,7 +765,7 @@ class Coordinator:
         commands: list[Command] = []
         original_state = self._state
 
-        # Un seul Tour à la fois (ADR-0023) : une Session demandée pendant un
+        # Un seul Tour à la fois (ADR-0024) : une Session demandée pendant un
         # Tour est refusée, jamais mise en file ni préemptée. Le refus est rendu
         # au Client par le message ``Error`` du Protocole, sans le changer.
         if self._tour:
@@ -1109,7 +1109,7 @@ class Coordinator:
         # Le Tool de clôture n'a de sens que dans une Session ordinaire active :
         # ni la Connexion de jugement (``_judging``), ni la Session automatique
         # d'Annonce (``_auto``), ni un Tour texte (``_tour``) ne peuvent
-        # l'appeler (#130, ADR-0020, ADR-0023).
+        # l'appeler (#130, ADR-0020, ADR-0024).
         ordinary = (
             self._in_live_session()
             and not self._judging

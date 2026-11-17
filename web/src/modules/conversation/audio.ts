@@ -1,7 +1,7 @@
 /**
  * Audio descendant d'un Tour : PCM 16 bits signé mono, 24 kHz.
  *
- * Le serveur envoie le format que le client existant joue déjà (ADR-0023) : le
+ * Le serveur envoie le format que le client existant joue déjà (ADR-0024) : le
  * navigateur le convertit tel quel en échantillons flottants, sans inventer un
  * autre format ni passer par un décodeur externe.
  */

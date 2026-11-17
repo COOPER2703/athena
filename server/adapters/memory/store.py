@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS consolidation_state (
 )
 """
 
-# Origine d'un tour du Journal (ADR-0023) : ``text`` (Tour de la Console),
+# Origine d'un tour du Journal (ADR-0024) : ``text`` (Tour de la Console),
 # ``voice`` (Session vocale), ``event`` (Annonce proactive). C'est une table
 # annexe **additive** : la table ``journal`` est virtuelle (``vec0``) et
 # n'accepte pas ``ALTER TABLE ADD COLUMN``. Un tour sans ligne d'origine reste

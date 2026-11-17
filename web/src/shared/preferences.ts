@@ -18,7 +18,7 @@ export const MUTED_PREFERENCE_KEY = "athena.conversation.muted";
 /**
  * Vrai quand le son doit rester coupé.
  *
- * La sourdine est le défaut (ADR-0023) : une valeur absente ou illisible coupe
+ * La sourdine est le défaut (ADR-0024) : une valeur absente ou illisible coupe
  * le son, jamais l'inverse.
  */
 export function readMuted(storage: PreferenceStorage | undefined): boolean {

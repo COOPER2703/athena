@@ -1,4 +1,4 @@
-"""Plugin ``websearch`` : recherche web par le moteur Tavily (ADR-0018).
+"""Plugin ``websearch`` : recherche web par le moteur Tavily (ADR local 0001).
 
 Ce module ne connaît du serveur que le contrat public des plugins
 (``plugin_api``) : il n'importe aucun interne. Il expose un seul Tool,
@@ -31,29 +31,29 @@ from plugin_api import (
 )
 
 # Valeurs sûres appliquées par le plugin quand la configuration manque : le
-# chargeur ne sait pas porter de défaut (ADR-0018).
+# chargeur ne sait pas porter de défaut (ADR local 0001).
 DEFAULT_BASE_URL = "https://api.tavily.com"
 DEFAULT_SEARCH_DEPTH = "basic"
 DEFAULT_LANGUAGE = "fr"
 DEFAULT_COUNTRY = "france"
 DEFAULT_STRICT_LANGUAGE = "0"
 
-# Budgets HTTP (ADR-0018) : 8 s, un seul essai. Lus à chaque opération pour que
+# Budgets HTTP (ADR local 0001) : 8 s, un seul essai. Lus à chaque opération pour que
 # les tests puissent les réduire sur une copie du module.
 PROBE_TIMEOUT = 8.0
 SEARCH_TIMEOUT = 8.0
 
-# Budget de contexte (ADR-0018) : dix extraits, deux fragments par source.
+# Budget de contexte (ADR local 0001) : dix extraits, deux fragments par source.
 MAX_RESULTS = 10
 CHUNKS_PER_SOURCE = 2
-# Un extrait ne dépasse pas 600 caractères, l'ensemble 6 000 (ADR-0018).
+# Un extrait ne dépasse pas 600 caractères, l'ensemble 6 000 (ADR local 0001).
 MAX_EXCERPT_CHARS = 600
 MAX_EXCERPT_TOTAL = 6000
 
-# Credits qu'un appel consomme, par profondeur (ADR-0018).
+# Credits qu'un appel consomme, par profondeur (ADR local 0001).
 CREDITS_PER_DEPTH = {"fast": 1, "basic": 1, "advanced": 2}
 
-# Cache des recherches (ADR-0018) : en mémoire seulement, borné en taille et en
+# Cache des recherches (ADR local 0001) : en mémoire seulement, borné en taille et en
 # âge. Lus à chaque opération pour que les tests puissent les réduire sur une
 # copie du module.
 CACHE_MAX_ENTRIES = 32
@@ -62,7 +62,7 @@ CACHE_TTL = 300.0
 
 @dataclass(frozen=True, slots=True)
 class CacheKey:
-    """Tout ce qui distingue deux recherches pour le moteur (ADR-0018).
+    """Tout ce qui distingue deux recherches pour le moteur (ADR local 0001).
 
     Une dimension oubliée ici rendrait à une recherche la charge d'une autre :
     la requête normalisée, le topic et la fenêtre viennent du modèle ; la
@@ -84,7 +84,7 @@ TOOL_DESCRIPTION = (
     "(titre, URL, extrait, date de publication)."
 )
 
-# Énumérations offertes au modèle (ADR-0018) : le schéma est passé tel quel à
+# Énumérations offertes au modèle (ADR local 0001) : le schéma est passé tel quel à
 # Gemini, c'est donc la seule validation côté modèle.
 TOPICS = ("general", "news", "finance")
 TIME_RANGES = ("day", "week", "month", "year")
@@ -356,7 +356,7 @@ def _request_body(
     topic: str,
     time_range: str | None,
 ) -> dict[str, object]:
-    """Corps de ``POST /search``, borné par le budget de contexte (ADR-0018).
+    """Corps de ``POST /search``, borné par le budget de contexte (ADR local 0001).
 
     ``topic`` vient du modèle (``general`` par défaut) et ``time_range`` n'est
     envoyé que s'il est fourni. ``country`` n'accompagne que ``general`` :
@@ -444,7 +444,7 @@ async def _search(
     HTTP : la Console voit ``hit`` dans la Trace et zéro crédit consommé. Une
     erreur n'entre jamais au cache, sans quoi une panne passagère collerait à
     la question. Aucune exception ne remonte : une panne devient une phrase en
-    français que le modèle peut dire à haute voix (ADR-0018). Un timeout n'est
+    français que le modèle peut dire à haute voix (ADR local 0001). Un timeout n'est
     pas retenté : une reprise doublerait la latence d'une conversation en
     cours.
     """

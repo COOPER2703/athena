@@ -378,7 +378,7 @@ class GeminiLiveAdapter:
         Distincte de l'injection de mémoire (``turn_complete=False``) : ce
         contenu déclenche la réponse du modèle, une seule fois par Tour. Le
         modèle Live reste celui de la voix — même prompt, même mémoire, mêmes
-        Tools (ADR-0023) — et sa réponse revient par l'audio et la transcription
+        Tools (ADR-0024) — et sa réponse revient par l'audio et la transcription
         de sortie, que le noyau route vers la destination du Tour.
         """
         await self._send_client_content(

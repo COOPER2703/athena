@@ -1,6 +1,6 @@
 """Validation réelle et bon marché d'une clé Gemini avant enregistrement.
 
-L'ADR-0024 exige un appel réel : une faute de frappe dans la Console ne doit pas
+L'ADR-0025 exige un appel réel : une faute de frappe dans la Console ne doit pas
 se découvrir à la première Session. ``count_tokens`` ne facture aucun jeton de
 sortie et prouve que la clé est acceptée par le service.
 

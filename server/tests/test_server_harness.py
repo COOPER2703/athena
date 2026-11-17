@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from conftest import wait_until
+from harness import wait_until
 from protocol import Audio, SessionEndReason, SessionEnded
 from server.adapters.console.contract import HEALTH_PATH, SESSION_PATH, STATUS_PATH
 from server_harness import FakeEmbedder, ManualClock, read_sse, running_server

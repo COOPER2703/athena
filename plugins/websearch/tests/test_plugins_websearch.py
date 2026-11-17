@@ -14,7 +14,7 @@ from typing import Any, AsyncIterator, Sequence
 import pytest
 import websockets
 
-from conftest import FakeJudge, RecordingTraceSink, _url, register, wait_until
+from testkit import FakeJudge, RecordingTraceSink, register, url, wait_until
 from protocol import SessionStart, encode
 from server.adapters.gemini import GeminiLiveAdapter
 from server.adapters.plugins import PluginLoader
@@ -27,7 +27,7 @@ from server.app.trace import FanOutTraceSink, FileTraceSink
 from server.core.plugins import PluginContext, PluginRegistry
 from tavily_stub import TavilyStub
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 PLUGIN_DIR = REPO_ROOT / "plugins" / "websearch"
 SECRET = "tvly-long-lived-test-key"
 SECRET_VARIABLE = "ATHENA_PLUGIN_WEBSEARCH_API_KEY"
@@ -75,7 +75,7 @@ def test_absent_api_key_fails_the_start_and_names_the_variable(
 
 
 # ---------------------------------------------------------------------------
-# Faux Gemini et transport : mêmes formes que ``test_plugins_homeassistant``.
+# Faux Gemini et transport : mêmes formes que les autres tests de plugin.
 # ---------------------------------------------------------------------------
 
 
@@ -190,7 +190,7 @@ async def _running_app(
 async def _live_session(
     transport: WebSocketTransport, live: _ToolLiveConnect
 ) -> AsyncIterator[_ScriptedSession]:
-    async with websockets.connect(_url(transport)) as ws:
+    async with websockets.connect(url(transport)) as ws:
         await register(ws, transport, drain=False)
         await ws.send(encode(SessionStart()))
         await wait_until(lambda: bool(live.sessions))
@@ -609,7 +609,7 @@ def test_configured_depth_language_and_country_reach_the_engine(
                 assert request["body"]["language"] == "en"
                 assert request["body"]["country"] == "united kingdom"
                 assert request["body"]["filter_by_language"] is True
-                # ``advanced`` coûte deux crédits (ADR-0018).
+                # ``advanced`` coûte deux crédits (ADR local 0001).
                 assert sink.of_kind("Search")[-1].payload["credits"] == 2
 
     asyncio.run(scenario())
@@ -1499,7 +1499,7 @@ def test_an_announcement_session_declares_no_web_search(tmp_path: Path) -> None:
                 # l'Annonce, pas une absence de plugin, qui le retire.
                 assert app.tools.owner_of("web_search") == "websearch"
 
-                async with websockets.connect(_url(transport)) as ws:
+                async with websockets.connect(url(transport)) as ws:
                     await register(ws, transport, client_name="desktop", drain=False)
                     await wait_until(
                         lambda: any(

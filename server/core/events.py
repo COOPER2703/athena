@@ -30,7 +30,7 @@ class SessionRequested:
 
 @dataclass(frozen=True, slots=True)
 class TourRequested:
-    """Une entrée de **Tour** soumise par la Console (ADR-0023).
+    """Une entrée de **Tour** soumise par la Console (ADR-0024).
 
     Le Tour est l'unité de conversation écrite : une entrée, une Connexion Live
     ouverte pour sa durée, puis retour au Repos. Aucune Session n'est créée.

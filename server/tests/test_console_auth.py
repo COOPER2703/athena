@@ -15,7 +15,7 @@ from typing import Mapping
 import aiohttp
 import pytest
 
-from conftest import (
+from harness import (
     Console,
     FakeClock,
     TEST_PASSWORD,

@@ -123,8 +123,7 @@ resterait active.
 | --- | --- | --- |
 | `GEMINI_API_KEY` | non | Clé de l'API Gemini. Absente, le serveur démarre en **Installation** : la clé se saisit dans la Console après création du Compte. Fournie ici, elle prime sur le magasin (porte de secours). |
 | `TZ` | recommandé | `Europe/Paris`. Détermine l'heure locale de la consolidation (`ATHENA_CONSOLIDATION_HOURS=0,12`) et l'horodatage des journaux. Défaut image : UTC. |
-| `ATHENA_PLUGIN_HOMEASSISTANT_TOKEN` | si `homeassistant` est activé | Jeton Home Assistant. |
-| `ATHENA_PLUGIN_WEBSEARCH_API_KEY` | si `websearch` est activé | Clé Tavily. |
+| `ATHENA_PLUGIN_<PLUGIN>_<SECRET>` | si le plugin est activé | Un secret déclaré par le manifeste du plugin. `<PLUGIN>` est le nom du plugin en majuscules, tout caractère non alphanumérique remplacé par `_` ; `<SECRET>` est la clé déclarée. Le `README.md` du plugin documente ses variables, leur obligation et sa configuration d'activation. |
 | `LOG_LEVEL` | non | `INFO` par défaut. |
 | `ATHENA_RESTART_ON_APPLY` | non | `1` : appliquer un Réglage depuis la Console fait sortir proprement le processus, que `--restart unless-stopped` relance. Défaut `0` : rien ne s'arrête, la Console affiche la commande à exécuter. |
 | `ATHENA_RESTART_COMMAND` | non | Commande exacte montrée quand le redémarrage automatique est refusé. `docker restart athena` par défaut ; `systemctl restart athena` pour un service systemd. |
@@ -133,6 +132,11 @@ Le couple `ATHENA_RESTART_ON_APPLY=1` / `ATHENA_RESTART_COMMAND` n'est pas un R�
 éditable : il appartient à l'orchestrateur, pas à l'utilisateur de la Console. Avec le
 drapeau à `1`, chaque `PUT /api/settings` qui laisse des changements en attente redémarre
 le conteneur : la réponse part d'abord, puis le processus sort avec le code `0`.
+
+Les secrets propres à un plugin suivent la règle générique
+`ATHENA_PLUGIN_<PLUGIN>_<SECRET>` ; ce document ne les énumère pas, car ils appartiennent
+au plugin et sont documentés dans `plugins/<nom>/README.md`, avec sa configuration
+d'activation.
 
 Un secret de plugin manquant **n'est pas toléré** : le démarrage échoue en nommant la
 variable et le code de sortie est `2`. C'est volontaire — un plugin activé sans secret est
@@ -192,18 +196,21 @@ Invariants :
   `/data` est l'unité de montage.
 - **`plugins.json` vit dans `/data`** et n'est pas fourni par l'Image. S'il est absent,
   **aucun plugin ne se charge** — silencieusement (`default: []`). C'est le piège numéro un
-  de ce déploiement : la Console démarre normalement, mais aucune domotique ni recherche
-  web n'existe. Ansible doit écrire ce fichier (contenu non secret, donc versionnable) :
+  de ce déploiement : la Console démarre normalement, mais aucun plugin n'est actif. Ansible
+  doit écrire ce fichier (contenu non secret, donc versionnable) :
 
   ```json
   {
-    "enabled": ["homeassistant", "websearch"],
+    "enabled": ["<nom>"],
     "config": {
-      "homeassistant": { "url": "https://homeassistant.cooper-host.com" },
-      "websearch": {}
+      "<nom>": {}
     }
   }
   ```
+
+  Le `README.md` de chaque plugin (`plugins/<nom>/README.md`) documente sa configuration
+  d'activation et ses secrets ; ce document ne duplique pas ces valeurs, qui périsseraient
+  ici en silence.
 
   Retirer un nom de `enabled` désactive le plugin sans redéployer le code ; ajouter un nom
   rend son secret obligatoire (voir §4). Le fichier est relu au **démarrage** : un

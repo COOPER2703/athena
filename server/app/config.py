@@ -69,12 +69,12 @@ DEFAULT_LOG_DIR = "logs"
 # déploiements.
 DEFAULT_PLUGINS_DIR = "plugins"
 DEFAULT_PLUGINS_STATE = "plugins.json"
-# Magasin de réglages et de Secrets (ADR-0024) : base dédiée, à côté de la
+# Magasin de réglages et de Secrets (ADR-0025) : base dédiée, à côté de la
 # mémoire et de l'auth, et clé maître dans un fichier séparé en ``0600``. Le
 # chemin de la clé peut pointer vers un répertoire de credentials systemd.
 DEFAULT_SETTINGS_DB = "settings.db"
 DEFAULT_MASTER_KEY_FILE = "master.key"
-# Redémarrage automatique après application des Réglages (ADR-0024). Désactivé
+# Redémarrage automatique après application des Réglages (ADR-0025). Désactivé
 # par défaut : un serveur lancé à la main ne doit pas s'arrêter sans
 # superviseur. Activé, le processus sort proprement et son superviseur le
 # relance. La commande affichée sinon suit le déploiement : Docker est le seul
@@ -118,7 +118,7 @@ class ServerConfig(BaseModel):
 class GeminiConfig(BaseModel):
     """Paramètres de connexion à Gemini Live.
 
-    La clé est **facultative** (ADR-0025) : une instance neuve démarre sans
+    La clé est **facultative** (ADR-0026) : une instance neuve démarre sans
     elle, en mode Installation. Vide, elle ferme le transport, le Webhook et
     Gemini ; la Console et les Réglages restent joignables.
     """
@@ -313,7 +313,7 @@ class PluginsConfig(BaseModel):
 
 
 class SettingsConfig(BaseModel):
-    """Emplacements du magasin de réglages et de la clé maître (ADR-0024).
+    """Emplacements du magasin de réglages et de la clé maître (ADR-0025).
 
     Les deux chemins sont en **lecture seule** dans l'interface : une faute de
     frappe ferait démarrer le serveur sur une base vide, ou rendrait les
@@ -477,7 +477,7 @@ def load_config(
     L'environnement prime sur le fichier. Le secret Gemini est résolu via le
     ``SecretResolver`` injecté (ou un résolveur d'environnement par défaut) ;
     il est **facultatif** : sans clé, l'instance démarre en mode Installation
-    (ADR-0025) et la racine de composition consultera le magasin de Secrets.
+    (ADR-0026) et la racine de composition consultera le magasin de Secrets.
 
     Les champs viennent de la table ``SETTINGS`` : un réglage n'a qu'un nom,
     qu'une variable et qu'un défaut, ici comme dans l'API des Réglages. Les
@@ -575,7 +575,7 @@ def config_with_stored_settings(
 ) -> tuple[AppConfig, dict[str, str]]:
     """Applique la couche « magasin » à une configuration chargée.
 
-    La précédence de l'ADR-0024 vaut aussi au démarrage : environnement du
+    La précédence de l'ADR-0025 vaut aussi au démarrage : environnement du
     processus > magasin > ``.env`` > défauts. La configuration reçue porte déjà
     l'environnement et le ``.env`` ; on ne superpose donc que les champs du
     magasin que l'environnement ne masque pas. Les chemins en lecture seule ne

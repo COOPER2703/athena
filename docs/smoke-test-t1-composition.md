@@ -23,7 +23,7 @@ GEMINI_API_KEY=votre-cle
 # ATHENA_LOG_DIR=logs
 ```
 
-Le serveur démarre aussi sans clé Gemini : il reste alors en **Installation** (ADR-0025), la
+Le serveur démarre aussi sans clé Gemini : il reste alors en **Installation** (ADR-0026), la
 clé se saisit dans les Réglages après création du Compte. Fournie ici, `GEMINI_API_KEY` prime
 sur le magasin.
 
@@ -39,7 +39,7 @@ démarrage est explicite : configuration → trace → transport → Gemini → 
 Coordinator, puis `started` apparaît dans la chronologie.
 
 Au premier démarrage, sans Compte, ouvrez `http://127.0.0.1:8767/` : la Console affiche
-l'écran d'installation. Aucun code n'est demandé (ADR-0025) : le premier visiteur crée
+l'écran d'installation. Aucun code n'est demandé (ADR-0026) : le premier visiteur crée
 l'unique Compte avec un nom d'utilisateur et un mot de passe (12 caractères minimum), puis
 note la **clé maître** affichée une seule fois. Créez ensuite un **Jeton d'accès** de nature
 `client` dans le panneau Jetons. Copiez son secret (`ath_…`) : il n'est affiché qu'une fois.

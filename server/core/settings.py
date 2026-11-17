@@ -1,4 +1,4 @@
-"""Vocabulaire pur des Réglages et des Secrets (ADR-0024, ADR-0025).
+"""Vocabulaire pur des Réglages et des Secrets (ADR-0025, ADR-0026).
 
 Le noyau nomme ce qui est réglable et ce qui est secret ; les adaptateurs
 ouvrent le magasin, chiffrent et servent les routes. Aucun import d'entrée/sortie
@@ -12,7 +12,7 @@ la précédence : environnement du processus > magasin > ``.env`` > défauts. Le
 ``.env`` est présenté comme une valeur d'environnement ; le magasin est la seule
 couche que l'interface peut écrire. Les chemins (bases, journaux, plugins) sont
 en lecture seule : une faute de frappe ferait démarrer le serveur sur une base
-vide ou rendrait la Console injoignable (ADR-0024).
+vide ou rendrait la Console injoignable (ADR-0025).
 
 Le ticket #174 ajoute ici la **validation** d'un objet complet, le calcul des
 **changements en attente** (écart entre le magasin et la configuration chargée)
@@ -28,7 +28,7 @@ from enum import StrEnum
 from typing import Mapping, Sequence
 from urllib.parse import urlsplit
 
-# La clé Gemini est le seul Secret que l'Installation exige (ADR-0025). Les
+# La clé Gemini est le seul Secret que l'Installation exige (ADR-0026). Les
 # Secrets de plugin suivent la même convention ``ATHENA_PLUGIN_…`` (ADR-0014),
 # mais ils ne sont connus qu'à la lecture d'un manifeste.
 GEMINI_SECRET = "GEMINI_API_KEY"

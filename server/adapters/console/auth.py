@@ -343,7 +343,7 @@ class ConsoleAuth:
         except AuthError as error:
             return self._auth_error(error)
         # La clé maître est créée ici, à l'Installation, et rendue une seule
-        # fois : c'est le seul moment où l'API l'expose (ADR-0024). Une clé
+        # fois : c'est le seul moment où l'API l'expose (ADR-0025). Une clé
         # déjà présente (préparée par un déploiement) n'est pas réaffichée.
         master_key = self._master_key() if self._master_key is not None else None
         return self._opened(ticket, master_key=master_key, include_key=True)
@@ -530,7 +530,7 @@ class ConsoleAuth:
 
 
 def _installation_json(status: InstallationStatus) -> dict[str, object]:
-    """Champs d'Installation de ``GET /api/session`` (ADR-0025).
+    """Champs d'Installation de ``GET /api/session`` (ADR-0026).
 
     Ajout compatible de l'enveloppe ``v=1`` : les clients existants continuent
     de lire ``setup_required``, ``authenticated`` et ``username``.

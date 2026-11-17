@@ -5,9 +5,9 @@ Gemini Live via un serveur. L'assistant lit et envoie des messages Matrix, contr
 domotique, cherche sur le web, mémorise durablement des informations et assiste à
 distance le développement logiciel mené par opencode.
 
-Ce glossaire fixe le vocabulaire du domaine. Il porte désormais deux espaces : le
-**noyau** (session, mémoire) et les **adaptateurs** qui le relient au monde
-(transport, Gemini, Matrix, Home Assistant, console).
+Ce glossaire fixe le vocabulaire du **noyau** (session, mémoire) et du **contrat des
+plugins**. Le vocabulaire propre à un plugin vit dans le glossaire de son dossier :
+`GLOSSARY-MAP.md` dit où le trouver.
 
 ## Language
 
@@ -46,9 +46,8 @@ _Avoid_: échange, requête, message, completion
 _Avoid_: Idle, inactif, état vide
 
 **Tool**:
-Une fonction que Gemini peut appeler pendant une Session. Peut être côté serveur (Matrix,
-Home Assistant) ou côté client (shell, URL). Chaque Tool appartient à un plugin ou au
-noyau.
+Une fonction que Gemini peut appeler pendant une Session. Peut être côté serveur (plugin)
+ou côté client (shell, URL). Chaque Tool appartient à un plugin ou au noyau.
 _Avoid_: Function, capability, skill
 
 **Tool du noyau**:
@@ -141,9 +140,9 @@ liée à `127.0.0.1` par défaut : **Conversation** écrite avec Athena, **Régl
 **Plugins** installés et **Diagnostic** (Session, Clients, Plugins, Traces). Depuis l'ADR-0017,
 toute route d'API hors identité exige un **Ticket Console**. Elle lit l'**instantané de
 lecture** et le flux de **Traces**, soumet des **Tours** et lit les entrées récentes du
-**Journal**, et écrit les Réglages et les **Secrets** (ADR-0023, ADR-0024). Ce n'est **pas un
+**Journal**, et écrit les Réglages et les **Secrets** (ADR-0024, ADR-0025). Ce n'est **pas un
 Client** : elle ne parle pas le Protocole partagé, ne s'enregistre pas, ne transmet pas
-d'audio et ne démarre pas de Session.
+d'audio et ne démarre pas de Session (ADR-0003, ADR-0016, amendés par ADR-0024 et ADR-0025).
 _Avoid_: dashboard, UI, interface web, client web
 
 **Trace**:
@@ -200,26 +199,10 @@ _Avoid_: Silencieux, muet
 ### Domotique
 
 **Intent**:
-Une commande sémantique Assist de Home Assistant (`HassTurnOn`, `HassLightSet`, …). La
-résolution des noms, zones et alias se fait dans Home Assistant, jamais dans le plugin.
+Une commande sémantique adressée à une plateforme de domotique (`HassTurnOn`,
+`HassLightSet`, …). La résolution des noms, zones et alias se fait dans la plateforme,
+jamais dans le plugin.
 _Avoid_: Command, action, service, appel REST
-
-**Tool Assist**:
-Un Tool exposé par l'API Assist de Home Assistant. La plupart sont des Intents ; d'autres
-lisent l'état de la maison (`GetLiveContext`, `HassGetState`) ou lancent un script. Le
-plugin `homeassistant` les expose tels quels : Athena ne filtre pas les Tools Assist aux
-seuls Intents et ne les renomme pas.
-_Avoid_: Tool HA, outil domotique, function
-
-**Exposition Assist**:
-Le périmètre des entités pilotables par Athena, défini dans Home Assistant par son
-exposition à Assist. Une entité non exposée est invisible pour Gemini.
-_Avoid_: Allow-list, périmètre du plugin, permissions
-
-**Serveur MCP HA**:
-Le serveur MCP natif de Home Assistant. Le plugin `homeassistant` en est client : c'est
-Athena qui se connecte, jamais Gemini.
-_Avoid_: `ha-mcp` (serveur tiers), MCP connecté côté Gemini, API REST HA
 
 ### Identité
 
@@ -238,7 +221,8 @@ _Avoid_: User, device, utilisateur
 **Compte**:
 L'identité d'accès de l'administrateur d'une instance : un nom d'utilisateur et un mot de
 passe haché en Argon2id. Unique en v1, sans inscription publique ni rôle. Se distingue de
-l'**Utilisateur** (`User` : la personne dont Athena se souvient) et du **Client** (l'appareil).
+l'**Utilisateur** (`User` : la personne dont Athena se souvient), du **Client** (l'appareil)
+et du **Compte Google** (compte de messagerie relié au plugin `google-workspace`).
 _Avoid_: user, compte utilisateur, profil, login
 
 **Ticket Console**:
@@ -272,7 +256,7 @@ Réglages ; le transport des Clients, le Webhook et Gemini restent fermés, et l
 est désactivée. L'Installation se termine quand le Compte existe et qu'un Secret Gemini
 utilisable est enregistré ; fournir ce Secret peut être passé, auquel cas un rappel permanent
 subsiste et Athena ne peut ni parler ni être jointe. Le premier visiteur devient le
-propriétaire : aucune preuve d'installation n'est exigée (ADR-0025).
+propriétaire : aucune preuve d'installation n'est exigée (ADR-0026).
 _Avoid_: setup, onboarding, première configuration, wizard
 
 ### Clients
@@ -368,59 +352,6 @@ plateforme que le plugin relie ; Athena ne les renomme pas et ne leur ajoute auc
 Le noyau l'exécute par le même round-trip qu'un Tool du noyau, mais l'exécution sort du
 serveur, vers la plateforme.
 _Avoid_: Tool externe, tool intégré, wrapper
-
-### Recherche web
-
-**Recherche web**:
-L'interrogation d'un moteur externe par Athena pour répondre à une question factuelle ou
-d'actualité. C'est un Tool de plugin : elle n'existe qu'en Session, jamais pendant une
-Annonce proactive.
-_Avoid_: Recherche internet, browsing, navigation, surf
-
-**Extrait de recherche**:
-Le fragment de page renvoyé pour un résultat, accompagné de son titre et de son URL. Se
-distingue d'une page lue en entier : c'est une matière à synthèse, pas une source complète.
-_Avoid_: Snippet, résumé, contenu, page
-
-### Notion
-
-**Page Notion**:
-Une page du workspace Notion, seule unité que le plugin `notion` lit et modifie. Une base de
-données ou une data source n'est pas une Page.
-_Avoid_: Note, fiche, document, page web
-
-### Google Workspace
-
-**Compte Google**:
-Un compte Google dont Athena lit les mails et l'agenda, relié au plugin `google-workspace` par
-un libellé stable (`perso`, `pro`). Se distingue du **Compte** (identité d'accès à la Console),
-de l'**Utilisateur** (personne dont Athena se souvient) et du **Client** (appareil).
-_Avoid_: compte Workspace, compte Gmail, profil Google
-
-**Événement d'agenda**:
-Une entrée de l'agenda Google d'un Compte Google : début, fin, titre, lieu et participants
-éventuels. Se distingue de l'**Événement** (fait externe poussé vers Athena).
-_Avoid_: événement (seul), meeting, créneau
-
-**Carnet de contacts**:
-L'ensemble des **Contacts Google** d'un Compte Google, contacts enregistrés et contacts
-mémorisés par Gmail réunis. N'est pas un annuaire : l'annuaire du domaine Workspace n'en
-fait pas partie.
-_Avoid_: répertoire, annuaire, contacts (seul)
-
-**Contact Google**:
-Une personne du carnet d'un **Compte Google**, réduite à un nom d'affichage et à ses
-adresses e-mail. Un nom seul ne la résout pas, et elle peut porter plusieurs adresses :
-c'est une recherche, pas une clé. Se distingue du **Contact** (Matrix).
-_Avoid_: contact (seul), fiche, répertoire, annuaire
-
-**Correspondance approximative**:
-Le résultat d'une **recherche de contacts** dont la requête ne se retrouve telle quelle
-dans aucun nom ni aucune adresse, mais s'en approche à une ou deux fautes d'orthographe
-près, sur le nom ou la partie locale d'une adresse. Une telle correspondance est marquée
-`approximate` dans le retour et se confirme à l'oral avant tout envoi ; elle ne se mélange
-jamais à des correspondances exactes.
-_Avoid_: recherche floue, fuzzy, correspondance partielle
 
 ### Développement assisté
 

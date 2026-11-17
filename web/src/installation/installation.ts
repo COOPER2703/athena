@@ -3,7 +3,7 @@
  *
  * Module **pur** : il ne dépend ni du DOM ni de React. L'écran guidé et la
  * bannière permanente lisent les mêmes fonctions, pour qu'une seule règle dise
- * quand l'Installation est finie et ce qu'il reste à faire (ADR-0025).
+ * quand l'Installation est finie et ce qu'il reste à faire (ADR-0026).
  */
 
 import { describeError, describeFieldErrors } from "../api/errors";

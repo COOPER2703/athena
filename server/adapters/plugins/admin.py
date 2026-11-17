@@ -1,12 +1,12 @@
 """Gestion des Plugins installés : liste, activation, configuration, secrets.
 
-L'ADR-0014 fait du fichier d'état la seule source de l'activation, et l'ADR-0024
+L'ADR-0014 fait du fichier d'état la seule source de l'activation, et l'ADR-0025
 impose que rien ne soit rechargé à chaud : ce module **écrit** le fichier et ne
 charge, n'importe et n'active aucun plugin. Une activation ou une configuration
 prend effet au redémarrage suivant, et l'écart entre le fichier et l'état lu au
 démarrage est ce que la Console appelle « changements en attente ».
 
-Les Secrets sont en écriture seule (ADR-0024) : ce module n'expose jamais une
+Les Secrets sont en écriture seule (ADR-0025) : ce module n'expose jamais une
 valeur, seulement le nom de la variable attendue, ``configured`` et la date de
 mise à jour. Une valeur de configuration inconnue ou invalide est refusée avec
 un code par champ, jamais en tuant le serveur.
@@ -331,7 +331,7 @@ def _text(value: object) -> str:
 def _secret_json(
     plugin: str, field: SecretField, status: SecretStatus | None
 ) -> dict[str, object]:
-    """État d'un Secret : nom de variable, jamais la valeur (ADR-0024)."""
+    """État d'un Secret : nom de variable, jamais la valeur (ADR-0025)."""
     return {
         "key": field.key,
         "required": field.required,

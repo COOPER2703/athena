@@ -70,7 +70,7 @@ def test_reads_and_coerces_environment() -> None:
 
 
 def test_a_missing_api_key_is_allowed_by_the_configuration() -> None:
-    """ADR-0025 : une instance neuve démarre sans clé, en mode Installation."""
+    """ADR-0026 : une instance neuve démarre sans clé, en mode Installation."""
     cfg = load_config(env={}, env_file=None)
 
     assert cfg.gemini.api_key == ""

@@ -1,4 +1,4 @@
-"""Lecture du fil de la Conversation pour la Console (ticket #172, ADR-0023).
+"""Lecture du fil de la Conversation pour la Console (ticket #172, ADR-0024).
 
 Le fil n'est pas un état du noyau : c'est une **lecture paginée du Journal**.
 Cette petite couture appartient à la racine de composition — elle connaît le

@@ -1,4 +1,4 @@
-"""Plugin ``notion`` : pages Notion par la REST (ADR-0019).
+"""Plugin ``notion`` : pages Notion par la REST (ADR local 0001).
 
 Ce module ne connaît du serveur que le contrat public des plugins
 (``plugin_api``) : il n'importe aucun interne. Il appelle la REST Notion avec
@@ -35,7 +35,7 @@ from plugin_api import (
 # ne sait pas porter de défaut (ADR-0014).
 DEFAULT_BASE_URL = "https://api.notion.com"
 
-# Version d'API épinglée, jamais une clé de configuration (ADR-0019).
+# Version d'API épinglée, jamais une clé de configuration (ADR local 0001).
 NOTION_VERSION = "2026-03-11"
 # Version Markdown demandée explicitement sur les endpoints Markdown.
 MARKDOWN_VERSION = "v2"

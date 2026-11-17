@@ -1,4 +1,4 @@
-"""Tour texte de bout en bout par la Console (ticket #172, ADR-0023).
+"""Tour texte de bout en bout par la Console (ticket #172, ADR-0024).
 
 Tout passe par le vrai serveur du harnais : vraie requête HTTP, vrai flux
 ``text/event-stream``, vraie base mémoire, faux modèle Live scriptable. Les

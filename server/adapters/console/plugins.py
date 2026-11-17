@@ -2,7 +2,7 @@
 
 La zone Plugins ne fait **que** lire et écrire l'état des Plugins installés :
 aucune installation, aucune désinstallation, aucun rechargement à chaud
-(ADR-0014, ADR-0024). L'écriture est persistée dans le fichier d'état et prend
+(ADR-0014, ADR-0025). L'écriture est persistée dans le fichier d'état et prend
 effet au redémarrage suivant ; la réponse dit toujours si un redémarrage est
 nécessaire.
 

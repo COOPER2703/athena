@@ -7,8 +7,8 @@ import socket
 from pathlib import Path
 from typing import Callable, TypeVar
 
-from conftest import FakeJudge, RecordingTraceSink, wait_until
 from protocol import SessionEndReason
+from testkit import FakeJudge, RecordingTraceSink, wait_until
 from server import __version__
 from server.adapters.console import ConsoleAdapter
 from server.app.config import (

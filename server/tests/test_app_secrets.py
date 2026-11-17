@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import wait_until
+from testkit import wait_until
 from server.app.config import (
     AppConfig,
     ConsoleConfig,

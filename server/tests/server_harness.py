@@ -98,7 +98,7 @@ HTTP utilisent cette fixture (``test_app_root``, ``test_app_auth``,
 unitaires du noyau et des adaptateurs continuent de se construire à la main :
 ils ne démarrent pas le serveur complet.
 
-Le Code d'installation a disparu (ADR-0025) : ``install()`` crée l'unique
+Le Code d'installation a disparu (ADR-0026) : ``install()`` crée l'unique
 Compte sans code et garde le Ticket Console.
 """
 
@@ -121,7 +121,7 @@ import aiohttp
 import sqlite_vec
 import websockets
 
-from conftest import TEST_PASSWORD, wait_until
+from harness import TEST_PASSWORD, wait_until
 from protocol import (
     Audio,
     Register,
@@ -914,7 +914,7 @@ class AthenaServer:
     ) -> aiohttp.ClientSession:
         """Crée l'unique Compte par la vraie route et garde le Ticket Console.
 
-        Aucun code n'est demandé (ADR-0025) : le premier visiteur devient
+        Aucun code n'est demandé (ADR-0026) : le premier visiteur devient
         propriétaire. La réponse d'Installation porte la clé maître une seule
         fois ; le harnais la laisse dans la réponse, que les tests peuvent lire.
         """

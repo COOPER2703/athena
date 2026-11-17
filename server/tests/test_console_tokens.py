@@ -14,7 +14,7 @@ from pathlib import Path
 
 import aiohttp
 
-from conftest import (
+from harness import (
     Console,
     FakeClock,
     TEST_PASSWORD,

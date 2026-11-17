@@ -6,12 +6,24 @@ The snippets below are illustrative, not files to copy. The skill never writes p
 
 ```
 plugins/<name>/
-├── plugin.json
-└── plugin.py
+├── plugin.json        manifest
+├── plugin.py          entrypoint
+├── README.md          what it is, how to activate it, which secrets to provide
+├── GLOSSARY.md        the vocabulary that belongs only to this plugin
+├── tests/
+│   ├── conftest.py    makes the folder's helper modules importable
+│   ├── <name>_stub.py fake external server
+│   └── test_plugins_<name>.py
+└── docs/
+    ├── smoke-test.md  the manual end-to-end path, read beside the code it verifies
+    └── adr/
+        └── 0001-….md  the plugin's decisions, numbered locally from 0001
 ```
 
-Tests live in `server/tests/test_plugins_<name>.py`. A manual end-to-end path belongs in a
-`docs/smoke-test-*.md` document.
+`plugins/README.md` is the authority for this mandatory shape, the activation file and the
+secret naming rule. Plugin ADRs are numbered locally from `0001`; `docs/adr/README.md` holds
+the old central → new local correspondence. Everything that belongs only to this plugin
+lives in its folder: tests and their fake servers, smoke test, glossary and decisions.
 
 ## Manifest
 
@@ -106,13 +118,18 @@ instruction but declares no Tools (ADR-0017).
 
 ## Tests
 
+- Put the tests in `plugins/<name>/tests/`, with a local `conftest.py` that adds the folder
+  to the import path, a `<name>_stub.py` fake external server, and
+  `test_plugins_<name>.py`.
 - Fake the external platform locally: an HTTP stub or an MCP stub, injected through a config
   key such as `base_url`, or through the existing stub pattern.
 - Exercise the full path: App → Gemini fake → registry → plugin → platform.
 - Assert the requests emitted, the payload returned to the model, the Traces, the degraded
   start and retry, the secret redaction, and the exact manifest.
-- The contract test (`server/tests/test_plugin_contract.py`) picks up the new plugin
-  automatically; it must stay green.
+- Import the shared harness from `testkit` (five names: `RecordingTraceSink`, `FakeJudge`,
+  `wait_until`, `url`, `register`), never from the server's `conftest`.
+- The contract test (`server/tests/test_plugin_contract.py`) walks `plugins/` and picks up
+  the new plugin automatically; it must stay green.
 
 ## Activation
 
@@ -143,7 +160,9 @@ Inside `to-spec`'s *Implementation Decisions*:
 - traces: kinds and payloads, what must never leak;
 - events: source name and content, or "none";
 - activation: `plugins.json` entry and environment variables;
-- Console: Tool visibility and plugin state.
+- Console: Tool visibility and plugin state;
+- documentation: the README's activation and secrets section, the glossary terms the plugin
+  introduces, its `docs/smoke-test.md`, and the local ADRs it needs (numbered from `0001`).
 
 ### Tool contract (one per Tool)
 

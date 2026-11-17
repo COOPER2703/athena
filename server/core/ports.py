@@ -28,7 +28,7 @@ class SecretResolver(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class SecretStatus:
-    """État public d'un Secret : jamais sa valeur (ADR-0024).
+    """État public d'un Secret : jamais sa valeur (ADR-0025).
 
     ``configured`` dit qu'une valeur est enregistrée ; ``updated_at`` date sa
     dernière écriture. Un Secret illisible (clé maître perdue) reste
@@ -41,7 +41,7 @@ class SecretStatus:
 
 
 class SettingsStore(Protocol):
-    """Port du magasin de réglages : valeurs JSON et métadonnées (ADR-0024).
+    """Port du magasin de réglages : valeurs JSON et métadonnées (ADR-0025).
 
     Le noyau ne connaît ni SQL ni le chiffrement. Le ticket #174 lit ces
     valeurs pour calculer la source de chaque champ et les changements en
@@ -71,7 +71,7 @@ class SecretStore(Protocol):
 
     ``secret`` existe pour la racine de composition (résolution de la config et
     des Secrets de plugin), jamais pour une route de l'API : aucune route ne
-    renvoie une valeur (ADR-0024).
+    renvoie une valeur (ADR-0025).
     """
 
     @property
@@ -97,7 +97,7 @@ class SecretStore(Protocol):
 
 
 class SecretValidator(Protocol):
-    """Validation distante d'un Secret avant enregistrement (ADR-0024).
+    """Validation distante d'un Secret avant enregistrement (ADR-0025).
 
     Seule la clé Gemini sait être vérifiée : ``validate`` rend un message
     d'erreur en français, ou ``None`` si le Secret est utilisable. Aucune
@@ -113,7 +113,7 @@ class InstallationStatus:
 
     ``setup_required`` reste la seule propriété du module d'auth (aucun Compte) ;
     l'Installation, elle, se termine quand un Compte existe **et** qu'un Secret
-    Gemini utilisable est enregistré (ADR-0025).
+    Gemini utilisable est enregistré (ADR-0026).
     """
 
     gemini_configured: bool
@@ -224,7 +224,7 @@ class JournalEntry:
 
 @dataclass(frozen=True, slots=True)
 class ThreadEntry:
-    """Une entrée du fil de la Conversation, lue dans le Journal (ADR-0023).
+    """Une entrée du fil de la Conversation, lue dans le Journal (ADR-0024).
 
     ``id`` est le curseur stable de pagination (le ``rowid`` du Journal, jamais
     ``created_at`` qui n'a qu'une seconde de précision). ``origin`` dit d'où
@@ -252,7 +252,7 @@ class ThreadReader(Protocol):
     """Lecture paginée du Journal pour le fil de la Conversation.
 
     C'est une lecture **dynamique**, pas une extension de l'instantané
-    (ADR-0016 amendé par l'ADR-0023) : l'adaptateur Console ne voit ni la base
+    (ADR-0016 amendé par l'ADR-0024) : l'adaptateur Console ne voit ni la base
     ni le noyau, la racine de composition lui injecte cette couture.
     """
 
@@ -496,7 +496,7 @@ class AuthService(Protocol):
     async def install(self, username: str, password: str) -> IssuedTicket:
         """Crée l'unique Compte et ouvre un Ticket Console.
 
-        Aucun code n'est demandé (ADR-0025) : le premier visiteur est
+        Aucun code n'est demandé (ADR-0026) : le premier visiteur est
         propriétaire. Une fois le Compte créé, la route refuse pour de bon.
 
         Lève ``AuthError`` : ``already_installed`` (un Compte existe),

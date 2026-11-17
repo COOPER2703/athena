@@ -1,4 +1,4 @@
-"""Chiffrement au repos des Secrets et clé maître locale (ADR-0024).
+"""Chiffrement au repos des Secrets et clé maître locale (ADR-0025).
 
 AES-GCM d'une bibliothèque éprouvée (``cryptography``), jamais de cryptographie
 maison. Le blob stocké porte son format : un octet de version, le nonce, puis le

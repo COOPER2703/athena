@@ -204,7 +204,7 @@ class SqliteAuthStore:
 
     async def install(self, username: str, password: str) -> IssuedTicket:
         # Dès qu'un Compte existe, l'installation est fermée pour de bon
-        # (ADR-0025) : aucun code n'est demandé au premier visiteur.
+        # (ADR-0026) : aucun code n'est demandé au premier visiteur.
         if not self.setup_required:
             raise AuthError("already_installed")
 

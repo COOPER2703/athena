@@ -1,4 +1,4 @@
-"""Adaptateur du magasin de réglages et de Secrets (ADR-0024)."""
+"""Adaptateur du magasin de réglages et de Secrets (ADR-0025)."""
 
 from __future__ import annotations
 

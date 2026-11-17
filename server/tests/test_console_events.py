@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import aiohttp
-from conftest import FakeJudge, RecordingTraceSink, wait_until
+from testkit import FakeJudge, RecordingTraceSink, wait_until
 
 from server.adapters.console import EVENTS_PATH, ConsoleAdapter
 from server.adapters.gemini import GeminiLiveAdapter

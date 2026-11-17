@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 import websockets
 
-from conftest import TEST_PASSWORD
+from harness import TEST_PASSWORD
 from server.adapters.console.contract import (
     CHAT_PATH,
     SECRETS_PATH,
@@ -116,7 +116,7 @@ def test_setup_creates_the_only_account_without_a_code_and_shows_the_key_once(
 
 
 def test_the_diagnostic_answers_with_an_account_but_no_key(tmp_path: Path) -> None:
-    """``setup_required`` ne vaut que « aucun Compte » : le reste répond (ADR-0025)."""
+    """``setup_required`` ne vaut que « aucun Compte » : le reste répond (ADR-0026)."""
 
     async def scenario() -> None:
         async with running_server(tmp_path, gemini_key="") as server:

@@ -49,7 +49,7 @@ export const SURFACE_LABELS: Readonly<Record<SurfaceName, string>> = {
   webhook: "Webhook",
 };
 
-/** État d'Installation d'une instance (ADR-0025). */
+/** État d'Installation d'une instance (ADR-0026). */
 export interface InstallationInfo {
   /** Un Compte existe : la Console est ouverte à la connexion. */
   accountExists: boolean;

@@ -32,7 +32,7 @@ from server.core.events import (
 # Command produces it in T1, and the desktop client ignores it. It stays
 # deferred until a core Command produces it. ``Error``, en revanche, est
 # désormais produit par le noyau : une Session demandée pendant un **Tour**
-# texte est refusée avec un motif lisible (ADR-0023), sans changer le Protocole.
+# texte est refusée avec un motif lisible (ADR-0024), sans changer le Protocole.
 #
 # ``ToolCall`` / client Tools: no cross-client Tool routing exists in T1, so
 # ``ClientLink.send_tool_call`` is a reserved no-op and ``client_tools`` stays

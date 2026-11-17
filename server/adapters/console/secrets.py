@@ -1,6 +1,6 @@
 """Secrets de la Console : noms et états en lecture, valeur jamais relue.
 
-Les routes sont en **écriture seule** (ADR-0024) : ``GET`` ne rend que le nom,
+Les routes sont en **écriture seule** (ADR-0025) : ``GET`` ne rend que le nom,
 ``configured`` et la date de mise à jour ; ``PUT`` valide puis chiffre ;
 ``DELETE`` efface. Aucune réponse, aucune trace, aucun message d'erreur ne
 contient la valeur saisie.

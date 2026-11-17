@@ -1,6 +1,6 @@
 """Magasin de réglages et de Secrets, à côté de la mémoire et de l'auth.
 
-Une base SQLite **dédiée** (ADR-0024) : valeurs JSON brutes, état des Secrets,
+Une base SQLite **dédiée** (ADR-0025) : valeurs JSON brutes, état des Secrets,
 aucune migration destructive (``CREATE TABLE IF NOT EXISTS``). La clé maître est
 un fichier séparé en ``0600`` : sauvegarder le magasin sans elle rend les
 Secrets illisibles, ce que le démarrage signale au lieu de le masquer.
@@ -144,7 +144,7 @@ class SqliteSettingsStore:
 
     @property
     def unreadable(self) -> bool:
-        """Vrai si un Secret stocké ne peut plus être déchiffré (ADR-0024)."""
+        """Vrai si un Secret stocké ne peut plus être déchiffré (ADR-0025)."""
         with self._lock:
             return self._check_unreadable()
 

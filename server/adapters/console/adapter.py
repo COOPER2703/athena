@@ -203,7 +203,7 @@ class ConsoleAdapter:
 
     @property
     def tour_destination(self) -> TourStreams:
-        """Destination des Tours, injectée dans la racine de composition (ADR-0023)."""
+        """Destination des Tours, injectée dans la racine de composition (ADR-0024)."""
         return self._chat.destination
 
     @property
@@ -226,7 +226,7 @@ class ConsoleAdapter:
         ``push`` est le ``App.push_event`` injecté : comme le Webhook, la Console
         ne possède aucune file propre, elle dépose dans le Canal d'événements
         unique (ADR-0007). Sans couture, l'injection répond 503. ``tour`` est la
-        couture du **Tour** (ADR-0023) : soumettre et annuler, jamais atteindre
+        couture du **Tour** (ADR-0024) : soumettre et annuler, jamais atteindre
         le Coordinator. Sans elle, la Conversation répond 501.
         """
         self._snapshot = snapshot
@@ -319,7 +319,7 @@ class ConsoleAdapter:
             ),
         )
         app.router.add_post(EVENTS_PATH, self._handle_event)
-        # Réglages et Secrets (ADR-0024) : lecture des noms seulement, écriture
+        # Réglages et Secrets (ADR-0025) : lecture des noms seulement, écriture
         # et effacement par nom. Enregistrés avant le repli ``/api/*``.
         app.router.add_get(SECRETS_PATH, self._secrets_routes.handle_list)
         app.router.add_put(
@@ -348,7 +348,7 @@ class ConsoleAdapter:
             app.router.add_get(SETTINGS_PATH, self._settings_routes.handle_get)
             app.router.add_put(SETTINGS_PATH, self._settings_routes.handle_put)
         # Conversation : refusée côté serveur tant que l'Installation n'est pas
-        # terminée, puis Tour complet en ``text/event-stream`` (ADR-0023).
+        # terminée, puis Tour complet en ``text/event-stream`` (ADR-0024).
         app.router.add_post(CHAT_PATH, self._chat.handle)
         # Fil de la Conversation : lecture paginée du Journal, en lecture seule.
         app.router.add_get(THREAD_PATH, self._thread_routes.handle)

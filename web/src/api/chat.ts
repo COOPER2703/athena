@@ -1,5 +1,5 @@
 /**
- * Tour texte : soumission et flux SSE (ADR-0023).
+ * Tour texte : soumission et flux SSE (ADR-0024).
  *
  * La requête part en même origine ; le cookie du Ticket part seul. Un refus
  * HTTP devient une `ApiError`, mais une annulation volontaire traverse telle

@@ -1,6 +1,6 @@
 """Tour texte de la Console : soumission, flux ``text/event-stream``, annulation.
 
-Le **Tour** est l'unité de conversation écrite (ADR-0023) : une entrée, une
+Le **Tour** est l'unité de conversation écrite (ADR-0024) : une entrée, une
 Connexion Live ouverte pour sa durée, une **destination** qui reçoit le texte,
 l'audio et les appels de Tools, puis retour au Repos. La Console n'est pas un
 Client : cet adaptateur ne voit ni le Coordinator ni l'état de Session. Il
@@ -171,7 +171,7 @@ class ChatEndpoint:
     """Route ``POST /api/chat`` : un Tour, un flux, une annulation.
 
     La route reste **fermée** tant que l'Installation n'est pas terminée
-    (``409 installation_incomplete``, ADR-0025) : sans clé Gemini, aucun Tour ne
+    (``409 installation_incomplete``, ADR-0026) : sans clé Gemini, aucun Tour ne
     peut exister. Le refus « Athena est occupée » n'est pas une erreur HTTP : il
     arrive dans le flux par l'événement ``busy``, comme le prévoit le contrat.
     """

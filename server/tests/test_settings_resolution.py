@@ -1,6 +1,6 @@
 """Moteur de résolution des Réglages : précédence et source de chaque valeur.
 
-La règle est figée par l'ADR-0024 : **environnement du processus > magasin >
+La règle est figée par l'ADR-0025 : **environnement du processus > magasin >
 ``.env`` > défauts**. Le ``.env`` est présenté comme une valeur d'environnement,
 donc il masque aussi le champ en écriture ; le magasin, lui, est éditable tant
 que l'environnement ne le couvre pas.

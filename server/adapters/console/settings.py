@@ -1,6 +1,6 @@
 """Réglages de la Console : lecture, écriture et application (ticket #174).
 
-Les Réglages suivent l'ADR-0024 : la **valeur effective** et sa source sont
+Les Réglages suivent l'ADR-0025 : la **valeur effective** et sa source sont
 celles que le processus a réellement chargées, le **magasin** est la seule
 couche que l'interface écrit, et l'application passe par un **redémarrage**.
 Aucune valeur n'est appliquée à chaud : ``AppConfig`` est gelée.
@@ -155,7 +155,7 @@ class SettingsRoutes:
                 for surface in SURFACES
             ],
             # Les Secrets restent en écriture seule : nom, état et date, jamais
-            # de valeur (ADR-0024).
+            # de valeur (ADR-0025).
             "secrets": (
                 [
                     secret_status_json(status)
