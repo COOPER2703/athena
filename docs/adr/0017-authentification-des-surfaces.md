@@ -17,6 +17,11 @@ lecture du noyau — l'exception explicite à sa règle de route de lecture uniq
 Elles devront exposer les Tools d'une Session ordinaire dès qu'un **système de protection
 contre les injections** existera. Voir ADR-0020, section « Décision à réviser ».
 
+Amendé par l'ADR-0025 : le **Code d'installation** disparaît ; l'Installation se termine quand
+l'unique Compte existe et qu'un **Secret** Gemini utilisable est enregistré. Amendé par
+l'ADR-0024 : la clé Gemini et les secrets de Plugin vivent dans un magasin chiffré au repos, en
+écriture seule depuis la Console.
+
 ## Contexte
 
 Athena expose trois surfaces : la **Console web** (SPA, API JSON et flux de Traces), le
