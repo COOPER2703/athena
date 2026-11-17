@@ -36,8 +36,8 @@ from typing import Any
 from aiohttp import web
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-# ``server_harness`` importe ``conftest`` du même dossier : le seam partagé vit
-# dans ``server/tests`` et n'est pas un paquet installable.
+# ``server_harness`` importe le harnais ``harness`` du même dossier : le seam
+# partagé vit dans ``server/tests`` et n'est pas un paquet installable.
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "server" / "tests"))
 
