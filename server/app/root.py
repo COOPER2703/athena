@@ -688,7 +688,9 @@ class App:
             await self._console.start(self.snapshot, self.push_event, self)
         self._emit("started", payload={"state": self._coordinator.state.value})
 
-        self._pumps = [asyncio.create_task(self._pump(self._clock.recv))]
+        # ``append`` et non réaffectation : une activation à chaud peut déjà
+        # avoir ajouté ses pompes à la même liste (aucune orpheline — ADR-0005).
+        self._pumps.append(asyncio.create_task(self._pump(self._clock.recv)))
         if self._transport is not None:
             self._pumps.append(asyncio.create_task(self._pump(self._transport.recv)))
         if self._gemini is not None:

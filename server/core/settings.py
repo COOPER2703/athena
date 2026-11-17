@@ -332,6 +332,7 @@ def resolve_all(
         for field in SETTINGS
     ]
 
+
 def describe_settings(
     view: SettingsView,
     store: Mapping[str, str],
