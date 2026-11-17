@@ -134,11 +134,9 @@ export function PendingBanner({
                 Redémarrage du serveur… La Console se reconnectera toute seule.
               </p>
             ) : null}
-            {phase === "ready" ? (
-              <p role="status" className="text-xs leading-relaxed text-accent">
-                Le serveur a redémarré : la Console est reconnectée.
-              </p>
-            ) : null}
+            {/* Le retour du serveur est confirmé par l'avis de la zone, qui
+                reste après la disparition de ce bandeau : le répéter ici
+                afficherait deux fois la même phrase. */}
             {phase === "timeout" ? (
               <p role="alert" className="text-xs leading-relaxed text-danger">
                 Le serveur n'a pas répondu dans le délai imparti. Vérifiez son
