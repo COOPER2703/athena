@@ -93,6 +93,7 @@ import hashlib
 import json
 import logging
 import re
+import socket
 import sqlite3
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -908,13 +909,23 @@ class AthenaServer:
 # ---------------------------------------------------------------------------
 
 
-def _free_port() -> int:
-    """Port libre réservé par l'OS, jamais un port fixe."""
-    import socket
+def _free_ports(count: int) -> list[int]:
+    """``count`` ports libres **distincts** réservés par l'OS, jamais des ports fixes.
 
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+    Les sockets restent ouverts pendant la réservation : deux appels séparés
+    pourraient rendre deux fois le même port éphémère, et les deux Surfaces du
+    serveur entreraient alors en collision.
+    """
+    sockets: list[socket.socket] = []
+    try:
+        for _ in range(count):
+            sock = socket.socket()
+            sock.bind(("127.0.0.1", 0))
+            sockets.append(sock)
+        return [int(sock.getsockname()[1]) for sock in sockets]
+    finally:
+        for sock in sockets:
+            sock.close()
 
 
 def _paths(root: Path, static_dir: Path | None) -> ServerPaths:
@@ -1018,8 +1029,7 @@ async def running_server(
     paths = _paths(root, static_dir)
     if prepare is not None:
         prepare(paths)
-    console_port = _free_port()
-    transport_port = _free_port()
+    console_port, transport_port = _free_ports(2)
 
     model = FakeLiveModel()
     clock = ManualClock()
