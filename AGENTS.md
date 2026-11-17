@@ -89,7 +89,9 @@ sauvegarder avec le magasin). Perdue, le serveur démarre quand même, expose
 n'est réinitialisé en silence.
 
 - `GET /api/session` expose `setup_required` (aucun Compte), `authenticated`, `username`,
-  `gemini_configured`, `installation_complete`, `restart_required`, `secrets_unreadable`.
+  `gemini_configured`, `installation_complete`, `restart_required`, `secrets_unreadable`,
+  et `password_min_length` : la longueur minimale du mot de passe est expliquée à l'écran
+  d'installation avec la valeur que le serveur applique, jamais une constante du front.
 - `GET /api/settings` rend chaque réglage avec sa valeur **effective** (celle que le
   processus a chargée), son défaut, sa source (`default` | `store` | `env`), ses bornes et
   ses valeurs autorisées, `pending` / `pending_value`, la liste `pending`, un objet
@@ -312,3 +314,10 @@ fichier. Une erreur d'API ne s'affiche jamais brute : tout code stable passe par
 Le Ticket Console seul authentifie (cookie `HttpOnly`) ; un `401` de requête ramène à
 `/login` en conservant la route demandée, et les brouillons de saisie passent par
 `useDraft` (stockage de l'onglet) plutôt que par un état global.
+
+L'Installation vit dans `web/src/installation/` : parcours guidé Compte → clé maître
+(affichée une seule fois) → clé Gemini (validée, passable) → voix et profil → récapitulatif,
+bannière permanente tant que la clé manque, et Conversation remplacée par un état désactivé.
+La clé maître ne quitte jamais l'état mémoire de l'écran qui l'affiche ; la longueur minimale
+du mot de passe vient de `/api/session`. Une fois l'Installation terminée, l'`IdentityGate`
+route vers l'application et `/installation` se redirige.
