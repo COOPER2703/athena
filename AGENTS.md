@@ -75,49 +75,27 @@ Les deux mécanismes de credential (ADR-0017) :
 - **Client desktop** : lit son Jeton dans `ATHENA_ACCESS_TOKEN` (variable de processus
   uniquement, pas de `.env` client) et refuse de démarrer s'il manque.
 
+### Home Assistant
+
+Le plugin `plugins/homeassistant/` pilote la domotique via le serveur MCP natif de Home Assistant.
+Activation, secret, configuration et démarrage dégradé : `plugins/homeassistant/README.md` ; décisions
+et vocabulaire : `plugins/homeassistant/docs/adr/0001-home-assistant-via-mcp.md`, `plugins/homeassistant/GLOSSARY.md`.
+
 ### Créer un plugin
 
-Le skill `create-plugin` (`.agents/skills/create-plugin/SKILL.md`) conçoit un nouveau plugin
-serveur : il demande le nom et le but, délègue le grill à `grill-with-docs`, puis produit une
-spec et des tickets d'implémentation. Il n'écrit aucun code. Se lance avec `/create-plugin`.
-
-Le contrat public est `plugin_api` (jamais `server`) ; les décisions sont ADR-0014 et
-ADR-0018 ; les deux exemples sont `plugins/websearch` (HTTP) et `plugins/homeassistant` (MCP).
-Les skills tiers sont installés par `npx skills add` et épinglés dans `skills-lock.json`.
+La forme obligatoire d'un dossier de plugin — manifeste, entrypoint, README, glossaire,
+tests, smoke test, ADR locaux — et son critère d'amovibilité sont dans
+`plugins/README.md`. Le skill `create-plugin` (`.agents/skills/create-plugin/SKILL.md`)
+la produit : il demande le nom et le but, délègue le grill à `grill-with-docs`, puis
+produit une spec et des tickets, sans écrire de code. Le contrat public est `plugin_api`
+(jamais `server`) ; les décisions centrales sont ADR-0014 et ADR-0023. Les skills tiers
+sont installés par `npx skills add` et épinglés dans `skills-lock.json`.
 
 ### Recherche web
 
-Le plugin `plugins/websearch/` (ADR-0018) expose à Gemini un seul Tool, `web_search`,
-adossé à Tavily : il rend des **Extraits de recherche** (titre, URL, extrait, date de
-publication quand elle existe) et Gemini reste le seul rédacteur de la réponse. Le dossier
-est versionné, mais **rien ne s'exécute tant qu'il n'est pas listé**.
-
-Pour l'activer, ajoutez `websearch` à la liste `enabled` du fichier d'état local
-`plugins.json` (non versionné) :
-
-```json
-{ "enabled": ["websearch"], "config": { "websearch": {} } }
-```
-
-Le manifeste déclare un secret **requis** : `ATHENA_PLUGIN_WEBSEARCH_API_KEY`, lu comme les
-autres secrets de plugin (environnement ou `.env`). Absent, le démarrage échoue
-explicitement en nommant la variable (code de sortie 2). Cinq options, toutes
-**optionnelles**, se placent sous `config.websearch` ; le plugin applique lui-même les
-défauts :
-
-- `base_url` : `https://api.tavily.com` (proxy ou moteur compatible) ;
-- `search_depth` : `basic` (`fast`, `basic` ou `advanced` ; `advanced` coûte deux crédits) ;
-- `language` : `fr` ;
-- `country` : `france` (envoyé seulement pour `topic: general`) ;
-- `strict_language` : `0` (`1` filtre strictement la langue au lieu de la biaiser).
-
-Au démarrage, `create()` sonde `GET /usage` : la clé est validée sans consommer de crédit,
-les crédits restants sont tracés (`CreditsRemaining`) et un quota épuisé avertit
-(`CreditsExhausted`). Une clé refusée ou un moteur injoignable n'est pas fatal : le plugin
-démarre **dégradé**, la Console le montre en `failed`, et le serveur retente toutes les 5 s ;
-il s'active seul quand le moteur revient. Une panne en cours de Session reste une phrase
-rendue au modèle, jamais un arrêt. La clé n'apparaît ni dans une Trace, ni dans le journal,
-ni dans l'instantané de la Console.
+Le plugin `plugins/websearch/` cherche sur le web via Tavily et expose à Gemini un seul Tool, `web_search`.
+Activation, secret, options et démarrage dégradé : `plugins/websearch/README.md` ; décisions
+et vocabulaire : `plugins/websearch/docs/adr/0001-recherche-web-par-plugin.md`, `plugins/websearch/GLOSSARY.md`.
 
 ### Image et déploiement
 
@@ -131,95 +109,15 @@ Traefik, pièges de routage) est `docs/deploiement.md` — à lire avant de touc
 
 ### Pages Notion
 
-Le plugin `plugins/notion/` (ADR-0019) expose six Tools de page adossés à la REST Notion :
-`search_pages`, `read_page`, `create_page`, `update_page`, `trash_page`, `restore_page`. Il
-épingle `Notion-Version: 2026-03-11` et demande `markdown_version: "v2"` explicitement. Il ne
-voit que ce qui est partagé avec la connexion : aucune configuration n'élargit ce périmètre,
-et la recherche de contenu se limite à une page à la fois.
-
-Pour l'activer, ajoutez `notion` à la liste `enabled` de `plugins.json` avec
-`parent_page_id` sous `config.notion`, et fournissez le secret requis
-`ATHENA_PLUGIN_NOTION_TOKEN` (environnement ou `.env`) :
-
-```json
-{
-  "enabled": ["notion"],
-  "config": { "notion": { "parent_page_id": "…" } }
-}
-```
-
-La page parente doit être partagée avec la connexion, sinon le démarrage échoue en nommant
-`parent_page_id`. La recette complète (partage, capacités, parcours vocal, dépannage) est
-`docs/smoke-test-notion.md`.
+Le plugin `plugins/notion/` expose six Tools de page adossés à la REST Notion.
+Activation, secret, configuration et périmètre : `plugins/notion/README.md` ; décisions
+et vocabulaire : `plugins/notion/docs/adr/0001-notion-en-rest-plutot-que-mcp.md`, `plugins/notion/GLOSSARY.md`.
 
 ### Google Workspace
 
-Le plugin `plugins/google-workspace/` (ADR-0021, ADR-0022) expose neuf Tools adossés à
-Gmail, Google Calendar et l'API People : `gmail_search`, `gmail_read`, `gmail_send`,
-`gmail_reply` pour les mails, `calendar_list_events`, `calendar_create_event`,
-`calendar_update_event`, `calendar_delete_event` pour l'agenda, et `contacts_search` pour
-le carnet. Chaque **Compte Google** porte son propre client OAuth ; les refresh tokens sont
-échangés en mémoire contre des access tokens d'une heure, jamais persistés. Les envois de
-mails et les suppressions d'événements exigent une confirmation explicite. Aucun Événement
-proactif n'est poussé en v1.
-
-`contacts_search` interroge les contacts **enregistrés** (`people/me/connections`) et les
-**autres contacts** que Gmail a mémorisés (`otherContacts`), fusionnés sur une adresse
-identique ; il ne voit ni l'annuaire du domaine, ni les fiches sans adresse. La comparaison
-est locale : une passe exacte d'abord, puis — seulement si elle ne rend rien — une passe
-tolérante qui rapproche chaque mot du nom ou de la partie locale d'une adresse à une faute
-près jusqu'à sept lettres, deux à partir de huit, jamais sous quatre lettres et jamais sans
-la même initiale (« Aubagne » retrouve « Aubane »). Elle est marquée `approximate: true`
-dans le retour, plafonnée à cinq personnes et triée par distance. Le domaine d'une adresse
-n'est jamais comparé, et une approximation est relue à voix haute puis confirmée avant tout
-envoi. Un nom seul n'est jamais une adresse : `gmail_send` refuse un destinataire qui n'y
-ressemble pas et renvoie vers le Tool. Quand plusieurs adresses ou plusieurs personnes
-correspondent, l'instruction impose de les lire et de faire choisir, jamais de trancher. Le
-carnet n'est pas mis en cache : chaque recherche refait ses appels.
-
-Pour l'activer, ajoutez `google-workspace` à la liste `enabled` de `plugins.json` avec les
-libellés de comptes sous `config.google-workspace`, et fournissez les trois secrets requis
-dans l'environnement ou `.env`, chacun une liste **de même longueur et dans le même ordre**
-que `accounts` (les valeurs Google ne contiennent pas de virgule) :
-
-```json
-{
-  "enabled": ["google-workspace"],
-  "config": {
-    "google-workspace": {
-      "accounts": "Pro,perso",
-      "default_account": "perso"
-    }
-  }
-}
-```
-
-```sh
-ATHENA_PLUGIN_GOOGLE_WORKSPACE_CLIENT_ID=idPro,idPerso
-ATHENA_PLUGIN_GOOGLE_WORKSPACE_CLIENT_SECRET=secretPro,secretPerso
-ATHENA_PLUGIN_GOOGLE_WORKSPACE_REFRESH_TOKEN=rtPro,rtPerso
-```
-
-`default_account` est optionnelle (le premier compte fait foi) ; `api_base_url`,
-`people_base_url` et `token_url` sont réservées aux tests ou à un proxy (`people_base_url`
-vaut `https://people.googleapis.com` par défaut). Les scopes demandés sont
-`gmail.readonly`, `gmail.send`, `calendar.events`, `contacts.readonly` et
-`contacts.other.readonly` ; l'API **People** doit être activée dans le projet Cloud. Le
-client OAuth est de type « Web application » avec le redirect du Playground, et une
-application **External + Testing** est refusée (refresh tokens expirant en 7 jours).
-
-Au démarrage, `create()` échange en parallèle le refresh token de chaque compte. Si au moins
-un compte répond, le plugin s'active ; un compte refusé (`invalid_grant`) est tracé
-`AccountUnavailable`, reste visible dans la Console et est retenté à **chaque** appel de Tool
-qui le vise, jusqu'à une phrase française d'indisponibilité. Un scope Contacts manquant
-n'empêche jamais l'activation : chaque compte sain sonde son carnet au démarrage et, en cas
-de refus réparable, trace `ContactsScopeMissing` ; le premier appel réel rend une phrase qui
-nomme l'API People et la réautorisation. Si tous les comptes échouent, le
-plugin rend `PluginUnavailable` : la Console le montre en `failed` et le serveur retente
-toutes les 5 s. Ni les Traces, ni le journal, ni l'instantané, ni les messages d'erreur ne
-portent un secret, une adresse, un objet, un corps, une requête Gmail ou une URL complète.
-La recette complète (client OAuth, Playground, consentement, réautorisation après
-révocation, dépannage) est `docs/smoke-test-google-workspace.md`.
+Le plugin `plugins/google-workspace/` expose neuf Tools Gmail, Google Calendar et carnet via l'API People.
+Activation, secrets, comptes, panne partielle et reprise : `plugins/google-workspace/README.md` ; décisions
+et vocabulaire : `plugins/google-workspace/docs/adr/0001-google-workspace-par-refresh-tokens.md`, `plugins/google-workspace/GLOSSARY.md`.
 
 ### Front (`web/`)
 

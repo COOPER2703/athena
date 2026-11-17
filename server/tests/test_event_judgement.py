@@ -11,7 +11,6 @@ from __future__ import annotations
 import pytest
 
 from conftest import (
-    FakeJudge,
     announcement,
     close_window,
     drive,
@@ -22,6 +21,7 @@ from conftest import (
     visible_session,
     window_timer,
 )
+from testkit import FakeJudge
 from server.core import (
     EVENT_WINDOW_TIMER_ID,
     EVENT_WINDOW_TIMEOUT,

@@ -32,3 +32,7 @@ client/
 # Documentation : inutile à l'exécution
 docs/
 *.md
+# Tests et documentation enfouis dans les dossiers de plugins. Les motifs sans
+# `**/` ne couvrent que la racine du contexte ; les READMEs, eux, restent inclus.
+**/tests/
+**/docs/

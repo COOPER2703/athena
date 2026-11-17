@@ -16,7 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from conftest import FakeClock, RecordingTraceSink, TEST_PASSWORD
+from conftest import FakeClock, TEST_PASSWORD
+from testkit import RecordingTraceSink
 from server.adapters.auth import SqliteAuthStore
 from server.core.ports import AuthError
 

@@ -15,7 +15,8 @@ from typing import Mapping
 
 import aiohttp
 
-from conftest import console_session, install_console, wait_until
+from conftest import console_session, install_console
+from testkit import wait_until
 from server.adapters.console import ConsoleAdapter
 from server.adapters.console.stream import trace_frame
 from server.adapters.console.trace_buffer import (

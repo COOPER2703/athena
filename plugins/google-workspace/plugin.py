@@ -1,7 +1,7 @@
 """Plugin ``google-workspace`` : mails Gmail, agenda Google et contacts.
 
-Le socle est celui de l'ADR-0021 (refresh tokens statiques) ; le carnet ajoute
-l'API People de l'ADR-0022.
+Le socle est celui de l'ADR local 0001 (refresh tokens statiques) ; le carnet ajoute
+l'API People de l'ADR local 0002.
 
 Ce module ne connaît du serveur que le contrat public des plugins
 (``plugin_api``) : il n'importe aucun interne. Il échange des refresh tokens
@@ -22,7 +22,7 @@ neuf Tools, quatre pour Gmail (``gmail_search``, ``gmail_read``,
 (``calendar_list_events``, ``calendar_create_event``,
 ``calendar_update_event``, ``calendar_delete_event``) et un pour le carnet
 (``contacts_search``). Le carnet vient de l'API People, sur un hôte distinct
-réglé par ``people_base_url`` (ADR-0022).
+réglé par ``people_base_url`` (ADR local 0002).
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ TOKEN_TIMEOUT = 10.0
 REQUEST_TIMEOUT = 10.0
 
 # Un access token est rafraîchi soixante secondes avant son expiration réelle
-# (ADR-0021). Constante lue à chaque opération, donc ajustable sur une copie.
+# (ADR local 0001). Constante lue à chaque opération, donc ajustable sur une copie.
 TOKEN_REFRESH_MARGIN = 60.0
 DEFAULT_EXPIRES_IN = 3600.0
 
@@ -115,7 +115,7 @@ CALENDAR_MAX_RESULTS_MIN = 1
 # Chemin Calendar ; l'identifiant d'agenda y est encodé séparément.
 CALENDAR_EVENTS_BASE_PATH = "/calendar/v3/calendars"
 
-# Carnet People API : deux gisements fusionnés par adresse (ADR-0022).
+# Carnet People API : deux gisements fusionnés par adresse (ADR local 0002).
 PEOPLE_ME_PATH = "/v1/people/me"
 PEOPLE_CONNECTIONS_PATH = "/v1/people/me/connections"
 OTHER_CONTACTS_PATH = "/v1/otherContacts"
@@ -756,7 +756,7 @@ _CALENDAR_WRITE_STATUS_REASONS = _StatusReasons(
     service="Agenda",
 )
 
-# Phrases propres aux contacts : le carnet vit sur l'API People (ADR-0022).
+# Phrases propres aux contacts : le carnet vit sur l'API People (ADR local 0002).
 _CONTACTS_PREFIX = "La recherche dans les contacts n'a pas abouti : "
 
 _CONTACTS_UNREACHABLE_MESSAGE = (
@@ -878,7 +878,7 @@ class Trace:
 
 
 # Ces caches vivent avec le module, donc une retente de ``create()`` ne jette
-# pas un jeton encore valide. Aucune persistance, aucun disque (ADR-0021).
+# pas un jeton encore valide. Aucune persistance, aucun disque (ADR local 0001).
 _TOKENS: dict[str, _AccessToken] = {}
 _LOCKS: dict[str, asyncio.Lock] = {}
 
@@ -2438,7 +2438,7 @@ def _people_payload(candidates: list[_Candidate]) -> list[dict[str, object]]:
 
 
 def _merged_contacts(candidates: list[_Candidate]) -> list[_Candidate]:
-    """Fusionne les personnes qui partagent au moins une adresse (ADR-0022)."""
+    """Fusionne les personnes qui partagent au moins une adresse (ADR local 0002)."""
     parent: dict[str, str] = {}
 
     def find(key: str) -> str:

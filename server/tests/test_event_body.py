@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from conftest import RecordingTraceSink
+from testkit import RecordingTraceSink
 from server.adapters import event_body
 from server.adapters.event_body import (
     INVALID_CONTENT_TYPE,

@@ -6,7 +6,7 @@ from typing import Any
 from client.app import ClientApp
 from client.config import AppConfig, ClientConfig
 from client.ws_client import WsTransport
-from conftest import RecordingTraceSink, _url, wait_until
+from testkit import RecordingTraceSink, url, wait_until
 from server.adapters.transport import WebSocketTransport
 from server.app.clock import AsyncioClock
 from server.app.root import App
@@ -76,7 +76,7 @@ def test_tap_then_speak_yields_audio_response() -> None:
 
             audio = MicAudio()
             ws = WsTransport(
-                ClientConfig(server_url=_url(transport), access_token="ath_test")
+                ClientConfig(server_url=url(transport), access_token="ath_test")
             )
             client = ClientApp(AppConfig(), audio=audio, transport=ws)
             client_task = asyncio.create_task(client.run())

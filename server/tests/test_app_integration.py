@@ -8,7 +8,7 @@ from typing import Any
 import aiohttp
 import websockets
 
-from conftest import FakeJudge, RecordingTraceSink, _url, register, wait_until
+from testkit import FakeJudge, RecordingTraceSink, register, url, wait_until
 from protocol import Audio, SessionStart, SessionStarted, decode, encode
 from server.adapters.console import ConsoleAdapter
 from server.adapters.gemini import GeminiLiveAdapter
@@ -106,7 +106,7 @@ def test_timeline_covers_connections_sessions_and_gemini_calls() -> None:
         try:
             await wait_until(lambda: bool(sink.of_kind("started")))
 
-            async with websockets.connect(_url(transport)) as ws:
+            async with websockets.connect(url(transport)) as ws:
                 await register(ws, transport, client_name="desktop", drain=False)
                 await ws.send(encode(SessionStart()))
 
@@ -165,7 +165,7 @@ def test_stale_terminal_after_replacement_does_not_kill_the_new_session() -> Non
         try:
             await wait_until(lambda: bool(sink.of_kind("started")))
 
-            async with websockets.connect(_url(transport)) as ws_a:
+            async with websockets.connect(url(transport)) as ws_a:
                 await register(ws_a, transport, client_name="a", drain=False)
                 await ws_a.send(encode(SessionStart()))
                 assert decode(await asyncio.wait_for(ws_a.recv(), 1.0)) == (
@@ -175,7 +175,7 @@ def test_stale_terminal_after_replacement_does_not_kill_the_new_session() -> Non
 
                 # B taps while A's Session is still visible: the replacement
                 # closes A's Live connection, depositing a stale LlmClosed(s1).
-                async with websockets.connect(_url(transport)) as ws_b:
+                async with websockets.connect(url(transport)) as ws_b:
                     await register(ws_b, transport, client_name="b", drain=False)
                     await ws_b.send(encode(SessionStart()))
 
@@ -227,7 +227,7 @@ def test_active_client_disconnect_ends_the_session_with_client_gone() -> None:
         try:
             await wait_until(lambda: bool(sink.of_kind("started")))
 
-            async with websockets.connect(_url(transport)) as ws_a:
+            async with websockets.connect(url(transport)) as ws_a:
                 await register(ws_a, transport, client_name="a", drain=False)
                 await ws_a.send(encode(SessionStart()))
                 assert decode(await asyncio.wait_for(ws_a.recv(), 1.0)) == (
@@ -275,7 +275,7 @@ def test_client_disconnect_then_new_client_restarts_a_working_session() -> None:
         try:
             await wait_until(lambda: bool(sink.of_kind("started")))
 
-            async with websockets.connect(_url(transport)) as ws_a:
+            async with websockets.connect(url(transport)) as ws_a:
                 await register(ws_a, transport, client_name="a", drain=False)
                 await ws_a.send(encode(SessionStart()))
                 assert decode(await asyncio.wait_for(ws_a.recv(), 1.0)) == (
@@ -293,7 +293,7 @@ def test_client_disconnect_then_new_client_restarts_a_working_session() -> None:
             )
 
             # B taps afterwards: a clean restart, no ghost Session in the way.
-            async with websockets.connect(_url(transport)) as ws_b:
+            async with websockets.connect(url(transport)) as ws_b:
                 await register(ws_b, transport, client_name="b", drain=False)
                 await ws_b.send(encode(SessionStart()))
                 assert decode(await asyncio.wait_for(ws_b.recv(), 1.0)) == (
@@ -346,7 +346,7 @@ def test_pushed_event_opens_a_proactive_auto_session_for_the_registered_client()
         try:
             await wait_until(lambda: bool(sink.of_kind("started")))
 
-            async with websockets.connect(_url(transport)) as ws:
+            async with websockets.connect(url(transport)) as ws:
                 await register(ws, transport, client_name="desktop", drain=False)
                 # Wait for the kernel to register the client before pushing, so
                 # the Annonce is addressed to a known client id.
@@ -556,7 +556,7 @@ def test_plugin_tool_is_declared_called_and_answered_on_the_live_connection(
             assert state_index < kinds.index("started")
             assert sink.of_kind("PluginState")[0].payload["state"] == "activated"
 
-            async with websockets.connect(_url(transport)) as ws:
+            async with websockets.connect(url(transport)) as ws:
                 registered = await register(ws, transport, drain=False)
                 # ``Registered.server_tools`` liste ce que la Connexion Live
                 # déclarera : le Tool du plugin est déjà chargé et déclaré.
@@ -690,7 +690,7 @@ def test_a_failed_plugin_is_retried_and_its_tools_arrive_on_the_next_connection(
 
             # Première Connexion Live : le plugin est absent des Tools déclarés,
             # donc ``Registered.server_tools`` ne l'annonce pas non plus.
-            async with websockets.connect(_url(transport)) as ws_a:
+            async with websockets.connect(url(transport)) as ws_a:
                 registered_a = await register(
                     ws_a, transport, client_name="a", drain=False
                 )
@@ -720,7 +720,7 @@ def test_a_failed_plugin_is_retried_and_its_tools_arrive_on_the_next_connection(
 
             # Connexion Live suivante, sans redémarrage : le Tool est là et sert,
             # et l'enregistrement du Client l'annonce au passage.
-            async with websockets.connect(_url(transport)) as ws_b:
+            async with websockets.connect(url(transport)) as ws_b:
                 registered_b = await register(
                     ws_b, transport, client_name="b", drain=False
                 )
@@ -918,7 +918,7 @@ def test_console_snapshot_tracks_clients_and_the_session_owner() -> None:
                 }
                 assert snapshot["clients"] == []
 
-                async with websockets.connect(_url(transport)) as ws:
+                async with websockets.connect(url(transport)) as ws:
                     registered = await register(
                         ws, transport, client_name="desktop", drain=False
                     )

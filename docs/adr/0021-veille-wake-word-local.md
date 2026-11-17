@@ -4,9 +4,9 @@
 
 accepted
 
-Numéro 0021 : les ADR-0018 (recherche web par plugin) et 0019 (Notion en REST) sont déjà
-attribués, et le numéro 0020 est réservé par la branche `integration/end-session`, encore
-ouverte au moment de la rédaction. La Veille prend donc le numéro suivant disponible.
+Numéro 0021 : les ADR de la recherche web et de Notion en REST ont le leur, dans leur
+dossier de plugin ; le numéro 0020 est réservé par la branche `integration/end-session`,
+encore ouverte au moment de la rédaction. La Veille prend donc le numéro suivant disponible.
 
 Précise l'ADR-0001 : la Veille est un comportement de l'adaptateur Client desktop, pas une
 décision du noyau. Le Protocole partagé et le serveur ne changent pas. Ne modifie aucun

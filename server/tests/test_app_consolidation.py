@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from conftest import RecordingTraceSink, wait_until
+from testkit import RecordingTraceSink, wait_until
 from test_app_root import FakeAdapter, FakeClock
 from server.app.root import App, build_app
 from server.app.config import AppConfig, GeminiConfig
