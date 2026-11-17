@@ -8,6 +8,8 @@ __pycache__/
 .env
 athena_memory.db
 auth.db
+settings.db
+master.key
 node_modules/
 web/dist/
 plugins.json

@@ -70,9 +70,9 @@ Attendu :
 - `make web` produit `web/dist/index.html`, un bundle JS et une feuille CSS.
 - Le serveur trace `[app] started {"state": "Idle"}` sur `stderr` (le flux est aussi écrit
   dans `logs/server.log`).
-- Au **premier** démarrage, sans Compte, le journal porte le Code d'installation à usage
-  unique : `[auth] InstallationCode {"code": "…"}`. Il n'est émis qu'une fois par démarrage
-  et disparaît définitivement dès qu'un Compte existe.
+- Au **premier** démarrage, sans Compte, l'écran d'installation s'affiche : aucun code n'est
+  demandé, le premier visiteur crée l'unique Compte. La clé maître est rendue **une seule
+  fois** dans la réponse d'installation (ADR-0025).
 - `GET http://127.0.0.1:8767/healthz` répond `200 {"status": "ok"}` **sans** authentification
   ni instantané. La Console écoute sur le port configuré ; le Webhook reste sur le sien.
 - `GET http://127.0.0.1:8767/api/status` **sans** Ticket répond `401` JSON : la surface est
@@ -83,6 +83,8 @@ Pour isoler un run, on peut déplacer les effets de bord :
 ```sh
 ATHENA_MEMORY_DB=/tmp/athena-smoke.db \
 ATHENA_AUTH_DB=/tmp/athena-smoke-auth.db \
+ATHENA_SETTINGS_DB=/tmp/athena-smoke-settings.db \
+ATHENA_MASTER_KEY_FILE=/tmp/athena-smoke-master.key \
 ATHENA_LOG_DIR=/tmp/athena-smoke-logs \
 ATHENA_CONSOLE_PORT=8767 \
 python -m server
@@ -93,23 +95,20 @@ connexion.
 
 ### 1.1 Installer le Compte (premier démarrage)
 
-Le Code d'installation se lit dans le terminal du serveur ou dans le journal (`logs/server.log`
-par défaut, ou le `ATHENA_LOG_DIR` choisi). Les exemples ci-dessous installent le Compte en
-`curl` puis réutilisent le cookie de la Console (`/tmp/athena-cookies.txt`) ; un navigateur suit
-le même chemin à l'étape 4.
+Aucun code n'est à recopier (ADR-0025) : le premier visiteur devient propriétaire. Les
+exemples ci-dessous installent le Compte en `curl` puis réutilisent le cookie de la Console
+(`/tmp/athena-cookies.txt`) ; un navigateur suit le même chemin à l'étape 4.
 
 ```sh
-LOG_DIR=${ATHENA_LOG_DIR:-logs}
-CODE=$(sed -n 's/.*InstallationCode.*"code": "\([^"]*\)".*/\1/p' "$LOG_DIR/server.log" | tail -n 1)
-
 curl -i -c /tmp/athena-cookies.txt -X POST http://127.0.0.1:8767/api/setup \
   -H 'Origin: http://127.0.0.1:8767' \
   -H 'Content-Type: application/json' \
-  -d "{\"code\":\"$CODE\",\"username\":\"admin\",\"password\":\"un-mot-de-passe-de-12-caracteres\"}"
+  -d '{"username":"admin","password":"un-mot-de-passe-de-12-caracteres"}'
 ```
 
-Attendu : `200`, `authenticated: true`, et un cookie `athena_ticket` dans la jar. Toute requête
-mutante porte l'`Origin` de la page servie (`-H 'Origin: http://127.0.0.1:8767'`) : sans cet
+Attendu : `200`, `authenticated: true`, un champ `master_key` (à sauvegarder avec
+`settings.db`, il n'est plus jamais réaffiché) et un cookie `athena_ticket` dans la jar.
+Toute requête mutante porte l'`Origin` de la page servie (`-H 'Origin: http://127.0.0.1:8767'`) : sans cet
 en-tête, comme avec une origine étrangère, elle est refusée en `403 origin_refused` — un
 navigateur l'envoie toujours, son absence signale un client forgé. Le cookie est `Secure` ;
 un navigateur traite `http://127.0.0.1` comme un contexte sûr, et `curl` accepte de le
@@ -125,7 +124,7 @@ curl -s -b /tmp/athena-cookies.txt http://127.0.0.1:8767/api/session
 # Un second essai d'installation est refusé.
 curl -i -X POST http://127.0.0.1:8767/api/setup -H 'Content-Type: application/json' \
   -H 'Origin: http://127.0.0.1:8767' \
-  -d '{"code":"peu-importe","username":"autre","password":"un-mot-de-passe-de-12-caracteres"}'
+  -d '{"username":"autre","password":"un-mot-de-passe-de-12-caracteres"}'
 ```
 
 Attendu : `setup_required: false`, `authenticated: true`, `username: "admin"` ; puis `409`
