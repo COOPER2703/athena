@@ -38,6 +38,14 @@ restent publiques. Sa configuration suit le même schéma que le Webhook :
 - `ATHENA_CONSOLE_TRACE_BUFFER` : `500` par défaut ; nombre de Traces récentes rejouées à la
   connexion de `GET /api/stream` (WebSocket : une trame `hello`, puis des trames `trace`).
 
+Le **Diagnostic** lit `GET /api/status` et le WebSocket `/api/stream`. L'instantané porte en
+plus de `session`, `clients`, `plugins` et `config` : `installation` (`account_exists`,
+`gemini_configured`, `complete`, `secrets_unreadable`, `surfaces` réellement ouvertes),
+`restart_required`, et `health` (version, uptime monotone, dernière Consolidation, taille des
+bases mémoire/auth/réglages — `0` si absente, `-wal`/`-shm` compris —, dernière erreur sans son
+payload, taille et capacité du Tampon de traces). Ces champs sont des lectures **sans
+secret** et restent renseignés pendant l'Installation : aucun n'exige un Compte ni une clé.
+
 Le Webhook reste séparé (`ATHENA_WEBHOOK_ENABLED`, `ATHENA_WEBHOOK_HOST`,
 `ATHENA_WEBHOOK_PORT`, `127.0.0.1:8766` par défaut). Le contrat JSON de la Console
 commence par `GET /api/status` ; le front vit dans `web/` et n'est pas requis pour que
