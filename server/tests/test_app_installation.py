@@ -22,7 +22,7 @@ from server.adapters.console.contract import (
     SETUP_PATH,
     STATUS_PATH,
 )
-from server_harness import running_server
+from server_harness import read_sse, running_server
 
 GEMINI_KEY = "cle-gemini-de-test-4b7c"
 OTHER_KEY = "cle-gemini-remplacee-91ad"
@@ -223,8 +223,8 @@ def test_a_valid_key_completes_the_installation_and_is_never_read_back(
                 identity = await response.json()
             assert identity["gemini_configured"] is True
             assert identity["installation_complete"] is True
-            # La clé est enregistrée mais le processus a démarré sans elle.
-            assert identity["restart_required"] is True
+            # La première clé est chargée à chaud : aucun redémarrage n'attend.
+            assert identity["restart_required"] is False
 
             # Ni l'instantané, ni le journal, ni le flux de traces ne la
             # reprennent.
@@ -249,6 +249,112 @@ def test_a_valid_key_completes_the_installation_and_is_never_read_back(
                 identity = await response.json()
             assert identity["gemini_configured"] is False
             assert identity["installation_complete"] is False
+
+    asyncio.run(scenario())
+
+
+def test_storing_the_key_finishes_the_installation_and_opens_execution_at_once(
+    tmp_path: Path,
+) -> None:
+    """Story 12 : la fin de l'Installation s'applique sans redémarrage.
+
+    Enregistrer la première clé Gemini ouvre les surfaces d'exécution dans le
+    processus vivant : le transport, le Webhook et la Conversation répondent
+    immédiatement, et plus rien n'attend un redémarrage.
+    """
+
+    async def scenario() -> None:
+        async with running_server(
+            tmp_path, gemini_key="", webhook=True
+        ) as server:
+            http = await server.install()
+
+            # Avant la clé, la Conversation est fermée.
+            async with http.post(
+                f"{server.url}{CHAT_PATH}", json={"text": "bonjour"}
+            ) as response:
+                assert response.status == 409
+
+            async with http.put(
+                f"{server.url}{_secret_path('GEMINI_API_KEY')}",
+                json={"value": GEMINI_KEY},
+            ) as response:
+                assert response.status == 200, await response.text()
+
+            async with http.get(f"{server.url}{SESSION_PATH}") as response:
+                identity = await response.json()
+            assert identity["gemini_configured"] is True
+            assert identity["installation_complete"] is True
+            assert identity["restart_required"] is False
+
+            async with http.get(f"{server.url}{STATUS_PATH}") as response:
+                snapshot = await response.json()
+            assert snapshot["restart_required"] is False
+            assert snapshot["installation"]["complete"] is True
+            assert snapshot["installation"]["surfaces"] == {
+                "gemini": True,
+                "transport": True,
+                "webhook": True,
+            }
+
+            # Le transport accepte un Client : la surface est réellement ouverte.
+            async with server.client():
+                pass
+
+            # Le Webhook écoute à son adresse, sans redémarrage.
+            reader, writer = await asyncio.open_connection(
+                "127.0.0.1", server.webhook_port
+            )
+            writer.close()
+            await writer.wait_closed()
+            assert reader is not None
+
+            # La Conversation fonctionne tout de suite, avec audio et texte.
+            server.model.reply("Je vous écoute.", audio=b"\x07\x08")
+            async with http.post(
+                f"{server.url}{CHAT_PATH}", json={"text": "Bonjour Athena"}
+            ) as response:
+                assert response.status == 200, await response.text()
+                events = [event async for event in read_sse(response)]
+            assert [event.event for event in events] == ["audio", "text", "done"]
+            assert events[1].json()["text"] == "Je vous écoute."
+
+    asyncio.run(scenario())
+
+
+def test_replacing_the_key_after_installation_waits_for_a_restart(
+    tmp_path: Path,
+) -> None:
+    """Une clé remplacée ne remplace pas à chaud la Connexion Live en cours.
+
+    Le processus garde la clé chargée au démarrage : `restart_required` le dit,
+    et la Conversation reste utilisable avec l'ancienne clé jusqu'au redémarrage.
+    """
+
+    async def scenario() -> None:
+        async with running_server(tmp_path) as server:
+            http = await server.install()
+
+            async with http.put(
+                f"{server.url}{_secret_path('GEMINI_API_KEY')}",
+                json={"value": OTHER_KEY},
+            ) as response:
+                assert response.status == 200, await response.text()
+
+            async with http.get(f"{server.url}{SESSION_PATH}") as response:
+                identity = await response.json()
+            assert identity["gemini_configured"] is True
+            assert identity["installation_complete"] is True
+            assert identity["restart_required"] is True
+
+            # L'ancienne clé est toujours celle du processus : le Tour aboutit.
+            server.model.reply("Toujours là.", audio=b"audio")
+            async with http.post(
+                f"{server.url}{CHAT_PATH}", json={"text": "Bonjour"}
+            ) as response:
+                assert response.status == 200, await response.text()
+                events = [event async for event in read_sse(response)]
+            assert [event.event for event in events] == ["audio", "text", "done"]
 
     asyncio.run(scenario())
 

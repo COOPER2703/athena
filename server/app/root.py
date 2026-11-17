@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping, Protocol
 
@@ -275,8 +276,9 @@ class Installation:
     L'Installation est plus large — elle se termine quand le Compte existe **et**
     qu'un Secret Gemini utilisable est disponible. La valeur effective suit la
     précédence de la résolution (environnement d'abord, puis magasin), et
-    ``restart_required`` naît de l'écart entre cette valeur et celle chargée au
-    démarrage : écrire une clé ne redémarre rien, mais la rend visible.
+    ``restart_required`` naît de l'écart entre cette valeur et celle réellement
+    chargée par le processus : la première clé est activée à chaud (ticket de
+    revue #166), une clé remplacée ensuite attend un redémarrage.
     """
 
     def __init__(
@@ -284,50 +286,165 @@ class Installation:
         *,
         auth: AuthService | None,
         secrets: SecretStore | None,
-        runtime_key: str,
+        effective_key: Callable[[], str],
+        running_key: Callable[[], str],
     ) -> None:
         self._auth = auth
         self._secrets = secrets
-        self._runtime_key = runtime_key.strip()
+        self._effective_key = effective_key
+        self._running_key = running_key
+
+    @property
+    def account_exists(self) -> bool:
+        """Vrai dès que l'unique Compte existe (ou sans module d'auth)."""
+        return self._auth is None or not self._auth.setup_required
 
     @property
     def gemini_configured(self) -> bool:
         """Vraie si une clé utilisable existe maintenant (runtime ou magasin)."""
-        if self._runtime_key:
-            return True
-        if self._secrets is None:
-            return False
-        stored = self._secrets.secret(GEMINI_SECRET)
-        return bool(stored and stored.strip())
+        return bool(self._effective_key().strip())
 
     def status(self) -> InstallationStatus:
-        account_exists = self._auth is None or not self._auth.setup_required
-        configured = self.gemini_configured
-        running = bool(self._runtime_key)
+        effective = self._effective_key().strip()
+        running = self._running_key().strip()
         return InstallationStatus(
-            gemini_configured=configured,
-            installation_complete=account_exists and configured,
-            restart_required=configured != running,
+            gemini_configured=bool(effective),
+            installation_complete=self.account_exists and bool(effective),
+            restart_required=effective != running,
             secrets_unreadable=bool(
                 self._secrets is not None and self._secrets.unreadable
             ),
         )
 
-    def describe(self) -> dict[str, object]:
-        """Faits d'Installation de l'instantané, sans Secret (ticket #177).
 
-        Complète ``status()`` de la seule chose qu'il ne porte pas : l'existence
-        du Compte. ``restart_required`` reste la valeur calculée au même moment,
-        pour que l'instantané et la Console ne divergent jamais.
-        """
-        status = self.status()
-        return {
-            "account_exists": self._auth is None or not self._auth.setup_required,
-            "gemini_configured": status.gemini_configured,
-            "complete": status.installation_complete,
-            "secrets_unreadable": status.secrets_unreadable,
-            "restart_required": status.restart_required,
-        }
+@dataclass(frozen=True)
+class ExecutionRuntime:
+    """Surfaces d'exécution ouvertes ensemble par une clé Gemini utilisable.
+
+    La racine les construit d'un bloc au démarrage (clé déjà présente) ou à la
+    fin de l'Installation, puis ``App`` les adopte et démarre leurs pompes dans
+    la boucle unique. Aucune surface n'existe sans Gemini : elles sont donc
+    toujours absentes ou complètes.
+    """
+
+    api_key: str
+    transport: Transport | None
+    gemini: GeminiLiveAdapter | None
+    webhook: WebhookServer | None
+    judge: EventJudge | None
+    scheduler: ConsolidationScheduler | None
+
+
+class RuntimeFactory:
+    """Fabrique les surfaces d'exécution au moment où une clé devient utilisable.
+
+    Elle relit la clé **effective** (même précédence que le démarrage) et
+    construit transport, Gemini, juge, Consolidation et Webhook avec la
+    configuration gelée au démarrage. ``key`` retient la clé réellement chargée
+    par le processus : c'est elle que ``Installation`` compare au magasin pour
+    décider d'un redémarrage. Une fabrique n'est appelée qu'une fois par
+    Installation ; remplacer une clé ensuite passe par le redémarrage.
+    """
+
+    def __init__(
+        self,
+        *,
+        config: AppConfig,
+        secrets: SecretResolver,
+        plugins: PluginRegistry,
+        auth: AuthService,
+        trace_sink: TraceSink,
+        memory: MemoryStore,
+        health: HealthState,
+        live_connect: LiveConnect | None = None,
+    ) -> None:
+        self._config = config
+        self._secrets = secrets
+        self._plugins = plugins
+        self._auth = auth
+        self._trace_sink = trace_sink
+        self._memory = memory
+        self._health = health
+        self._live_connect = live_connect
+        # Clé chargée au démarrage : vide en Installation, la clé d'origine
+        # sinon. ``App`` la remplace après une activation réussie.
+        self.key = config.gemini.api_key.strip()
+
+    def resolve_key(self) -> str:
+        """Clé Gemini effective maintenant, selon la précédence de l'ADR-0025."""
+        return (
+            _optional_secret(self._secrets, GEMINI_SECRET)
+            or self._config.gemini.api_key
+        ).strip()
+
+    def build(self) -> ExecutionRuntime | None:
+        """Construit les surfaces, ou ``None`` tant qu'aucune clé n'existe."""
+        api_key = self.resolve_key()
+        if not api_key:
+            return None
+        config = self._config
+        trace_sink = self._trace_sink
+        transport = WebSocketTransport(
+            host=config.server.host,
+            port=config.server.port,
+            server_tools=server_tool_names(self._plugins),
+            trace_sink=trace_sink,
+            auth=self._auth,
+        )
+        gemini = GeminiLiveAdapter(
+            api_key=api_key,
+            model=config.gemini.model,
+            voice=config.gemini.voice,
+            live_connect=self._live_connect,
+            trace_sink=trace_sink,
+        )
+        webhook = (
+            WebhookAdapter(
+                host=config.webhook.host,
+                port=config.webhook.port,
+                trace_sink=trace_sink,
+                auth=self._auth,
+            )
+            if config.webhook.enabled
+            else None
+        )
+        judge = GeminiEventJudge(
+            api_key=api_key,
+            model=config.gemini.judge_model,
+            prompt=load_judge_prompt(),
+            trace_sink=trace_sink,
+        )
+        extractor = GeminiFactExtractor(
+            api_key=api_key,
+            model=config.memory.consolidation_model,
+            trace_sink=trace_sink,
+        )
+        policy = ConsolidationPolicy(config.memory.consolidation_hours)
+        consolidation = Consolidation(
+            memory=self._memory,
+            extractor=extractor,
+            policy=policy,
+            user_id=config.memory.user_id,
+            dedup_threshold=config.memory.dedup_threshold,
+            journal_retention_days=config.memory.journal_retention_days,
+        )
+        scheduler = ConsolidationScheduler(
+            consolidation=consolidation,
+            policy=policy,
+            now=local_now,
+            sleep=asyncio.sleep,
+            on_run=lambda report: _record_consolidation(
+                self._health, trace_sink, report
+            ),
+        )
+        return ExecutionRuntime(
+            api_key=api_key,
+            transport=transport,
+            gemini=gemini,
+            webhook=webhook,
+            judge=judge,
+            scheduler=scheduler,
+        )
 
 
 class App:
@@ -354,6 +471,7 @@ class App:
         tools: ToolRegistry | None = None,
         plugins: PluginRegistry | None = None,
         plugin_loader: PluginLoader | None = None,
+        plugin_catalogue: PluginCatalogue | None = None,
         plugin_retry_interval: float = 5.0,
         recall_k: int = 5,
         recall_window_turns: int = 3,
@@ -361,9 +479,11 @@ class App:
         scheduler: ConsolidationScheduler | None = None,
         webhook: WebhookServer | None = None,
         console: ConsoleServer | None = None,
+        runtime_factory: RuntimeFactory | None = None,
         snapshot_config: Mapping[str, object] | None = None,
         tour_destination: TourDestination | None = None,
-        installation: Callable[[], Mapping[str, object]] | None = None,
+        installation: Callable[[], InstallationStatus] | None = None,
+        account_exists: Callable[[], bool] | None = None,
         health: HealthState | None = None,
         databases: Mapping[str, str | Path] | None = None,
         trace_buffer: Callable[[], Mapping[str, int]] | None = None,
@@ -392,6 +512,7 @@ class App:
         # des ports du noyau. La racine injecte les faits ; ``snapshot()`` ne
         # fait que les assembler, sans ``await`` (ADR-0016).
         self._installation = installation
+        self._account_exists = account_exists
         self._health = health if health is not None else HealthState(now=time.time)
         self._databases = dict(databases or {})
         self._trace_buffer = trace_buffer
@@ -404,6 +525,10 @@ class App:
         # les Tools de plugin s'y ajoutent au démarrage.
         self._tools = plugins.tools if plugins is not None else tools
         self._plugin_loader = plugin_loader
+        # Catalogue des dossiers de Plugins : la racine l'adopte au démarrage,
+        # après le chargement, pour que la Console décrive aussi les dossiers
+        # non listés ou cassés sans jamais muter le registre (ADR-0016).
+        self._plugin_catalogue = plugin_catalogue
         # Cadence de la retente des plugins en échec, possédée par l'App : une
         # seule tâche de fond, jamais sur le chemin d'un Événement (ADR-0005).
         self._plugin_retry_interval = plugin_retry_interval
@@ -420,6 +545,12 @@ class App:
             recall_max_distance=recall_max_distance,
         )
         self._events: asyncio.Queue[Event] = asyncio.Queue()
+        # Activation à chaud de la fin d'Installation : une seule à la fois,
+        # et les pompes nées après le démarrage rejoignent la même liste que
+        # celles de ``run`` (une seule boucle, aucun orphelin — ADR-0005).
+        self._runtime_factory = runtime_factory
+        self._runtime_lock = asyncio.Lock()
+        self._pumps: list[asyncio.Task[None]] = []
 
     @property
     def scheduler(self) -> ConsolidationScheduler | None:
@@ -493,44 +624,46 @@ class App:
     def _installation_block(self) -> tuple[dict[str, object], bool]:
         """Section ``installation`` et drapeau de redémarrage, sans Secret.
 
-        La liste des clés est fermée : même si — par accident — le fournisseur
-        rendait un champ de plus, il ne passerait pas. ``surfaces`` décrit ce
-        qui tourne réellement dans **ce** processus, ce qui rend visible une clé
-        enregistrée mais pas encore appliquée.
+        Une seule source : ``Installation.status()`` pour les faits, complété
+        ici de ce que lui seul ne connaît pas — l'existence du Compte et les
+        Surfaces réellement ouvertes dans **ce** processus. La liste des clés
+        est fermée : un champ accidentel du fournisseur ne passerait pas.
         """
-        raw = dict(self._installation()) if self._installation is not None else {}
-        restart_required = bool(raw.get("restart_required", False))
-        gemini_running = self._gemini is not None
+        status = (
+            self._installation()
+            if self._installation is not None
+            else InstallationStatus(
+                gemini_configured=self._gemini is not None,
+                installation_complete=self._gemini is not None,
+                restart_required=False,
+                secrets_unreadable=False,
+            )
+        )
         installation = {
-            "account_exists": bool(raw.get("account_exists", True)),
-            "gemini_configured": bool(
-                raw.get("gemini_configured", gemini_running)
+            "account_exists": (
+                self._account_exists() if self._account_exists is not None else True
             ),
-            "complete": bool(raw.get("complete", gemini_running)),
-            "secrets_unreadable": bool(raw.get("secrets_unreadable", False)),
+            "gemini_configured": status.gemini_configured,
+            "complete": status.installation_complete,
+            "secrets_unreadable": status.secrets_unreadable,
             "surfaces": {
-                "gemini": gemini_running,
+                "gemini": self._gemini is not None,
                 "transport": self._transport is not None,
                 "webhook": self._webhook is not None,
             },
         }
-        return installation, restart_required
+        return installation, status.restart_required
 
     def _plugin_summaries(self) -> list[Mapping[str, object]]:
         """Plugins connus, état de chargement et Tools attribués au propriétaire."""
         plugins = self._plugins
         if plugins is None:
             return []
-        tools_by_owner: dict[str, list[str]] = {}
-        for spec in plugins.tools.specs():
-            owner = plugins.tools.owner_of(spec.name)
-            if owner is not None:
-                tools_by_owner.setdefault(owner, []).append(spec.name)
         return [
             {
                 "name": name,
                 "state": state,
-                "tools": sorted(tools_by_owner.get(name, [])),
+                "tools": list(plugins.tools_of(name)),
             }
             for name, state in sorted(plugins.states.items())
         ]
@@ -555,24 +688,25 @@ class App:
             await self._console.start(self.snapshot, self.push_event, self)
         self._emit("started", payload={"state": self._coordinator.state.value})
 
-        pumps = [asyncio.create_task(self._pump(self._clock.recv))]
+        self._pumps = [asyncio.create_task(self._pump(self._clock.recv))]
         if self._transport is not None:
-            pumps.append(asyncio.create_task(self._pump(self._transport.recv)))
+            self._pumps.append(asyncio.create_task(self._pump(self._transport.recv)))
         if self._gemini is not None:
-            pumps.append(asyncio.create_task(self._pump(self._gemini.recv)))
+            self._pumps.append(asyncio.create_task(self._pump(self._gemini.recv)))
         if self._scheduler is not None:
             # Background task: never on the event-handling path (ADR-0009).
-            pumps.append(asyncio.create_task(self._scheduler.run()))
+            self._pumps.append(asyncio.create_task(self._scheduler.run()))
         if self._has_pending_plugins():
             # Une panne de plateforme se répare seule : la retente tourne en
             # tâche de fond et les Tools arrivent à la Connexion Live suivante.
-            pumps.append(asyncio.create_task(self._retry_plugins()))
+            self._pumps.append(asyncio.create_task(self._retry_plugins()))
         try:
             await self._core_loop()
         finally:
-            for pump in pumps:
+            for pump in self._pumps:
                 pump.cancel()
-            await asyncio.gather(*pumps, return_exceptions=True)
+            await asyncio.gather(*self._pumps, return_exceptions=True)
+            self._pumps = []
             if self._transport is not None:
                 await self._transport.stop()
             if self._webhook is not None:
@@ -585,6 +719,77 @@ class App:
             if close is not None:
                 close()
 
+    async def activate_runtime(self) -> bool:
+        """Ouvre les surfaces d'exécution dès que l'Installation se termine.
+
+        Appelée par la route des Secrets quand la première clé Gemini utilisable
+        vient d'être enregistrée (story 12). Les adaptateurs sont construits par
+        la fabrique de la racine, démarrés ici, puis adoptés : les pompes du
+        transport, de Gemini et de la Consolidation rejoignent la boucle unique.
+        Aucun redémarrage de processus, aucun accès de l'adaptateur Console au
+        Coordinator. Rend ``True`` quand l'activation a eu lieu.
+        """
+        factory = self._runtime_factory
+        if factory is None or self._gemini is not None:
+            return False
+        async with self._runtime_lock:
+            if self._gemini is not None:
+                return False
+            runtime = factory.build()
+            if runtime is None:
+                return False
+            try:
+                if runtime.transport is not None:
+                    await runtime.transport.start()
+                if runtime.webhook is not None:
+                    await runtime.webhook.start(self.push_event)
+            except Exception:
+                # Une surface à moitié liée ne doit pas rester derrière elle :
+                # la clé reste enregistrée, une nouvelle tentative repartira.
+                if runtime.transport is not None:
+                    await runtime.transport.stop()
+                if runtime.webhook is not None:
+                    await runtime.webhook.stop()
+                raise
+            await self._adopt_runtime(runtime)
+            factory.key = runtime.api_key
+            self._emit(
+                "RuntimeActivated",
+                payload={
+                    "transport": runtime.transport is not None,
+                    "webhook": runtime.webhook is not None,
+                    "scheduler": runtime.scheduler is not None,
+                },
+            )
+            return True
+
+    async def _adopt_runtime(self, runtime: ExecutionRuntime) -> None:
+        """Arrête puis remplace les surfaces, et démarre leurs pompes.
+
+        Sur une instance en Installation, aucune surface n'est ouverte : l'arrêt
+        est un no-op. Il reste écrit pour qu'un remplacement défensif ne laisse
+        jamais deux serveurs liés au même port.
+        """
+        if self._transport is not None:
+            await self._transport.stop()
+        if self._webhook is not None:
+            await self._webhook.stop()
+        self._transport = runtime.transport
+        self._gemini = runtime.gemini
+        self._webhook = runtime.webhook
+        self._scheduler = runtime.scheduler
+        self._coordinator.set_judge(runtime.judge)
+        if runtime.transport is not None:
+            self._pumps.append(
+                asyncio.create_task(self._pump(runtime.transport.recv))
+            )
+        if runtime.gemini is not None:
+            self._pumps.append(
+                asyncio.create_task(self._pump(runtime.gemini.recv))
+            )
+        if runtime.scheduler is not None:
+            self._pumps.append(asyncio.create_task(runtime.scheduler.run()))
+
     async def _warmup_memory(self) -> None:
         warmup = getattr(self._memory, "warmup", None)
         if warmup is not None:
@@ -592,9 +797,28 @@ class App:
 
     async def _load_plugins(self) -> None:
         """Charge les plugins activés dans le registre, avant tout service."""
-        if self._plugin_loader is None or self._plugins is None:
+        if self._plugins is None:
             return
-        await self._plugin_loader.load(self._plugins, push_event=self.push_event)
+        if self._plugin_loader is not None:
+            await self._plugin_loader.load(
+                self._plugins, push_event=self.push_event
+            )
+        self._adopt_catalogue()
+
+    def _adopt_catalogue(self) -> None:
+        """Verse les métadonnées des dossiers que le chargeur n'a pas décrits.
+
+        Seuls les Plugins **non listés ou cassés** arrivent ici : le chargeur a
+        déjà décrit ceux qu'il a ouverts. Le registre reste la source unique de
+        ce que la Console affiche, et l'adaptateur Console ne le mute jamais.
+        """
+        catalogue = self._plugin_catalogue
+        registry = self._plugins
+        if catalogue is None or registry is None:
+            return
+        for entry in catalogue.entries():
+            if registry.description_of(entry.name) is None:
+                registry.describe(entry.description)
 
     def _has_pending_plugins(self) -> bool:
         loader = self._plugin_loader
@@ -846,7 +1070,9 @@ def build_app(
     # valeur enregistrée prend effet au démarrage, sinon le GET annoncerait une
     # valeur que le processus n'utilise pas (ADR-0025).
     config, applied_settings = config_with_stored_settings(
-        config, store=_settings_values(settings_store), process_env=process_env
+        config,
+        store=_stored_setting_values(settings_store),
+        process_env=process_env,
     )
 
     console_trace_buffer = (
@@ -893,26 +1119,6 @@ def build_app(
     # avant le transport pour que ``Registered.server_tools`` le lise à chaque
     # enregistrement, plugin chargé ou non.
     plugins = PluginRegistry()
-
-    transport: WebSocketTransport | None = None
-    gemini: GeminiLiveAdapter | None = None
-    if gemini_enabled:
-        transport = WebSocketTransport(
-            host=config.server.host,
-            port=config.server.port,
-            server_tools=server_tool_names(plugins),
-            trace_sink=trace_sink,
-            # Même store que la Console : une révocation prononcée depuis la
-            # surface d'observation vaut pour le transport, sans redémarrage.
-            auth=auth,
-        )
-        gemini = GeminiLiveAdapter(
-            api_key=api_key,
-            model=config.gemini.model,
-            voice=config.gemini.voice,
-            live_connect=live_connect,
-            trace_sink=trace_sink,
-        )
     clock = clock if clock is not None else AsyncioClock()
 
     embedder = (
@@ -928,36 +1134,32 @@ def build_app(
         journal_retention_days=config.memory.journal_retention_days,
     )
 
-    judge: GeminiEventJudge | None = None
-    scheduler: ConsolidationScheduler | None = None
-    if gemini_enabled:
-        extractor = GeminiFactExtractor(
-            api_key=api_key,
-            model=config.memory.consolidation_model,
-            trace_sink=trace_sink,
-        )
-        judge = GeminiEventJudge(
-            api_key=api_key,
-            model=config.gemini.judge_model,
-            prompt=load_judge_prompt(),
-            trace_sink=trace_sink,
-        )
-        policy = ConsolidationPolicy(config.memory.consolidation_hours)
-        consolidation = Consolidation(
-            memory=memory,
-            extractor=extractor,
-            policy=policy,
-            user_id=config.memory.user_id,
-            dedup_threshold=config.memory.dedup_threshold,
-            journal_retention_days=config.memory.journal_retention_days,
-        )
-        scheduler = ConsolidationScheduler(
-            consolidation=consolidation,
-            policy=policy,
-            now=local_now,
-            sleep=asyncio.sleep,
-            on_run=lambda report: _record_consolidation(health, trace_sink, report),
-        )
+    # Une seule fabrique construit les surfaces d'exécution : au démarrage
+    # quand une clé existe déjà, et à la fin de l'Installation sinon (story 12).
+    # Elle garde la configuration gelée et retient la clé réellement chargée.
+    runtime_factory = RuntimeFactory(
+        config=config,
+        secrets=secret_resolver,
+        plugins=plugins,
+        auth=auth,
+        trace_sink=trace_sink,
+        memory=memory,
+        health=health,
+        live_connect=live_connect,
+    )
+    boot_runtime = runtime_factory.build() if gemini_enabled else None
+    if boot_runtime is None:
+        transport: WebSocketTransport | None = None
+        gemini: GeminiLiveAdapter | None = None
+        judge: GeminiEventJudge | None = None
+        scheduler: ConsolidationScheduler | None = None
+        webhook: WebhookAdapter | None = None
+    else:
+        transport = boot_runtime.transport
+        gemini = boot_runtime.gemini
+        judge = boot_runtime.judge
+        scheduler = boot_runtime.scheduler
+        webhook = boot_runtime.webhook
 
     # Les Tools du noyau entrent au propriétaire ``core`` ; les plugins activés
     # s'y ajoutent au démarrage.
@@ -976,28 +1178,29 @@ def build_app(
         secrets=secret_resolver,
         trace_sink=trace_sink,
     )
-    # Gestion des Plugins (ticket #176) : le catalogue décrit tous les
-    # dossiers, y compris cassés ou non listés ; le service écrit l'état et
-    # les Secrets, sans jamais recharger un plugin à chaud.
+    # Catalogue des Plugins (ticket #176) : il décrit tous les dossiers, y
+    # compris cassés ou non listés. La racine l'adopte au démarrage ; la
+    # Console ne fait que lire le registre (ADR-0016).
+    plugin_catalogue = PluginCatalogue(config.plugins.directory)
+    # Gestion des Plugins (ticket #176) : le service écrit l'état et les
+    # Secrets, sans jamais recharger un plugin à chaud.
     plugin_admin = PluginAdmin(
-        catalogue=PluginCatalogue(config.plugins.directory),
+        catalogue=plugin_catalogue,
         state=PluginStateStore(config.plugins.state_path),
         registry=plugins,
         loader=plugin_loader,
         secrets=settings_store,
     )
 
-    webhook: WebhookAdapter | None = None
-    if config.webhook.enabled and gemini_enabled:
-        webhook = WebhookAdapter(
-            host=config.webhook.host,
-            port=config.webhook.port,
-            trace_sink=trace_sink,
-            auth=auth,
-        )
-
     # État d'Installation : Compte + Secret Gemini utilisable (ADR-0026).
-    installation = Installation(auth=auth, secrets=settings_store, runtime_key=api_key)
+    # ``runtime_factory.key`` suit la clé chargée : l'activer à chaud la met à
+    # jour, donc ``restart_required`` retombe sans redémarrage.
+    installation = Installation(
+        auth=auth,
+        secrets=settings_store,
+        effective_key=runtime_factory.resolve_key,
+        running_key=lambda: runtime_factory.key,
+    )
     validator = (
         secret_validator
         if secret_validator is not None
@@ -1033,6 +1236,15 @@ def build_app(
     )
 
     console: ConsoleAdapter | None = None
+    # Cellule de l'App, remplie juste après sa construction : la route des
+    # Secrets déclenche l'activation à chaud de la fin d'Installation sans que
+    # l'adaptateur connaisse jamais le Coordinator (ADR-0016).
+    app_cell: list[App] = []
+
+    async def activate_after_install() -> None:
+        if app_cell:
+            await app_cell[0].activate_runtime()
+
     if config.console.enabled:
         console = ConsoleAdapter(
             host=config.console.host,
@@ -1046,6 +1258,7 @@ def build_app(
             settings=settings_routes,
             installation=installation.status,
             master_key=ensure_master_key,
+            installed=activate_after_install,
             # Fil de la Conversation : lecture paginée du Journal, bornée à la
             # rétention de la mémoire courte (ADR-0024).
             thread=ThreadView(
@@ -1069,6 +1282,8 @@ def build_app(
         tools=plugins.tools,
         plugins=plugins,
         plugin_loader=plugin_loader,
+        plugin_catalogue=plugin_catalogue,
+        runtime_factory=runtime_factory,
         recall_k=config.memory.recall_k,
         recall_window_turns=config.memory.recall_window_turns,
         recall_max_distance=config.memory.recall_max_distance,
@@ -1087,7 +1302,8 @@ def build_app(
         # Diagnostic (#177) : l'Installation et la santé sont recomposées à
         # chaque lecture. Les bases sont nommées ici, une fois pour toutes, dans
         # l'ordre du bandeau.
-        installation=installation.describe,
+        installation=installation.status,
+        account_exists=lambda: installation.account_exists,
         health=health,
         databases={
             "memory": config.memory.db_path,
@@ -1101,16 +1317,22 @@ def build_app(
         ),
         monotonic=monotonic,
     )
-    # La cellule est remplie une fois l'App construite : un PUT qui demande le
-    # redémarrage dépose ``ShutdownRequested`` dans la boucle unique.
+    # Les cellules sont remplies une fois l'App construite : un PUT qui demande
+    # le redémarrage dépose ``ShutdownRequested`` dans la boucle unique, et la
+    # première clé Gemini active les surfaces d'exécution sur place.
     restart_cell.append(app.request_shutdown)
+    app_cell.append(app)
     return app
 
 
-def _settings_values(store: SecretStore) -> dict[str, str]:
-    """Valeurs du magasin, quand l'objet injecté en est un."""
-    reader = getattr(store, "values", None)
-    return dict(reader()) if callable(reader) else {}
+def _stored_setting_values(store: SecretStore) -> dict[str, str]:
+    """Valeurs de réglages du magasin, quand l'objet en implémente le port.
+
+    ``SecretStore`` est le port minimal accepté par ``build_app`` ; le magasin
+    réel implémente aussi ``SettingsStore``. Un faux qui ne le fait pas rend un
+    magasin vide : les défauts s'appliquent, sans erreur.
+    """
+    return dict(store.values()) if isinstance(store, SettingsStore) else {}
 
 
 def _settings_store(store: SecretStore) -> SettingsStore | None:
@@ -1120,8 +1342,7 @@ def _settings_store(store: SecretStore) -> SettingsStore | None:
     injecter un faux qui ne porte que les Secrets. Les routes répondent alors
     ``503 settings_unavailable`` plutôt que d'inventer un magasin.
     """
-    required = ("value", "values", "set_value", "delete_value")
-    return store if all(hasattr(store, name) for name in required) else None
+    return store if isinstance(store, SettingsStore) else None
 
 
 def _optional_secret(resolver: SecretResolver, name: str) -> str | None:

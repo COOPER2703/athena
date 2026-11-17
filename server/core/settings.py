@@ -332,7 +332,6 @@ def resolve_all(
         for field in SETTINGS
     ]
 
-
 def describe_settings(
     view: SettingsView,
     store: Mapping[str, str],
@@ -462,7 +461,9 @@ def validate_settings_update(
         if message is not None:
             errors[state.key] = message
             continue
-        assert normalized is not None  # message est None ⇒ valeur valide
+        if normalized is None:  # défensif : un message accompagne toujours None
+            errors[state.key] = "Cette valeur n'est pas valide."
+            continue
         if state.read_only:
             if not _same(field, normalized, state.value):
                 if not state.editable:
@@ -522,13 +523,18 @@ def _resolved(
 
 
 def _source(field: SettingField, view: SettingsView) -> SettingSource:
-    if view.process_env.get(field.env):
-        return SettingSource.ENV
-    if field.key in view.applied_store:
-        return SettingSource.STORE
-    if view.dotenv.get(field.env):
-        return SettingSource.ENV
-    return SettingSource.DEFAULT
+    """Source d'une valeur, par le **même** moteur que ``resolve_setting``.
+
+    ``describe_settings`` ne peut pas relire les valeurs (il rend celles que le
+    processus a chargées), mais la provenance obéit à la précédence unique :
+    environnement > magasin appliqué > ``.env`` > défaut.
+    """
+    return resolve_setting(
+        field,
+        process_env=view.process_env,
+        store=view.applied_store,
+        dotenv=view.dotenv,
+    ).source
 
 
 def _pending(

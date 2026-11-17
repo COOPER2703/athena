@@ -188,6 +188,15 @@ class Coordinator:
     def state(self) -> SessionState:
         return self._state
 
+    def set_judge(self, judge: EventJudge | None) -> None:
+        """Adopte un juge construit plus tard, à la fin de l'Installation.
+
+        Sans clé Gemini, le noyau démarre sans juge ; la première clé active
+        les surfaces d'exécution à chaud et le juge arrive ici, avant le premier
+        Événement jugé. Aucune Session ne peut être en cours à cet instant.
+        """
+        self._judge = judge
+
     @property
     def connection_id(self) -> str:
         return self._connection_id
@@ -533,18 +542,10 @@ class Coordinator:
         )
 
         return [
-            OpenLiveConnection(
-                connection_id=self._connection_id,
+            *self._open_live(
                 instruction=instruction,
-                # Aucun outil : le contenu externe qui a déclenché l'Annonce
-                # ne peut jamais se traduire par une action (#81). Décision
-                # **provisoire** : les Sessions d'Annonce exposeront les Tools
-                # ordinaires dès qu'un système anti-injection existera
-                # (ADR-0020, « Décision à réviser »).
                 tools=(),
-            ),
-            StartIdleTimer(
-                connection_id=self._connection_id, timeout=ANNOUNCE_TIMEOUT
+                timeout=ANNOUNCE_TIMEOUT,
             ),
             SendAnnouncementToLlm(
                 connection_id=self._connection_id,
@@ -652,16 +653,11 @@ class Coordinator:
         instruction = self._compose_instruction(
             self._system_prompt, self._plugin_instruction(), context
         )
-        commands.append(
-            OpenLiveConnection(
-                connection_id=self._connection_id,
+        commands.extend(
+            self._open_live(
                 instruction=instruction,
                 tools=self._open_tools(),
-            )
-        )
-        commands.append(
-            StartIdleTimer(
-                connection_id=self._connection_id, timeout=TOUR_TIMEOUT
+                timeout=TOUR_TIMEOUT,
             )
         )
         if self._memory is not None:
@@ -831,15 +827,12 @@ class Coordinator:
             self._system_prompt, plugin_instruction, context
         )
 
-        commands.append(
-            OpenLiveConnection(
-                connection_id=self._connection_id,
+        commands.extend(
+            self._open_live(
                 instruction=instruction,
                 tools=self._open_tools(),
+                timeout=IDLE_TIMEOUT,
             )
-        )
-        commands.append(
-            StartIdleTimer(connection_id=self._connection_id, timeout=IDLE_TIMEOUT)
         )
         commands.append(
             self._trace(
@@ -864,6 +857,31 @@ class Coordinator:
             )
         )
         return commands
+
+    def _open_live(
+        self,
+        *,
+        instruction: str,
+        tools: tuple[ToolSpec, ...],
+        timeout: float,
+    ) -> list[Command]:
+        """Les deux Commandes qui ouvrent une Connexion Live et arment son filet.
+
+        Le rituel est commun à la Session, à l'Annonce et au Tour : seul
+        l'instruction, la liste de Tools et le délai changent. L'Annonce garde
+        ``tools=()`` — un contenu externe ne doit jamais déclencher une action
+        (#81) —, décision provisoire d'ADR-0020.
+        """
+        return [
+            OpenLiveConnection(
+                connection_id=self._connection_id,
+                instruction=instruction,
+                tools=tools,
+            ),
+            StartIdleTimer(
+                connection_id=self._connection_id, timeout=timeout
+            ),
+        ]
 
     def _open_tools(self) -> tuple[ToolSpec, ...]:
         if self._tools is None:

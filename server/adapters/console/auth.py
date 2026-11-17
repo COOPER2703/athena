@@ -31,6 +31,7 @@ from server.adapters.console.contract import (
     TOKENS_PATH,
 )
 from server.adapters.console.errors import error_response
+from server.adapters.console.body import json_object as _json_object
 from server.core.ports import (
     AccessToken,
     AuthError,
@@ -138,13 +139,6 @@ def _clear_ticket_cookie(response: web.StreamResponse) -> None:
         samesite="Strict",
     )
 
-
-async def _json_object(request: web.Request) -> Mapping[str, object] | None:
-    try:
-        payload = await request.json()
-    except ValueError:
-        return None
-    return payload if isinstance(payload, Mapping) else None
 
 
 class ConsoleAuth:

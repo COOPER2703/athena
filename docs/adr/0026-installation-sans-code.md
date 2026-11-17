@@ -34,6 +34,12 @@ Deux faits le contredisent aujourd'hui :
   subsiste et mène au réglage manquant ; Athena ne peut ni parler ni être jointe.
 - Le parcours est : Compte, puis clé Gemini (validée), puis voix et profil (pré-remplis), puis
   récapitulatif de ce qui reste à faire.
+- **La fin de l'Installation s'applique sans nouvelle action** : enregistrer la première clé
+  Gemini utilisable ouvre à chaud, dans le processus vivant, le transport des Clients, le
+  Webhook, Gemini, le juge et la Consolidation. `restart_required` retombe à faux et la
+  Conversation répond immédiatement. Seule une clé **remplacée** après installation attend un
+  redémarrage : la Connexion Live garde celle chargée au démarrage, et la Conversation reste
+  utilisable avec l'ancienne jusque-là.
 
 ## Pourquoi
 
@@ -68,6 +74,9 @@ Deux faits le contredisent aujourd'hui :
   distinguer « pas de Compte » de « Compte sans clé utilisable ».
 - La configuration doit accepter une clé Gemini absente au démarrage, ce qui touche la racine
   de composition et les adaptateurs qui supposaient un secret présent.
+- La racine de composition doit pouvoir construire et démarrer les surfaces d'exécution **après**
+  le démarrage, sur le même processus et la même boucle : la fabrique de runtime et l'échange
+  d'adaptateurs vivent dans `server/app/root.py`, jamais dans l'adaptateur Console.
 - Le glossaire perd **Code d'installation** et gagne **Installation** et **Secret**.
 - Un déploiement qui laisse une instance non installée exposée est un incident d'exploitation,
   pas un défaut à rattraper dans le code.

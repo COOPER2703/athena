@@ -189,8 +189,8 @@ def test_the_diagnostic_stays_readable_while_the_installation_is_incomplete(
             assert health["trace_buffer"]["capacity"] == 500
             assert health["databases"]["auth"] > 0
 
-            # Une clé enregistrée après le démarrage rend l'Installation
-            # complète mais exige un redémarrage : les surfaces restent fermées.
+            # Une clé enregistrée après le démarrage termine l'Installation et
+            # ouvre les surfaces à chaud : plus rien n'attend un redémarrage.
             async with http.put(
                 f"{server.url}{SECRETS_PATH}/GEMINI_API_KEY",
                 json={"value": GEMINI_KEY},
@@ -198,12 +198,12 @@ def test_the_diagnostic_stays_readable_while_the_installation_is_incomplete(
                 assert response.status == 200, await response.text()
 
             snapshot = await server.status()
-            assert snapshot["restart_required"] is True
+            assert snapshot["restart_required"] is False
             assert snapshot["installation"]["gemini_configured"] is True
             assert snapshot["installation"]["complete"] is True
             assert snapshot["installation"]["surfaces"] == {
-                "gemini": False,
-                "transport": False,
+                "gemini": True,
+                "transport": True,
                 "webhook": False,
             }
             assert GEMINI_KEY not in json.dumps(snapshot, ensure_ascii=False)

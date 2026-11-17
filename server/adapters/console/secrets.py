@@ -12,13 +12,15 @@ sait être vérifiée par un appel réel, et les tests n'atteignent jamais le r�
 from __future__ import annotations
 
 import re
-from typing import Mapping
+from typing import Awaitable, Callable
 
 from aiohttp import web
 
 from server.adapters.console.contract import ENVELOPE_VERSION
 from server.adapters.console.errors import error_response
+from server.adapters.console.body import json_object as _json_object
 from server.core.ports import SecretValidator, SecretStatus, SecretStore
+from server.core.settings import GEMINI_SECRET
 
 # Nom d'un Secret = nom de la variable d'environnement attendue. La forme est
 # bornée pour qu'une faute de frappe ne crée pas une ligne inutilisable.
@@ -34,9 +36,14 @@ class SecretsRoutes:
         *,
         secrets: SecretStore | None,
         validator: SecretValidator | None = None,
+        installed: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._secrets = secrets
         self._validator = validator
+        # Fin d'Installation (story 12) : la racine fournit l'activation à
+        # chaud des surfaces d'exécution. La Console ne sait pas ce qu'elle
+        # déclenche, et n'atteint jamais le Coordinator (ADR-0016).
+        self._installed = installed
 
     async def handle_list(self, request: web.Request) -> web.Response:
         if self._secrets is None:
@@ -73,6 +80,10 @@ class SecretsRoutes:
             return _invalid_value(message)
 
         status = self._secrets.set_secret(name, value)
+        # La première clé Gemini rend l'Installation complète : la racine ouvre
+        # les surfaces d'exécution dans ce processus, sans redémarrage.
+        if name == GEMINI_SECRET and self._installed is not None:
+            await self._installed()
         return web.json_response(
             {"v": ENVELOPE_VERSION, "secret": secret_status_json(status)}
         )
@@ -134,10 +145,3 @@ def _unavailable() -> web.Response:
         message="Le magasin de Secrets n'est pas disponible.",
     )
 
-
-async def _json_object(request: web.Request) -> Mapping[str, object] | None:
-    try:
-        payload = await request.json()
-    except ValueError:
-        return None
-    return payload if isinstance(payload, Mapping) else None

@@ -176,7 +176,7 @@ export function installationGaps(session: AuthSession): InstallationGap[] {
     gaps.push({
       id: "restart",
       title: "Redémarrage requis",
-      body: "La clé Gemini enregistrée n'est pas encore celle chargée au démarrage : redémarrez le serveur pour qu'Athena l'utilise.",
+      body: "La clé Gemini enregistrée n'est pas encore celle chargée par le processus : Athena continue avec l'ancienne jusqu'au redémarrage du serveur.",
     });
   }
   return gaps;
@@ -185,9 +185,10 @@ export function installationGaps(session: AuthSession): InstallationGap[] {
 /**
  * Vrai quand la Conversation peut recevoir un Tour.
  *
- * Il faut une clé Gemini utilisable **chargée par le serveur** : une clé
- * enregistrée mais pas encore chargée au démarrage laisse les surfaces fermées,
- * et la Conversation reste alors désactivée avec un renvoi vers les Réglages.
+ * Il faut une clé Gemini utilisable **chargée par le serveur** : la première
+ * clé est activée à chaud à la fin de l'Installation. Une clé *remplacée*
+ * ensuite attend un redémarrage (`restartRequired`), mais l'ancienne reste
+ * chargée : la Conversation demeure utilisable et le bandeau explique l'écart.
  */
 export function isConversationAvailable(
   session: AuthSession | undefined,
@@ -195,7 +196,6 @@ export function isConversationAvailable(
   return (
     session !== undefined &&
     session.authenticated &&
-    session.geminiConfigured &&
-    !session.restartRequired
+    session.installationComplete
   );
 }

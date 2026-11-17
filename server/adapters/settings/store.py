@@ -81,16 +81,20 @@ class SqliteSettingsStore:
         L'appelant est l'Installation : c'est le seul endroit où la clé est
         exposée à l'utilisateur. Une clé déjà présente n'est jamais réaffichée.
         """
-        _, encoded, created = self._master.ensure()
-        if not created:
-            return None
-        emit(
-            self._trace_sink,
-            TRACE_SOURCE,
-            "MasterKeyCreated",
-            payload={"path": str(self._master.path)},
-        )
-        return encoded
+        _, encoded, created = self._ensure_key()
+        return encoded if created else None
+
+    def _ensure_key(self) -> tuple[bytes, str, bool]:
+        """Assure la clé maître et trace sa création par **une seule** voie."""
+        key, encoded, created = self._master.ensure()
+        if created:
+            emit(
+                self._trace_sink,
+                TRACE_SOURCE,
+                "MasterKeyCreated",
+                payload={"path": str(self._master.path)},
+            )
+        return key, encoded, created
 
     # --- Réglages ----------------------------------------------------------
 
@@ -195,14 +199,7 @@ class SqliteSettingsStore:
 
     def set_secret(self, name: str, value: str) -> SecretStatus:
         """Chiffre et enregistre un Secret, en créant la clé si elle manque."""
-        key, _, created = self._master.ensure()
-        if created:
-            emit(
-                self._trace_sink,
-                TRACE_SOURCE,
-                "MasterKeyCreated",
-                payload={"path": str(self._master.path)},
-            )
+        key, _, _ = self._ensure_key()
         blob = seal(key, name, value)
         now = self._now()
         with self._lock:

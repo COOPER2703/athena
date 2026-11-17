@@ -18,12 +18,12 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Awaitable, Callable, Mapping
 
 from aiohttp import web
 
 from server.adapters.console.auth import ConsoleAuth
-from server.adapters.console.chat import ChatEndpoint, TourStreams
+from server.adapters.console.chat import ChatEndpoint, TourDestinations
 from server.adapters.console.contract import (
     API_PREFIX,
     CHAT_PATH,
@@ -125,10 +125,13 @@ def _installed() -> InstallationStatus:
 
 
 class ConsoleAdapter:
-    """Surface d'observation en lecture seule, alimentée par ``snapshot``.
+    """Surface d'observation et d'administration de la Console web.
 
     ``snapshot`` est la couture de la racine de composition : l'adaptateur
-    l'appelle à chaque requête, sans retenir ni interpréter l'état du noyau.
+    l'appelle à chaque requête, sans retenir ni interpréter l'état du noyau. La
+    Console écrit aussi — Réglages, Secrets, Jetons d'accès, Plugins — mais
+    toujours par des services et des callables injectés : elle ne voit ni le
+    Coordinator ni l'état de Session (ADR-0016).
     """
 
     def __init__(
@@ -148,6 +151,7 @@ class ConsoleAdapter:
         master_key: Callable[[], str | None] | None = None,
         thread: ThreadReader | None = None,
         plugin_admin: PluginAdmin | None = None,
+        installed: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -165,7 +169,9 @@ class ConsoleAdapter:
         # Les Secrets sont en écriture seule ; leur validation distante est
         # injectée (faux validateur dans les tests, Gemini en production).
         self._secrets_routes = SecretsRoutes(
-            secrets=secrets, validator=secret_validator
+            secrets=secrets,
+            validator=secret_validator,
+            installed=installed,
         )
         # Zone Plugins : activation, configuration et Secrets. Le service est
         # construit par la racine de composition, qui seule connaît le
@@ -202,7 +208,7 @@ class ConsoleAdapter:
         return self._trace_buffer
 
     @property
-    def tour_destination(self) -> TourStreams:
+    def tour_destination(self) -> TourDestinations:
         """Destination des Tours, injectée dans la racine de composition (ADR-0024)."""
         return self._chat.destination
 
