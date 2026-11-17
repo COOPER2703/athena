@@ -97,6 +97,7 @@ def test_a_fresh_instance_answers_setup_required_before_anything_else(
                         "setup_required": True,
                         "authenticated": False,
                         "username": None,
+                        "password_min_length": 12,
                         **_installed_status(),
                     }
 
@@ -147,6 +148,7 @@ def test_install_opens_an_httponly_secure_ticket_and_unlocks_the_api(
                         "setup_required": False,
                         "authenticated": True,
                         "username": "admin",
+                        "password_min_length": 12,
                         **_installed_status(),
                     }
         finally:
@@ -202,7 +204,45 @@ def test_the_minimum_password_length_is_enforced_by_the_server(
                     assert "12" in str(body["message"])
 
                 async with http.get(f"{console.url}{SESSION_PATH}") as response:
-                    assert (await _json(response))["setup_required"] is True
+                    identity = await _json(response)
+                assert identity["setup_required"] is True
+                # L'écran d'installation explique la longueur **avant** la
+                # saisie : elle vient du serveur, jamais d'une constante du front.
+                assert identity["password_min_length"] == 12
+        finally:
+            await console.stop()
+
+    asyncio.run(scenario())
+
+
+def test_the_session_explains_the_configured_password_length(
+    tmp_path: Path,
+) -> None:
+    """La longueur annoncée est celle que le serveur applique réellement."""
+
+    async def scenario() -> None:
+        console = Console(tmp_path, password_min_length=16)
+        await console.start()
+        try:
+            async with console.client() as http:
+                async with http.get(f"{console.url}{SESSION_PATH}") as response:
+                    identity = await _json(response)
+                assert identity["password_min_length"] == 16
+
+                async with http.post(
+                    f"{console.url}{SETUP_PATH}",
+                    json={"username": "admin", "password": "a" * 15},
+                ) as response:
+                    assert response.status == 400
+                    body = await _json(response)
+                    assert body["error"] == "weak_password"
+                    assert "16" in str(body["message"])
+
+                async with http.post(
+                    f"{console.url}{SETUP_PATH}",
+                    json={"username": "admin", "password": "a" * 16},
+                ) as response:
+                    assert response.status == 200
         finally:
             await console.stop()
 

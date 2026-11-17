@@ -305,6 +305,10 @@ class ConsoleAuth:
                 "username": (
                     session.account.username if session is not None else None
                 ),
+                # Politique de mot de passe : l'écran d'installation l'explique
+                # **avant** la saisie, et le front ne la duplique jamais. Absente
+                # seulement sans module d'auth, où aucun mot de passe n'existe.
+                "password_min_length": self._service.password_min_length,
                 **_installation_json(installation),
             }
         )
