@@ -357,3 +357,26 @@ bannière permanente tant que la clé manque, et Conversation remplacée par un 
 La clé maître ne quitte jamais l'état mémoire de l'écran qui l'affiche ; la longueur minimale
 du mot de passe vient de `/api/session`. Une fois l'Installation terminée, l'`IdentityGate`
 route vers l'application et `/installation` se redirige.
+
+### Parcours navigateur (E2E)
+
+Trois parcours Playwright ferment le filet de la Console. Ils tournent sur le **build réel**
+(`web/dist`) servi par le serveur du seam partagé (`server/tests/server_harness.py`), avec
+un faux modèle injecté : Installation jusqu'à la Conversation, connexion puis un Tour texte
+avec audio et interruption, enfin un réglage appliqué jusqu'au redémarrage. Aucun secret
+réel et aucun réseau externe : le validateur de Secrets et le modèle sont ceux du harnais.
+
+- `make e2e` construit la SPA, démarre un serveur de test isolé (répertoire temporaire,
+  ports éphémères, clé Gemini factice) et lance Playwright depuis `web/`.
+- Le superviseur `e2e/server.py` relance le serveur à la même adresse après chaque sortie
+  propre (`ATHENA_RESTART_ON_APPLY=1`) : c'est ce qui rend le redémarrage d'un réglage
+  observable. Un petit serveur de contrôle, propre au harnais, expose la génération courante
+  et permet de demander un redémarrage (le parcours 1 en a besoin après la clé Gemini).
+- Chaque parcours démarre **son** serveur : l'ordre d'exécution n'a aucune importance.
+- Chromium : le système (`/usr/bin/chromium`) est utilisé s'il existe, sinon lancez une fois
+  `cd web && npx playwright install chromium`. En CI, le job `e2e` installe Chromium avec
+  `npx playwright install --with-deps chromium`.
+- `ATHENA_E2E_PYTHON` choisit l'interpréteur Python (défaut : `python`) ;
+  `ATHENA_E2E_CHROMIUM` impose un exécutable Chromium.
+- Les tests vivent dans `web/e2e/` et les valeurs partagées avec le serveur de test dans
+  `web/e2e/constants.ts` (miroir de `e2e/server.py`).
