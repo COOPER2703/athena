@@ -35,6 +35,7 @@ PASSWORD_PATH = "/api/password"
 # l'Installation n'est pas terminée (ADR-0025).
 SETTINGS_PATH = "/api/settings"
 SECRETS_PATH = "/api/secrets"
+PLUGINS_PATH = "/api/plugins"
 CHAT_PATH = "/api/chat"
 # Sonde de supervision : publique, réponse fixe, aucun état applicatif.
 HEALTH_PATH = "/healthz"

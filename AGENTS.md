@@ -137,6 +137,26 @@ Le contrat public est `plugin_api` (jamais `server`) ; les décisions sont ADR-0
 ADR-0018 ; les deux exemples sont `plugins/websearch` (HTTP) et `plugins/homeassistant` (MCP).
 Les skills tiers sont installés par `npx skills add` et épinglés dans `skills-lock.json`.
 
+### Gérer les plugins depuis la Console
+
+La zone Plugins lit **tous** les dossiers du répertoire des Plugins, y compris ceux
+qui ne sont pas listés ou dont le manifeste est cassé : `GET /api/plugins` rend, pour
+chacun, l'état, la version, la plateforme, la description, les Tools réellement exposés,
+l'instruction d'usage et les champs de configuration et de Secrets **déclarés** par le
+manifeste. Un manifeste illisible est une raison lisible dans la réponse, jamais un
+démarrage raté.
+
+- `PUT /api/plugins/{nom}` écrit l'activation et la configuration non secrète, validée
+  contre les champs du manifeste (URL `http(s)`, champ requis) avec une erreur par champ.
+- `PUT|DELETE /api/plugins/{nom}/secrets/{clé}` écrit ou efface un Secret, en écriture
+  seule : la réponse ne reprend jamais la valeur, seulement le nom de la variable
+  attendue (`ATHENA_PLUGIN_…`), `configured` et la date de mise à jour.
+- Les écritures vont dans le fichier d'état (`plugins.json`, non versionné), de façon
+  atomique et en préservant les clés inconnues ; elles **prennent effet au redémarrage**,
+  rien n'est rechargé à chaud. La réponse signale `restart_required`.
+- Aucune installation ni désinstallation : le store de Plugins reste hors périmètre, et
+  la Console ne propose aucun bouton d'installation.
+
 ### Recherche web
 
 Le plugin `plugins/websearch/` (ADR-0018) expose à Gemini un seul Tool, `web_search`,
