@@ -20,17 +20,17 @@ const FIELDS: readonly PluginConfigField[] = [
 
 describe("libellés", () => {
   it("traduit les quatre états du registre", () => {
-    expect(pluginStateLabel("activated")).toBe("Actif");
-    expect(pluginStateLabel("disabled")).toBe("Inactif");
+    expect(pluginStateLabel("activated")).toBe("Activé");
+    expect(pluginStateLabel("disabled")).toBe("Désactivé");
     expect(pluginStateLabel("failed")).toBe("En échec");
-    expect(pluginStateLabel("missing")).toBe("Introuvable");
+    expect(pluginStateLabel("missing")).toBe("Manquant");
   });
 
   it("réserve l'accent à l'état actif", () => {
     expect(pluginStateTone("activated")).toBe("accent");
     expect(pluginStateTone("disabled")).toBe("neutral");
     expect(pluginStateTone("failed")).toBe("danger");
-    expect(pluginStateTone("missing")).toBe("danger");
+    expect(pluginStateTone("missing")).toBe("warning");
   });
 
   it("traduit les plateformes connues et laisse le reste lisible", () => {

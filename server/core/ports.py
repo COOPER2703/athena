@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Mapping, NamedTuple, Protocol, Sequence
+from typing import Mapping, NamedTuple, Protocol, Sequence, runtime_checkable
 
 from plugin_api import ToolSpec
 from protocol import SessionEndReason
@@ -40,6 +40,7 @@ class SecretStatus:
     updated_at: float | None = None
 
 
+@runtime_checkable
 class SettingsStore(Protocol):
     """Port du magasin de réglages : valeurs JSON et métadonnées (ADR-0025).
 

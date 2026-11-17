@@ -12,9 +12,9 @@ import { expect, test } from "./fixtures";
  *
  * Instance neuve : aucun Compte, aucune clé. Le premier visiteur crée l'unique
  * Compte, note la clé maître affichée une seule fois, enregistre une clé Gemini
- * factice (validée par le faux validateur, sans réseau), termine le parcours.
- * La clé enregistrée n'étant active qu'après un redémarrage, le superviseur
- * relance le serveur ; la Console revient, la Conversation s'ouvre et le
+ * factice (validée par le faux validateur, sans réseau), voit les valeurs
+ * effectives de voix, puis termine le parcours. La première clé active les
+ * surfaces **sans redémarrage** : la Conversation s'ouvre immédiatement et le
  * premier message reçoit une réponse du faux modèle.
  */
 
@@ -66,30 +66,28 @@ test("installation neuve puis première réponse de la Conversation", async ({
   await page.getByLabel("Clé Gemini").fill(E2E_GEMINI_KEY);
   await page.getByRole("button", { name: "Enregistrer la clé" }).click();
 
-  // --- Voix et profil, puis récapitulatif --------------------------------
+  // --- Voix et profil : valeurs effectives, puis récapitulatif -----------
   await expect(
     page.getByRole("heading", { name: "Voix et profil" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Continuer" }).click();
+  // Les valeurs viennent de `GET /api/settings`, jamais d'une constante du front.
+  const voice = page.locator("#installation-voice");
+  await expect(voice).toBeVisible();
+  await expect(voice).toHaveValue("Leda");
+  await page.getByRole("button", { name: "Passer cette étape" }).click();
 
   await expect(
     page.getByRole("heading", { name: "Récapitulatif" }),
   ).toBeVisible();
-  await expect(page.getByText("Redémarrage requis")).toBeVisible();
-
-  // La clé est enregistrée mais pas encore chargée : la Conversation reste
-  // fermée et le rappel permanent de l'Installation le dit.
-  await page.goto(`${server.url}/conversation`);
-  await expect(page.getByText("Conversation désactivée")).toBeVisible();
+  // La première clé a été activée à chaud : rien n'attend de redémarrage.
   await expect(
-    page.getByRole("status", { name: "Installation incomplète" }),
+    page.getByText("Installation terminée", { exact: true }),
   ).toBeVisible();
+  await expect(page.getByText("Redémarrage requis")).toHaveCount(0);
 
-  // --- Redémarrage du superviseur, puis Console revenue -----------------
-  const generation = await server.restart();
-  expect(generation).toBeGreaterThan(0);
-
-  await page.goto(`${server.url}/conversation`);
+  // --- La Conversation est ouverte immédiatement, sans redémarrage -------
+  await page.getByRole("button", { name: "Ouvrir la Conversation" }).click();
+  await expect(page).toHaveURL(/\/conversation$/);
   await expect(
     page.getByRole("heading", { name: "Conversation", exact: true }),
   ).toBeVisible();
@@ -97,6 +95,9 @@ test("installation neuve puis première réponse de la Conversation", async ({
   await expect(
     page.getByRole("status", { name: "Installation incomplète" }),
   ).toHaveCount(0);
+
+  // Aucune relance du superviseur n'a eu lieu.
+  expect(await server.generation()).toBe(0);
 
   // --- Premier message : texte du faux modèle ---------------------------
   await page.getByLabel("Message").fill(E2E_MESSAGE);

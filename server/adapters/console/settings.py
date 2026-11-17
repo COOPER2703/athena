@@ -15,12 +15,13 @@ en production, un enregistreur en test, ce qui évite de tuer pytest.
 from __future__ import annotations
 
 import asyncio
-from typing import Callable, Mapping
+from typing import Callable
 
 from aiohttp import web
 
 from server.adapters.console.contract import ENVELOPE_VERSION
 from server.adapters.console.errors import error_response
+from server.adapters.console.body import json_object as _json_object
 from server.adapters.console.secrets import secret_status_json
 from server.core.ports import SecretStore, SettingsStore
 from server.core.settings import (
@@ -83,7 +84,13 @@ class SettingsRoutes:
                 message="Certains réglages sont invalides.",
                 fields=errors,
             )
-        assert update is not None  # aucune erreur ⇒ une écriture validée
+        if update is None:  # défensif : sans erreur, une écriture existe
+            return error_response(
+                "invalid_settings",
+                400,
+                message="Certains réglages sont invalides.",
+                fields={"values": "Un objet de réglages est attendu."},
+            )
 
         # Tout est validé avant la première écriture : un refus ne laisse
         # jamais le magasin à moitié modifié.
@@ -102,13 +109,16 @@ class SettingsRoutes:
     # --- mécanique interne -------------------------------------------------
 
     def _states(self) -> tuple[SettingState, ...]:
-        assert self._store is not None
-        return describe_settings(self._view, self._store.values())
+        store = self._store
+        if store is None:  # pragma: no cover - les handlers refusent avant
+            raise RuntimeError("settings store unavailable")
+        return describe_settings(self._view, store.values())
 
     def _schedule_restart(self) -> None:
         """Répond d'abord, sort ensuite : jamais depuis une requête en vol."""
         restart = self._restart
-        assert restart is not None
+        if restart is None:  # pragma: no cover - appelé seulement s'il existe
+            return
         asyncio.get_running_loop().call_later(_RESTART_DELAY, restart)
 
     def _payload(
@@ -194,10 +204,3 @@ def _unavailable() -> web.Response:
         message="Le magasin de réglages n'est pas disponible.",
     )
 
-
-async def _json_object(request: web.Request) -> Mapping[str, object] | None:
-    try:
-        payload = await request.json()
-    except ValueError:
-        return None
-    return payload if isinstance(payload, Mapping) else None

@@ -28,6 +28,18 @@ class PluginStateError(RuntimeError):
     """Le fichier d'état est illisible ou n'a pas la forme attendue."""
 
 
+def _enabled_names(raw: object) -> list[str]:
+    """Noms activés, normalisés : chaînes non vides, élaguées, sans doublon."""
+    if not isinstance(raw, list):
+        return []
+    names = [
+        candidate.strip()
+        for candidate in raw
+        if isinstance(candidate, str) and candidate.strip()
+    ]
+    return list(dict.fromkeys(names))
+
+
 @dataclass(frozen=True, slots=True)
 class PluginState:
     """Vue normalisée du fichier : noms activés et configuration par plugin."""
@@ -59,9 +71,7 @@ class PluginStateStore:
         enabled: list[str] = []
         raw_enabled = raw.get("enabled", [])
         if isinstance(raw_enabled, list):
-            for name in raw_enabled:
-                if isinstance(name, str) and name.strip():
-                    enabled.append(name.strip())
+            enabled = _enabled_names(raw_enabled)
         config: dict[str, Mapping[str, object]] = {}
         raw_config = raw.get("config", {})
         if isinstance(raw_config, dict):
@@ -87,12 +97,7 @@ class PluginStateStore:
         """
         raw = self._read_raw() or {}
         if enabled is not None:
-            names = [
-                candidate
-                for candidate in raw.get("enabled", [])
-                if isinstance(candidate, str) and candidate.strip()
-            ]
-            names = list(dict.fromkeys(candidate.strip() for candidate in names))
+            names = _enabled_names(raw.get("enabled", []))
             if enabled:
                 if name not in names:
                     names.append(name)

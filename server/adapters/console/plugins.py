@@ -18,6 +18,7 @@ from aiohttp import web
 
 from server.adapters.console.contract import ENVELOPE_VERSION
 from server.adapters.console.errors import error_response
+from server.adapters.console.body import json_object as _json_object
 from server.adapters.plugins.admin import PluginAdmin, PluginAdminError
 from server.adapters.plugins.state import PluginStateError
 
@@ -159,10 +160,3 @@ def _invalid_request() -> web.Response:
         message="La demande est incomplète ou mal formée.",
     )
 
-
-async def _json_object(request: web.Request) -> Mapping[str, object] | None:
-    try:
-        payload = await request.json()
-    except ValueError:
-        return None
-    return payload if isinstance(payload, Mapping) else None

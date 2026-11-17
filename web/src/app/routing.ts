@@ -16,7 +16,7 @@ export type AppScreen = "loading" | "installation" | "login" | "app";
 export type ZoneId = "conversation" | "settings" | "plugins" | "diagnostic";
 
 /** Icônes disponibles pour la navigation, dessinées par la coquille. */
-export type IconName = "conversation" | "settings" | "plugins" | "diagnostic";
+export type IconName = ZoneId;
 
 export interface Zone {
   id: ZoneId;

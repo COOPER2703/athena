@@ -6,7 +6,7 @@ l'audio et les appels de Tools, puis retour au Repos. La Console n'est pas un
 Client : cet adaptateur ne voit ni le Coordinator ni l'état de Session. Il
 dépose un Tour dans le Canal par la couture ``TourControl`` injectée par la
 racine de composition, et reçoit les événements par la destination qu'il
-implémente lui-même (``TourStreams``).
+implémente lui-même (``TourDestinations``).
 
 Fermer la réponse annule le Tour : toute écriture ratée ou toute fin anormale
 dépose un ``TourCanceled`` dans le Canal, jamais un accès direct au noyau.
@@ -55,7 +55,7 @@ def _sse(event: str, data: Mapping[str, object]) -> bytes:
     return f"event: {event}\ndata: {payload}\n\n".encode("utf-8")
 
 
-class TourStream:
+class TourEventQueue:
     """File d'événements d'un Tour : une réponse HTTP, un flux, zéro attente."""
 
     def __init__(self, tour_id: str) -> None:
@@ -71,7 +71,7 @@ class TourStream:
         return await asyncio.wait_for(self._events.get(), timeout)
 
 
-class TourStreams:
+class TourDestinations:
     """Destination de Tour (port du noyau) et registre des flux ouverts.
 
     Toutes les méthodes du port sont **synchrones et non bloquantes** : elles
@@ -81,10 +81,10 @@ class TourStreams:
     """
 
     def __init__(self) -> None:
-        self._streams: dict[str, TourStream] = {}
+        self._streams: dict[str, TourEventQueue] = {}
 
-    def open(self, tour_id: str) -> TourStream:
-        stream = TourStream(tour_id)
+    def open(self, tour_id: str) -> TourEventQueue:
+        stream = TourEventQueue(tour_id)
         self._streams[tour_id] = stream
         return stream
 
@@ -180,14 +180,14 @@ class ChatEndpoint:
         self,
         *,
         installation: Callable[[], InstallationStatus],
-        tours: TourStreams | None = None,
+        tours: TourDestinations | None = None,
     ) -> None:
         self._installation = installation
-        self._tours = tours if tours is not None else TourStreams()
+        self._tours = tours if tours is not None else TourDestinations()
         self._control: TourControl | None = None
 
     @property
-    def destination(self) -> TourStreams:
+    def destination(self) -> TourDestinations:
         """La destination injectée dans la racine de composition (port du noyau)."""
         return self._tours
 

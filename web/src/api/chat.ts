@@ -7,7 +7,7 @@
  */
 
 import { ApiError } from "./errors";
-import type { Fetcher } from "./client";
+import { errorFromResponse, type Fetcher } from "./client";
 
 /** Même plafond que le serveur : un message trop long est refusé avant l'envoi. */
 export const MAX_MESSAGE_CHARS = 4096;
@@ -43,13 +43,7 @@ export async function openTour(
   }
 
   if (!response.ok) {
-    let body: unknown = null;
-    try {
-      body = await response.json();
-    } catch {
-      body = null;
-    }
-    throw ApiError.from(response.status, body);
+    throw await errorFromResponse(response);
   }
   return response;
 }

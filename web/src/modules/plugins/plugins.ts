@@ -7,40 +7,17 @@
  * requis). Le rendu de la zone reste couvert par les parcours navigateur.
  */
 
-import type { BadgeTone } from "../../shared/ui/Badge";
 import type {
   PluginConfigField,
   PluginEntry,
   PluginSecretField,
-  PluginState,
 } from "../../api/plugins";
 
-/** Libellé français d'un état de chargement. */
-export function pluginStateLabel(state: PluginState): string {
-  switch (state) {
-    case "activated":
-      return "Actif";
-    case "failed":
-      return "En échec";
-    case "missing":
-      return "Introuvable";
-    case "disabled":
-      return "Inactif";
-  }
-}
-
-/** Tonalité du badge d'état : l'accent est réservé à l'état actif. */
-export function pluginStateTone(state: PluginState): BadgeTone {
-  switch (state) {
-    case "activated":
-      return "accent";
-    case "failed":
-    case "missing":
-      return "danger";
-    case "disabled":
-      return "neutral";
-  }
-}
+// États de Plugin : une seule source, partagée avec le Diagnostic (C7).
+export {
+  formatPluginState as pluginStateLabel,
+  pluginStateTone,
+} from "../../shared/pluginState";
 
 /** Libellé d'une plateforme déclarée par le manifeste. */
 export function platformLabel(platform: string): string {

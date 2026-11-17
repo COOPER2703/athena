@@ -12,7 +12,15 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from harness import TEST_PASSWORD
+from server.adapters.console.contract import (
+    LOGOUT_ALL_PATH,
+    PASSWORD_PATH,
+    SESSION_PATH,
+)
 from server_harness import running_server
+
+NEW_PASSWORD = "nouveau mot de passe solide"
 
 
 def test_the_production_console_installs_without_a_code_then_stays_closed(
@@ -77,5 +85,80 @@ def test_a_restart_with_an_account_never_reopens_the_setup_route(
                     assert (
                         await response.json()
                     )["error"] == "already_installed"
+
+    asyncio.run(scenario())
+
+
+def test_the_account_can_change_its_password_and_disconnect_everywhere(
+    tmp_path: Path,
+) -> None:
+    """Stories 15 et 16 : le Compte gère son mot de passe et ses navigateurs."""
+
+    async def scenario() -> None:
+        async with running_server(tmp_path) as server:
+            first = await server.install()
+            second = server.console()
+            async with second.post(
+                f"{server.url}/api/login",
+                json={"username": "admin", "password": TEST_PASSWORD},
+            ) as response:
+                assert response.status == 200, await response.text()
+
+            # Mauvais mot de passe actuel : refus stable, Ticket conservé.
+            async with first.post(
+                f"{server.url}{PASSWORD_PATH}",
+                json={
+                    "current_password": "pas le bon",
+                    "new_password": NEW_PASSWORD,
+                },
+            ) as response:
+                assert response.status == 403
+                assert (await response.json())["error"] == "invalid_password"
+
+            # Nouveau mot de passe trop court : le serveur applique sa règle.
+            async with first.post(
+                f"{server.url}{PASSWORD_PATH}",
+                json={"current_password": TEST_PASSWORD, "new_password": "court"},
+            ) as response:
+                assert response.status == 400
+                assert (await response.json())["error"] == "weak_password"
+
+            # Changement réussi : les autres navigateurs sont révoqués.
+            async with first.post(
+                f"{server.url}{PASSWORD_PATH}",
+                json={
+                    "current_password": TEST_PASSWORD,
+                    "new_password": NEW_PASSWORD,
+                },
+            ) as response:
+                assert response.status == 200
+                assert (await response.json())["changed"] is True
+
+            async with second.get(f"{server.url}{SESSION_PATH}") as response:
+                assert (await response.json())["authenticated"] is False
+            async with first.get(f"{server.url}{SESSION_PATH}") as response:
+                assert (await response.json())["authenticated"] is True
+
+            # L'ancien mot de passe ne vaut plus, le nouveau ouvre un Ticket.
+            async with server.console() as fresh:
+                async with fresh.post(
+                    f"{server.url}/api/login",
+                    json={"username": "admin", "password": TEST_PASSWORD},
+                ) as response:
+                    assert response.status == 401
+                async with fresh.post(
+                    f"{server.url}/api/login",
+                    json={"username": "admin", "password": NEW_PASSWORD},
+                ) as response:
+                    assert response.status == 200
+
+            # « Déconnecter partout » révoque le Ticket courant lui-même.
+            async with first.post(f"{server.url}{LOGOUT_ALL_PATH}") as response:
+                assert response.status == 200
+                assert (await response.json())["authenticated"] is False
+            async with first.get(f"{server.url}{SESSION_PATH}") as response:
+                assert (await response.json())["authenticated"] is False
+            async with second.get(f"{server.url}{SESSION_PATH}") as response:
+                assert (await response.json())["authenticated"] is False
 
     asyncio.run(scenario())

@@ -167,10 +167,11 @@ describe("isConversationAvailable", () => {
     expect(isConversationAvailable(undefined)).toBe(false);
   });
 
-  it("la ferme aussi quand la clé enregistrée n'est pas encore chargée", () => {
+  it("reste ouverte quand une clé remplacée attend un redémarrage", () => {
+    // L'ancienne clé est toujours chargée : le Tour aboutit, le bandeau suffit.
     expect(
       isConversationAvailable({ ...COMPLETE, restartRequired: true }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("l'ouvre dès que la clé est utilisable", () => {

@@ -65,4 +65,15 @@ test("un réglage appliqué survit au redémarrage", async ({ page, server }) =>
   await expect(
     page.getByText("Les valeurs affichées sont celles que le serveur utilise maintenant."),
   ).toBeVisible();
+
+  // --- Panneau Compte : les actions existent et « partout » confirme -----
+  await expect(page.getByRole("heading", { name: "Compte" })).toBeVisible();
+  await page.getByRole("button", { name: "Déconnecter partout" }).click();
+  await expect(
+    page.getByText("Confirmez : tous les navigateurs, y compris celui-ci"),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Annuler" }).click();
+  await expect(
+    page.getByRole("button", { name: "Déconnecter partout" }),
+  ).toBeVisible();
 });

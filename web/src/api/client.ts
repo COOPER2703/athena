@@ -37,16 +37,14 @@ export async function requestJson(
     throw new ApiError(0, "network");
   }
 
-  let body: unknown = null;
-  try {
-    body = await response.json();
-  } catch {
-    body = null;
-  }
   if (!response.ok) {
-    throw ApiError.from(response.status, body);
+    throw await errorFromResponse(response);
   }
-  return body;
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
 }
 
 /** Corps JSON prêt à envoyer, avec l'en-tête qui va bien. */
@@ -57,6 +55,24 @@ export function jsonBody(
     body: JSON.stringify(value),
     headers: { "Content-Type": "application/json" },
   };
+}
+
+/**
+ * Transforme une réponse non-2xx en `ApiError`, en lisant son corps JSON.
+ *
+ * Partage la règle de `requestJson` pour les routes qui ne peuvent pas passer
+ * par lui — un flux `text/event-stream` dont seul l'échec est du JSON.
+ */
+export async function errorFromResponse(
+  response: Response,
+): Promise<ApiError> {
+  let body: unknown = null;
+  try {
+    body = await response.json();
+  } catch {
+    body = null;
+  }
+  return ApiError.from(response.status, body);
 }
 
 /** Lit l'état d'identité et d'installation. */
@@ -96,4 +112,33 @@ export async function login(
 /** Révoque le Ticket Console courant ; le serveur efface le cookie. */
 export async function logout(fetcher?: Fetcher): Promise<void> {
   await requestJson("/api/logout", { method: "POST" }, fetcher);
+}
+
+/** Révoque **tous** les Tickets du Compte, y compris celui de ce navigateur. */
+export async function logoutAll(fetcher?: Fetcher): Promise<void> {
+  await requestJson("/api/logout-all", { method: "POST" }, fetcher);
+}
+
+/**
+ * Change le mot de passe du Compte.
+ *
+ * Le Ticket courant survit ; les autres navigateurs du Compte perdent leur
+ * accès immédiatement.
+ */
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+  fetcher?: Fetcher,
+): Promise<void> {
+  await requestJson(
+    "/api/password",
+    {
+      method: "POST",
+      ...jsonBody({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    },
+    fetcher,
+  );
 }

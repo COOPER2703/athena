@@ -15,6 +15,7 @@ import { useAuth } from "../../auth/AuthProvider";
 import { Button } from "../../shared/ui/Button";
 import { Notice } from "../../shared/ui/Notice";
 import { AccessTokensPanel } from "./AccessTokensPanel";
+import { AccountPanel } from "./AccountPanel";
 import {
   changedKeys,
   discardChanges,
@@ -390,6 +391,7 @@ export function SettingsZone() {
         }
       />
       <AccessTokensPanel transportUrl={transportUrl(data)} />
+      <AccountPanel />
 
       <UrlConfirmDialog
         open={confirmation !== null}

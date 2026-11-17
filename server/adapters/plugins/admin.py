@@ -72,8 +72,11 @@ class PluginAdmin:
     # -- Lecture -------------------------------------------------------------
 
     def list(self) -> tuple[list[dict[str, object]], bool]:
-        """Tous les Plugins connus, et l'exigence d'un redémarrage."""
-        self._adopt_catalogue()
+        """Tous les Plugins connus, et l'exigence d'un redémarrage.
+
+        La racine a versé le catalogue dans le registre au démarrage : cette
+        lecture ne mute rien (ADR-0016).
+        """
         persisted = self._state.read()
         statuses = self._secret_statuses()
         rows = [
@@ -84,7 +87,6 @@ class PluginAdmin:
 
     def describe(self, name: str) -> dict[str, object]:
         """Une ligne de Plugin, pour la réponse d'une écriture."""
-        self._adopt_catalogue()
         return self._row(name, self._state.read(), self._secret_statuses())
 
     # -- Écriture ------------------------------------------------------------
@@ -105,7 +107,6 @@ class PluginAdmin:
         effacées. Désactiver un Plugin dont le dossier a disparu reste possible :
         une configuration, elle, exige un manifeste lisible.
         """
-        self._adopt_catalogue()
         persisted = self._state.read()
         if name not in self._known_names(persisted):
             raise PluginAdminError(
@@ -161,17 +162,6 @@ class PluginAdmin:
                 "Le magasin de Secrets n'est pas disponible.",
             )
         return self._secrets
-
-    def _adopt_catalogue(self) -> None:
-        """Verse les métadonnées du catalogue dans le registre, une seule fois.
-
-        Le registre reste ainsi la source unique de ce que la Console décrit :
-        un dossier non listé ou au manifeste cassé y entre aussi, sans que le
-        chargeur ait eu à l'ouvrir.
-        """
-        for entry in self._catalogue.entries():
-            if self._registry.description_of(entry.name) is None:
-                self._registry.describe(entry.description)
 
     def _require_manifest(self, name: str):
         entry = self._catalogue.entry(name)

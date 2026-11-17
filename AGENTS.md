@@ -138,6 +138,12 @@ n'est réinitialisé en silence.
 - Sans clé Gemini, le serveur démarre en **Installation** : transport des Clients, Webhook
   et Gemini ne sont pas démarrés ; la Console, les Réglages et le Diagnostic répondent.
   `GEMINI_API_KEY` n'est plus obligatoire au démarrage.
+- **La fin de l'Installation s'applique sans nouvelle action** : enregistrer la première
+  clé Gemini utilisable ouvre à chaud, dans le processus vivant, le transport des Clients,
+  le Webhook, Gemini, le juge et la Consolidation ; `restart_required` retombe à `false` et
+  la Conversation répond immédiatement. Une clé **remplacée** après installation, elle,
+  attend un redémarrage (`restart_required` vrai) : la Connexion Live garde celle chargée
+  au démarrage, et la Conversation reste utilisable avec l'ancienne jusque-là.
 
 ### Page locale de couplage
 
@@ -246,15 +252,25 @@ route (`/conversation`, `/settings`, `/plugins`, `/diagnostic`), son état vide 
 fichier. Une erreur d'API ne s'affiche jamais brute : tout code stable passe par
 `describeError` (`web/src/api/errors.ts`), qui centralise les phrases françaises.
 Le Ticket Console seul authentifie (cookie `HttpOnly`) ; un `401` de requête ramène à
-`/login` en conservant la route demandée, et les brouillons de saisie passent par
-`useDraft` (stockage de l'onglet) plutôt que par un état global.
+`/login` en conservant la route demandée, et les brouillons de saisie libres (nom d'un
+Jeton, source, etc.) passent par `useDraft` (stockage de l'onglet) plutôt que par un état
+global. Deux exceptions assumées : les formulaires **dérivés du serveur** (Réglages,
+configuration d'un Plugin) gardent un état local qui repart de la signature serveur à
+chaque lecture, et le mot de passe ne passe jamais par `useDraft`.
 
 L'Installation vit dans `web/src/installation/` : parcours guidé Compte → clé maître
-(affichée une seule fois) → clé Gemini (validée, passable) → voix et profil → récapitulatif,
-bannière permanente tant que la clé manque, et Conversation remplacée par un état désactivé.
-La clé maître ne quitte jamais l'état mémoire de l'écran qui l'affiche ; la longueur minimale
-du mot de passe vient de `/api/session`. Une fois l'Installation terminée, l'`IdentityGate`
-route vers l'application et `/installation` se redirige.
+(affichée une seule fois) → clé Gemini (validée, passable) → voix et profil (valeurs
+effectives lues par `GET /api/settings`, passable) → récapitulatif, bannière permanente tant
+que la clé manque, et Conversation remplacée par un état désactivé. Enregistrer la première
+clé active les surfaces sans redémarrage : le parcours mène directement à une Conversation
+utilisable. La clé maître ne quitte jamais l'état mémoire de l'écran qui l'affiche ; la
+longueur minimale du mot de passe vient de `/api/session`. Une fois l'Installation terminée,
+l'`IdentityGate` route vers l'application et `/installation` se redirige.
+
+La Console expose aussi un panneau **Compte** dans la zone Réglages : se déconnecter,
+« déconnecter partout » (confirmation explicite ; tous les Tickets du Compte, y compris
+celui-ci, sont révoqués) et changer le mot de passe (actuel + nouveau + confirmation,
+longueur minimale lue depuis `/api/session` ; les autres navigateurs sont déconnectés).
 
 ### Parcours navigateur (E2E)
 
@@ -269,7 +285,8 @@ réel et aucun réseau externe : le validateur de Secrets et le modèle sont ceu
 - Le superviseur `e2e/server.py` relance le serveur à la même adresse après chaque sortie
   propre (`ATHENA_RESTART_ON_APPLY=1`) : c'est ce qui rend le redémarrage d'un réglage
   observable. Un petit serveur de contrôle, propre au harnais, expose la génération courante
-  et permet de demander un redémarrage (le parcours 1 en a besoin après la clé Gemini).
+  et permet de demander un redémarrage (le parcours 3 s'en sert ; le parcours 1 prouve au
+  contraire que la première clé n'en demande aucun).
 - Chaque parcours démarre **son** serveur : l'ordre d'exécution n'a aucune importance.
 - Chromium : le système (`/usr/bin/chromium`) est utilisé s'il existe, sinon lancez une fois
   `cd web && npx playwright install chromium`. En CI, le job `e2e` installe Chromium avec

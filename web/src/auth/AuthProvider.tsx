@@ -10,7 +10,13 @@ import {
 } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
-import { fetchSession, login, logout, type Credentials } from "../api/client";
+import {
+  fetchSession,
+  login,
+  logout,
+  logoutAll,
+  type Credentials,
+} from "../api/client";
 import { isUnauthorized } from "../api/errors";
 import { onUnauthorized, queryKeys } from "../api/queryClient";
 import { setupAccount } from "../api/setup";
@@ -27,6 +33,8 @@ interface AuthContextValue {
   /** Crée l'unique Compte ; rend la clé maître, à afficher une seule fois. */
   installAccount: (credentials: Credentials) => Promise<string | null>;
   signOut: () => Promise<void>;
+  /** « Déconnecter partout » : révoque tous les Tickets du Compte. */
+  signOutEverywhere: () => Promise<void>;
   signingIn: boolean;
   installing: boolean;
   signingOut: boolean;
@@ -73,6 +81,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     mutationFn: (credentials: Credentials) => setupAccount(credentials),
   });
   const logoutMutation = useMutation({ mutationFn: () => logout() });
+  const logoutAllMutation = useMutation({ mutationFn: () => logoutAll() });
 
   const resetPrivateState = useCallback(() => {
     // Les données du Compte précédent ne doivent jamais réapparaître.
@@ -80,6 +89,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       predicate: (query) => query.queryKey[0] !== queryKeys.session[0],
     });
   }, [queryClient]);
+
+  const leave = useCallback(() => {
+    queryClient.clear();
+    queryClient.setQueryData(queryKeys.session, ANONYMOUS_SESSION);
+    navigate("/login", { replace: true });
+  }, [navigate, queryClient]);
 
   const signIn = useCallback(
     async (credentials: Credentials) => {
@@ -125,10 +140,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         throw reason;
       }
     }
-    queryClient.clear();
-    queryClient.setQueryData(queryKeys.session, ANONYMOUS_SESSION);
-    navigate("/login", { replace: true });
-  }, [logoutMutation, navigate, queryClient]);
+    leave();
+  }, [leave, logoutMutation]);
+
+  const signOutEverywhere = useCallback(async () => {
+    await logoutAllMutation.mutateAsync();
+    leave();
+  }, [leave, logoutAllMutation]);
 
   useEffect(
     () =>
@@ -164,13 +182,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       signIn,
       installAccount,
       signOut,
+      signOutEverywhere,
       signingIn: loginMutation.isPending,
       installing: setupMutation.isPending,
-      signingOut: logoutMutation.isPending,
+      signingOut: logoutMutation.isPending || logoutAllMutation.isPending,
     }),
     [
       installAccount,
       loginMutation.isPending,
+      logoutAllMutation.isPending,
       logoutMutation.isPending,
       sessionQuery.data,
       sessionQuery.error,
@@ -179,6 +199,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setupMutation.isPending,
       signIn,
       signOut,
+      signOutEverywhere,
     ],
   );
 
