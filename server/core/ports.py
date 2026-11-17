@@ -150,6 +150,8 @@ class LlmSocket(Protocol):
 
     async def send_memory(self, session_id: str, text: str) -> None: ...
 
+    async def send_user_text(self, session_id: str, text: str) -> None: ...
+
     async def send_announcement(
         self, session_id: str, text: str, facts: str = ""
     ) -> None: ...
@@ -220,6 +222,84 @@ class JournalEntry:
     text: str
 
 
+@dataclass(frozen=True, slots=True)
+class ThreadEntry:
+    """Une entrée du fil de la Conversation, lue dans le Journal (ADR-0023).
+
+    ``id`` est le curseur stable de pagination (le ``rowid`` du Journal, jamais
+    ``created_at`` qui n'a qu'une seconde de précision). ``origin`` dit d'où
+    vient le tour : ``text`` (Console), ``voice`` (Session vocale) ou ``event``
+    (Annonce proactive) ; ``created_at`` est un horodatage ISO 8601 UTC.
+    """
+
+    id: int
+    role: str
+    origin: str
+    text: str
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadPage:
+    """Une page du fil, du plus ancien au plus récent, et sa rétention."""
+
+    entries: tuple[ThreadEntry, ...]
+    has_more: bool
+    retention_days: int
+
+
+class ThreadReader(Protocol):
+    """Lecture paginée du Journal pour le fil de la Conversation.
+
+    C'est une lecture **dynamique**, pas une extension de l'instantané
+    (ADR-0016 amendé par l'ADR-0023) : l'adaptateur Console ne voit ni la base
+    ni le noyau, la racine de composition lui injecte cette couture.
+    """
+
+    async def recent(
+        self, *, limit: int, before: int | None = None
+    ) -> ThreadPage: ...
+
+
+class TourDestination(Protocol):
+    """Destination d'un Tour, implémentée par la surface qui l'a demandé.
+
+    Les méthodes sont **synchrones et non bloquantes** : le noyau dépose et rend
+    la main, il n'attend jamais un client HTTP. Une destination absente laisse le
+    Tour se dérouler sans être diffusé (même contrat que l'instantané).
+    """
+
+    def text(self, tour_id: str, text: str) -> None: ...
+
+    def audio(self, tour_id: str, data: bytes) -> None: ...
+
+    def tool(
+        self,
+        tour_id: str,
+        name: str,
+        arguments: Mapping[str, object],
+        status: str,
+    ) -> None: ...
+
+    def done(self, tour_id: str, reason: str) -> None: ...
+
+    def failed(self, tour_id: str, code: str) -> None: ...
+
+    def busy(self, tour_id: str) -> None: ...
+
+
+class TourControl(Protocol):
+    """Ce que la Console peut demander au noyau : soumettre ou annuler un Tour.
+
+    La Console ne voit ni le Coordinator ni l'état de Session : elle dépose dans
+    le Canal d'événements unique, comme le fait ``push_event`` pour un Événement.
+    """
+
+    def submit_tour(self, tour_id: str, text: str) -> None: ...
+
+    def cancel_tour(self, tour_id: str) -> None: ...
+
+
 class MemoryStore(Protocol):
     """Async memory port injected into the pure kernel (D2).
 
@@ -235,7 +315,9 @@ class MemoryStore(Protocol):
 
     async def pinned_facts(self, user_id: str) -> list[str]: ...
 
-    async def append_turn(self, user_id: str, role: str, text: str) -> None: ...
+    async def append_turn(
+        self, user_id: str, role: str, text: str, origin: str = ""
+    ) -> None: ...
 
     async def recall(self, user_id: str, query: str) -> list[MemoryHit]: ...
 
@@ -248,6 +330,10 @@ class MemoryStore(Protocol):
     async def journal_entries_since(
         self, user_id: str, since: datetime | None
     ) -> list[JournalEntry]: ...
+
+    async def recent_entries(
+        self, user_id: str, *, limit: int, before: int | None = None
+    ) -> list[ThreadEntry]: ...
 
     async def last_consolidation(self, user_id: str) -> datetime | None: ...
 

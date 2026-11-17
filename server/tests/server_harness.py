@@ -65,6 +65,7 @@ API publique
     ``reply(text="", audio=b"…", heard="…")`` : scripte un tour (texte, audio,
     et/ou transcription de ce que l'utilisateur a dit).
     ``call_tool(name, arguments)`` : scripte un appel de Tool.
+    ``fail()`` : scripte une défaillance (``go_away``) de la Connexion Live.
     ``delay``                       : ralentit les tours scriptés (annulation).
     ``received_audio`` / ``received_texts`` : ce que le serveur a envoyé.
     ``tool_results``               : les résultats de Tools reçus du serveur.
@@ -259,6 +260,10 @@ class _Turn:
     delay: float | None
 
 
+#: Signal ``go_away`` d'une Connexion Live qui se termine (défaillance).
+_GO_AWAY = SimpleNamespace(time_left="0s")
+
+
 class FakeLiveSession:
     """Session Live de test : reçoit les entrées, rend les tours scriptés.
 
@@ -405,6 +410,19 @@ class FakeLiveModel:
             )
         )
         return identifier
+
+    def fail(self, *, delay: float | None = None) -> None:
+        """Scripte une défaillance du modèle (``go_away``) au prochain tour.
+
+        C'est le chemin d'échec d'une Connexion Live : le noyau doit le rendre
+        lisible à la surface (``error``) au lieu de laisser le flux ouvert.
+        """
+        self._turns.put_nowait(
+            _Turn(
+                responses=(SimpleNamespace(go_away=_GO_AWAY),),
+                delay=delay,
+            )
+        )
 
     # --- observation --------------------------------------------------------
 

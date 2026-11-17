@@ -33,6 +33,18 @@ class SendMemoryToLlm:
 
 
 @dataclass(frozen=True, slots=True)
+class SendUserTextToLlm:
+    """Envoie l'entrée d'un Tour texte comme un tour utilisateur complet.
+
+    Distincte de l'injection de mémoire (``turn_complete=False``) : ce contenu
+    **déclenche** la réponse du modèle, une seule fois par Tour.
+    """
+
+    connection_id: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class SendAnnouncementToLlm:
     """Fait prononcer au modèle Live une Annonce proactive (ADR-0007, amendé).
 
@@ -86,6 +98,72 @@ class CancelIdleTimer:
 
 
 @dataclass(frozen=True, slots=True)
+class SendTextToTour:
+    """Texte du Tour, poussé vers la destination qui l'a demandé (ADR-0023)."""
+
+    tour_id: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class SendAudioToTour:
+    """Audio du Tour, PCM 16 bits mono 24 kHz, relayé tel quel."""
+
+    tour_id: str
+    data: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class SendToolCallToTour:
+    """Un Tool appelé pendant le Tour, avec son issue (``ok`` ou ``error``).
+
+    Le noyau ne transmet que le nom, les arguments et l'issue : jamais une
+    valeur de Secret, ni le corps d'un résultat de plugin.
+    """
+
+    tour_id: str
+    name: str
+    arguments: Mapping[str, object] = field(default_factory=dict)
+    status: str = "ok"
+
+
+@dataclass(frozen=True, slots=True)
+class FinishTour:
+    """Fin normale d'un Tour : ``completed``, ``canceled``, ``timeout`` ou ``closed``."""
+
+    tour_id: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class FailTour:
+    """Fin en échec d'un Tour, désignée par un code stable pour la surface."""
+
+    tour_id: str
+    code: str
+
+
+@dataclass(frozen=True, slots=True)
+class RefuseTour:
+    """Le noyau est occupé : le Tour est refusé, sans mise en file."""
+
+    tour_id: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class RefuseSession:
+    """Une Session a été demandée pendant un Tour : refus lisible par le Client.
+
+    Le Protocole partagé reste inchangé : le transport traduit cette Commande en
+    message ``Error`` existant, pour que le daemon affiche le motif.
+    """
+
+    client_id: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class Trace:
     source: str
     kind: str
@@ -98,6 +176,7 @@ Command = Union[
     CloseLiveConnection,
     SendAudioToLlm,
     SendMemoryToLlm,
+    SendUserTextToLlm,
     SendAnnouncementToLlm,
     SendAudioToClient,
     SendToolResultToLlm,
@@ -105,5 +184,12 @@ Command = Union[
     AnnounceSessionEnded,
     StartIdleTimer,
     CancelIdleTimer,
+    SendTextToTour,
+    SendAudioToTour,
+    SendToolCallToTour,
+    FinishTour,
+    FailTour,
+    RefuseTour,
+    RefuseSession,
     Trace,
 ]
