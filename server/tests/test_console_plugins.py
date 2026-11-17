@@ -149,6 +149,30 @@ def test_a_broken_or_unlisted_plugin_is_listed_without_failing_the_startup(
     asyncio.run(scenario())
 
 
+def test_a_stray_config_value_never_prevents_the_startup(tmp_path: Path) -> None:
+    def prepare(paths) -> None:
+        write_plugin(paths.plugins_dir, "alpha")
+        paths.plugins_state.write_text(
+            json.dumps(
+                {"enabled": [], "config": {"alpha": "valeur-inconnue"}}
+            ),
+            encoding="utf-8",
+        )
+
+    async def scenario() -> None:
+        async with running_server(tmp_path, prepare=prepare) as server:
+            http = await server.install()
+            async with http.get(f"{server.url}{PLUGINS_PATH}") as response:
+                assert response.status == 200
+                body = await response.json()
+            [plugin] = body["plugins"]
+            assert plugin["name"] == "alpha"
+            assert plugin["enabled"] is False
+            # La valeur fautive est ignorée, jamais interprétée.
+
+    asyncio.run(scenario())
+
+
 def test_a_missing_plugin_stays_listed_and_can_be_deactivated(
     tmp_path: Path,
 ) -> None:
