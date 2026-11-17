@@ -4,10 +4,10 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { createQueryClient } from "../api/queryClient";
 import { AuthProvider } from "../auth/AuthProvider";
-import { InstallationScreen } from "../auth/InstallationScreen";
 import { LoginScreen } from "../auth/LoginScreen";
 import { ThemeProvider } from "../design/ThemeProvider";
-import { ConversationZone } from "../modules/conversation/ConversationZone";
+import { ConversationRoute } from "../installation/ConversationLocked";
+import { InstallationScreen } from "../installation/InstallationScreen";
 import { DiagnosticZone } from "../modules/diagnostic/DiagnosticZone";
 import { PluginsZone } from "../modules/plugins/PluginsZone";
 import { SettingsZone } from "../modules/settings/SettingsZone";
@@ -40,7 +40,7 @@ export function App() {
                     index
                     element={<Navigate to={defaultZone().path} replace />}
                   />
-                  <Route path="conversation" element={<ConversationZone />} />
+                  <Route path="conversation" element={<ConversationRoute />} />
                   <Route path="settings/*" element={<SettingsZone />} />
                   <Route path="plugins/*" element={<PluginsZone />} />
                   <Route path="diagnostic/*" element={<DiagnosticZone />} />

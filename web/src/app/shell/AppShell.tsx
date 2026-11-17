@@ -5,6 +5,7 @@ import { describeError } from "../../api/errors";
 import { useAuth } from "../../auth/AuthProvider";
 import { ThemeToggle } from "../../design/ThemeToggle";
 import { useTheme } from "../../design/ThemeProvider";
+import { InstallBanner } from "../../installation/InstallBanner";
 import { cn } from "../../shared/cn";
 import { BrandMark, LogOutIcon, SearchIcon } from "../../shared/icons";
 import { Button } from "../../shared/ui/Button";
@@ -210,6 +211,8 @@ export function AppShell() {
             </div>
           </div>
         </header>
+
+        <InstallBanner />
 
         {actionError ? (
           <div className="px-5 pt-4 sm:px-8 lg:px-10">
