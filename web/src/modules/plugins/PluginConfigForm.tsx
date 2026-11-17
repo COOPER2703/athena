@@ -38,7 +38,6 @@ export function PluginConfigForm({ plugin }: { plugin: PluginEntry }) {
   // Une invalidation après écriture remplace les valeurs : le brouillon suit.
   useEffect(() => {
     setDraft(configDraft(fields));
-    setSaved(false);
     // `signature` résume les valeurs enregistrées, pas l'identité de l'objet.
   }, [signature]);
 
@@ -93,6 +92,7 @@ export function PluginConfigForm({ plugin }: { plugin: PluginEntry }) {
             }
             error={fieldsErrors[field.key]}
             onChange={(event) => {
+              setSaved(false);
               setDraft((current) => ({
                 ...current,
                 [field.key]: event.target.value,
