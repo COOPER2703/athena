@@ -140,6 +140,12 @@ les méthodes mutantes (`POST`, `PUT`, `PATCH`, `DELETE`).
 - Le client desktop lit son Jeton dans `ATHENA_ACCESS_TOKEN`, l'envoie au handshake et échoue
   avec un message explicite s'il manque ou est refusé.
 
+Amendé par le ticket #178 : le daemon du Client sert une page locale de couplage en boucle
+locale, où l'URL du serveur et le Jeton se saisissent sans éditer de fichier. Il ne sort plus
+faute de Jeton : un Jeton refusé ou un serveur injoignable laissent la page en vie avec une
+explication, et la connexion se rétablit sans redémarrer le processus. `ATHENA_ACCESS_TOKEN`
+reste une surcharge de processus prioritaire, et le Jeton ne se réaffiche jamais après saisie.
+
 ### Webhook
 
 - Le Jeton de nature **`source`** identifie la Source : c'est lui qui fait autorité.
