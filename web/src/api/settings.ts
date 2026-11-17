@@ -8,7 +8,7 @@
  */
 
 import { jsonBody, requestJson, type Fetcher } from "./client";
-import type { SecretStatus } from "./secrets";
+import { normalizeSecretStatus, type SecretStatus } from "./secrets";
 
 /** Provenance d'une valeur effective, telle que l'interface la montre. */
 export type SettingSource = "default" | "store" | "env";
@@ -190,29 +190,12 @@ function normalizeRestart(raw: unknown, required: boolean): RestartState {
   };
 }
 
-function normalizeSecret(raw: unknown): SecretStatus | null {
-  const record = asRecord(raw);
-  const name = text(record.name).trim();
-  if (name === "") {
-    return null;
-  }
-  const updatedAt = record.updated_at;
-  return {
-    name,
-    configured: record.configured === true,
-    updatedAt:
-      typeof updatedAt === "number" && Number.isFinite(updatedAt)
-        ? updatedAt
-        : null,
-  };
-}
-
 function normalizeSecrets(raw: unknown): SecretStatus[] {
   if (!Array.isArray(raw)) {
     return [];
   }
   return raw.flatMap((entry) => {
-    const secret = normalizeSecret(entry);
+    const secret = normalizeSecretStatus(entry);
     return secret === null ? [] : [secret];
   });
 }
