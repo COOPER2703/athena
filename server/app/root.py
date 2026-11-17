@@ -32,6 +32,7 @@ from server.app.config import (
     default_env_file,
     parse_dotenv,
 )
+from server.app.health import database_sizes
 from server.app.secrets import SecretResolver
 from server.app.trace import build_trace_sink, install_logging_bridge
 from server.core.consolidation import (
@@ -58,6 +59,7 @@ from server.core.commands import (
 )
 from server.core.coordinator import Coordinator
 from server.core.events import Event, EventReceived, ShutdownRequested
+from server.core.health import HealthState, health_snapshot
 from server.core.memory_tools import register_memory_tools
 from server.core.plugins import PluginRegistry
 from server.core.ports import (
@@ -135,6 +137,19 @@ def _trace_consolidation(
         },
         level="debug",
     )
+
+
+def _record_consolidation(
+    health: HealthState, trace_sink: TraceSink, report: ConsolidationReport
+) -> None:
+    """Trace la Consolidation **et** la mémorise pour le bandeau de santé.
+
+    Le planificateur tourne en tâche de fond : la Console ne peut pas attendre
+    un ``await`` sur ``memory.last_consolidation`` dans un instantané synchrone
+    (ADR-0016). Le bilan est donc retenu ici, au passage du rapport.
+    """
+    _trace_consolidation(trace_sink, report)
+    health.record_consolidation(report)
 
 
 class WebhookServer(Protocol):
@@ -250,6 +265,22 @@ class Installation:
             ),
         )
 
+    def describe(self) -> dict[str, object]:
+        """Faits d'Installation de l'instantané, sans Secret (ticket #177).
+
+        Complète ``status()`` de la seule chose qu'il ne porte pas : l'existence
+        du Compte. ``restart_required`` reste la valeur calculée au même moment,
+        pour que l'instantané et la Console ne divergent jamais.
+        """
+        status = self.status()
+        return {
+            "account_exists": self._auth is None or not self._auth.setup_required,
+            "gemini_configured": status.gemini_configured,
+            "complete": status.installation_complete,
+            "secrets_unreadable": status.secrets_unreadable,
+            "restart_required": status.restart_required,
+        }
+
 
 class App:
     """Racine de composition : possède les adaptateurs et la boucle de propriété.
@@ -283,6 +314,11 @@ class App:
         webhook: WebhookServer | None = None,
         console: ConsoleServer | None = None,
         snapshot_config: Mapping[str, object] | None = None,
+        installation: Callable[[], Mapping[str, object]] | None = None,
+        health: HealthState | None = None,
+        databases: Mapping[str, str | Path] | None = None,
+        trace_buffer: Callable[[], Mapping[str, int]] | None = None,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         # Le transport et Gemini peuvent être **absents** : sans clé Gemini,
         # l'instance est en Installation et ces surfaces d'exécution restent
@@ -299,6 +335,16 @@ class App:
         # composition choisit explicitement les clés exposées, pour qu'aucun
         # secret ne puisse s'inviter dans l'instantané par accident.
         self._snapshot_config = dict(snapshot_config or {})
+        # Diagnostic (#177) : l'Installation et la santé sont des lectures, pas
+        # des ports du noyau. La racine injecte les faits ; ``snapshot()`` ne
+        # fait que les assembler, sans ``await`` (ADR-0016).
+        self._installation = installation
+        self._health = health if health is not None else HealthState(now=time.time)
+        self._databases = dict(databases or {})
+        self._trace_buffer = trace_buffer
+        # Uptime : horloge **monotone** injectable, jamais l'horloge de Session.
+        self._monotonic = monotonic if monotonic is not None else time.monotonic
+        self._started_at: float | None = None
         self._plugins = plugins
         # Le registre des Tools est celui du Plugin Registry quand il existe :
         # les Tools du noyau y sont déjà enregistrés (propriétaire ``core``) et
@@ -338,6 +384,13 @@ class App:
     def console(self) -> ConsoleServer | None:
         return self._console
 
+    @property
+    def uptime_seconds(self) -> float:
+        """Secondes écoulées depuis le démarrage (0 avant ``run``)."""
+        if self._started_at is None:
+            return 0.0
+        return max(0.0, self._monotonic() - self._started_at)
+
     def snapshot(self) -> Mapping[str, object]:
         """Instantané de lecture de l'état du noyau, prêt pour le JSON.
 
@@ -345,8 +398,13 @@ class App:
         par le noyau : la Console lit un instantané de lecture et ne peut pas
         atteindre le Coordinator (ADR-0016). Aucun secret : ``config`` ne porte
         que les valeurs explicitement injectées par ``build_app``.
+
+        L'appel est **synchrone** (le diffuseur d'état le fait toutes les
+        secondes) : l'Installation et la santé sont des faits déjà mémorisés, et
+        les tailles des bases se lisent par ``stat``, sans attendre.
         """
         clients = self._transport.clients if self._transport is not None else {}
+        installation, restart_required = self._installation_block()
         return {
             "session": {
                 "state": self._coordinator.state.value,
@@ -366,7 +424,44 @@ class App:
             ],
             "plugins": self._plugin_summaries(),
             "config": dict(self._snapshot_config),
+            "installation": installation,
+            "restart_required": restart_required,
+            "health": health_snapshot(
+                version=str(self._snapshot_config.get("version", "")),
+                uptime_seconds=self.uptime_seconds,
+                state=self._health,
+                databases=database_sizes(self._databases),
+                trace_buffer=(
+                    self._trace_buffer() if self._trace_buffer is not None else None
+                ),
+            ),
         }
+
+    def _installation_block(self) -> tuple[dict[str, object], bool]:
+        """Section ``installation`` et drapeau de redémarrage, sans Secret.
+
+        La liste des clés est fermée : même si — par accident — le fournisseur
+        rendait un champ de plus, il ne passerait pas. ``surfaces`` décrit ce
+        qui tourne réellement dans **ce** processus, ce qui rend visible une clé
+        enregistrée mais pas encore appliquée.
+        """
+        raw = dict(self._installation()) if self._installation is not None else {}
+        restart_required = bool(raw.get("restart_required", False))
+        gemini_running = self._gemini is not None
+        installation = {
+            "account_exists": bool(raw.get("account_exists", True)),
+            "gemini_configured": bool(
+                raw.get("gemini_configured", gemini_running)
+            ),
+            "complete": bool(raw.get("complete", gemini_running)),
+            "secrets_unreadable": bool(raw.get("secrets_unreadable", False)),
+            "surfaces": {
+                "gemini": gemini_running,
+                "transport": self._transport is not None,
+                "webhook": self._webhook is not None,
+            },
+        }
+        return installation, restart_required
 
     def _plugin_summaries(self) -> list[Mapping[str, object]]:
         """Plugins connus, état de chargement et Tools attribués au propriétaire."""
@@ -394,6 +489,9 @@ class App:
         échouer le démarrage avant que le transport ne serve quoi que ce soit,
         et avant la trace ``started``.
         """
+        # Départ de l'uptime : horloge monotone, prise avant tout service pour
+        # que le bandeau de santé mesure la vie du processus, pas la Session.
+        self._started_at = self._monotonic()
         await self._load_plugins()
         await self._warmup_memory()
         if self._transport is not None:
@@ -556,6 +654,7 @@ def build_app(
     clock: Clock | None = None,
     embedder: Embedder | None = None,
     auth_now: Callable[[], float] | None = None,
+    monotonic: Callable[[], float] | None = None,
 ) -> App:
     """Construit explicitement : config → trace → adaptateurs → Coordinator.
 
@@ -569,11 +668,11 @@ def build_app(
     transport, le Webhook et Gemini ne sont pas construits, la Console et ses
     routes de Réglages et de Secrets restent servies (ADR-0025).
 
-    ``live_connect``, ``clock``, ``embedder``, ``auth_now``, ``settings`` et
-    ``secret_validator`` sont les coutures laissées ouvertes au harnais de test
-    serveur : le serveur garde tous ses autres adaptateurs réels (Console, auth,
-    mémoire SQLite), et la configuration effective se remplace sans relancer le
-    processus.
+    ``live_connect``, ``clock``, ``embedder``, ``auth_now``, ``monotonic``,
+    ``settings`` et ``secret_validator`` sont les coutures laissées ouvertes au
+    harnais de test serveur : le serveur garde tous ses autres adaptateurs réels
+    (Console, auth, mémoire SQLite), et la configuration effective se remplace
+    sans relancer le processus.
     """
     # Tampon de traces de la Console : consommateur borné du flux unique, gardé
     # seulement quand la surface est servie. Le fan-out y pousse chaque entrée,
@@ -581,11 +680,18 @@ def build_app(
     console_trace_buffer = (
         TraceBuffer(config.console.trace_buffer) if config.console.enabled else None
     )
+    # Mémoire de santé (#177) : elle écoute le même flux et retient la dernière
+    # erreur, sans ouvrir de second canal. Construite avant le fan-out, qui la
+    # reçoit comme sink supplémentaire.
+    health = HealthState(now=time.time)
+    extra_sinks: list[TraceSink] = [health]
+    if console_trace_buffer is not None:
+        extra_sinks.append(console_trace_buffer)
     trace_sink = build_trace_sink(
         debug_decisions=config.debug_decisions,
         log_dir=config.log_dir,
         level=config.log_level,
-        extra_sinks=[console_trace_buffer] if console_trace_buffer else [],
+        extra_sinks=extra_sinks,
     )
     install_logging_bridge(
         trace_sink,
@@ -714,7 +820,7 @@ def build_app(
             policy=policy,
             now=local_now,
             sleep=asyncio.sleep,
-            on_run=lambda report: _trace_consolidation(trace_sink, report),
+            on_run=lambda report: _record_consolidation(health, trace_sink, report),
         )
 
     # Les Tools du noyau entrent au propriétaire ``core`` ; les plugins activés
@@ -795,6 +901,22 @@ def build_app(
             "log_dir": config.log_dir,
             "version": __version__,
         },
+        # Diagnostic (#177) : l'Installation et la santé sont recomposées à
+        # chaque lecture. Les bases sont nommées ici, une fois pour toutes, dans
+        # l'ordre du bandeau.
+        installation=installation.describe,
+        health=health,
+        databases={
+            "memory": config.memory.db_path,
+            "auth": config.auth.db_path,
+            "settings": config.settings.db_path,
+        },
+        trace_buffer=(
+            console_trace_buffer.stats
+            if console_trace_buffer is not None
+            else None
+        ),
+        monotonic=monotonic,
     )
 
 

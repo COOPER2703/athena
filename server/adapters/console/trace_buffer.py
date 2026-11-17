@@ -113,6 +113,20 @@ class TraceBuffer:
     def subscriber_count(self) -> int:
         return self._subscribers.subscriber_count
 
+    @property
+    def capacity(self) -> int:
+        """Borne du Tampon : le nombre maximal de Traces rejouées."""
+        return self._capacity
+
+    @property
+    def size(self) -> int:
+        """Traces actuellement conservées (au plus ``capacity``)."""
+        return len(self._entries)
+
+    def stats(self) -> dict[str, int]:
+        """Borne et occupation, pour le bandeau de santé de la Console."""
+        return {"size": self.size, "capacity": self.capacity}
+
     def emit(self, entry: TraceEntry) -> None:
         """Point d'entrée du fan-out : conserve puis diffuse l'entrée."""
         self._entries.append(entry)

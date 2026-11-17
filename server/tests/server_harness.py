@@ -57,8 +57,9 @@ API publique
                                    Console (``hello``, backlog, trames suivantes).
     ``read_sse(response)``       : lit un flux ``text/event-stream`` (Tours texte).
     ``trace_log()`` / ``read_log()`` : le journal ``logs/server.log`` déjà lu.
+    ``status()``                  : l'instantané étendu de ``GET /api/status``.
     ``query(db, sql)``           : lecture SQL d'une des bases du serveur.
-    ``emit_log(logger, message)``: émet une entrée de logging dans le flux.
+    ``emit_log(logger, message, level=…)``: émet une entrée de logging dans le flux.
     ``wait_until()``             : attente courte d'une condition synchrone.
 
 ``FakeLiveModel`` — le modèle Live de test
@@ -138,6 +139,13 @@ from server.core.ports import SecretResolver, SecretStore, SecretValidator
 
 # Logs du harnais : même niveau que la configuration par défaut.
 _LOG_LEVEL = "INFO"
+_LOGGING_LEVELS = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+    "critical": logging.CRITICAL,
+}
 _TRACE_LINE = re.compile(
     r"^\S+ +(?P<level>[A-Z]+) +\[(?P<source>[^\]]+)\] +(?P<kind>\S+)"
     r"(?: (?P<payload>\{.*\}))?$"
@@ -883,9 +891,19 @@ class AthenaServer:
             return ""
         return self.paths.log_file.read_text(encoding="utf-8")
 
-    def emit_log(self, logger: str, message: str) -> None:
+    def emit_log(self, logger: str, message: str, *, level: str = "info") -> None:
         """Émet une entrée de logging dans le flux unique (trace ``logger``)."""
-        logging.getLogger(logger).info(message)
+        logging.getLogger(logger).log(
+            _LOGGING_LEVELS[level], message
+        )
+
+    # --- instantané ---------------------------------------------------------
+
+    async def status(self) -> dict[str, Any]:
+        """``GET /api/status``, Ticket Console compris (instantané étendu)."""
+        async with self.http.get(f"{self.url}/api/status") as response:
+            assert response.status == 200, await response.text()
+            return await response.json()
 
     # --- bases --------------------------------------------------------------
 
@@ -1114,6 +1132,7 @@ async def running_server(
         clock=clock,
         embedder=FakeEmbedder(),
         auth_now=clock,
+        monotonic=clock,
     )
     runner = asyncio.create_task(app.run())
     server = AthenaServer(
