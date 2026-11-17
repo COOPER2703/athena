@@ -295,6 +295,51 @@ def test_a_key_from_the_process_environment_opens_the_surfaces(
     asyncio.run(scenario())
 
 
+def test_the_secret_routes_are_write_only_and_require_the_console_ticket(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with running_server(tmp_path, gemini_key="") as server:
+            http = await server.install()
+
+            # Sans Ticket, ni lecture ni écriture (instance installée).
+            async with server.anonymous() as anonymous:
+                async with anonymous.get(f"{server.url}{SECRETS_PATH}") as response:
+                    assert response.status == 401
+                async with anonymous.put(
+                    f"{server.url}{_secret_path('GEMINI_API_KEY')}",
+                    json={"value": "valeur"},
+                ) as response:
+                    assert response.status == 401
+
+            async with http.put(
+                f"{server.url}{_secret_path('GEMINI_API_KEY')}",
+                json={"value": "   "},
+            ) as response:
+                assert response.status == 400
+                assert (await response.json())["fields"]["value"]
+
+            async with http.put(
+                f"{server.url}{_secret_path('minuscule')}",
+                json={"value": "valeur"},
+            ) as response:
+                assert response.status == 400
+                assert (await response.json())["error"] == "invalid_secret_name"
+
+            async with http.put(
+                f"{server.url}{_secret_path('GEMINI_API_KEY')}",
+                json={"value": GEMINI_KEY},
+            ) as response:
+                assert response.status == 200
+
+            async with http.get(f"{server.url}{SECRETS_PATH}") as response:
+                body = await response.json()
+            assert "value" not in body["secrets"][0]
+            assert GEMINI_KEY not in repr(body)
+
+    asyncio.run(scenario())
+
+
 def test_a_lost_master_key_is_reported_and_secrets_can_be_entered_again(
     tmp_path: Path,
 ) -> None:

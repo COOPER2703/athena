@@ -40,6 +40,32 @@ class SecretStatus:
     updated_at: float | None = None
 
 
+class SettingsStore(Protocol):
+    """Port du magasin de réglages : valeurs JSON et métadonnées (ADR-0024).
+
+    Le noyau ne connaît ni SQL ni le chiffrement. Le ticket #174 lit ces
+    valeurs pour calculer la source de chaque champ et les changements en
+    attente ; la Console ne fait qu'écrire, et l'application passe par un
+    redémarrage.
+    """
+
+    def value(self, key: str) -> str | None:
+        """Valeur enregistrée pour un champ, ou ``None``."""
+        ...
+
+    def values(self) -> Mapping[str, str]:
+        """Toutes les valeurs enregistrées, triées par nom de champ."""
+        ...
+
+    def set_value(self, key: str, value: str) -> None:
+        """Enregistre une valeur et sa date de mise à jour."""
+        ...
+
+    def delete_value(self, key: str) -> bool:
+        """Revient au défaut en effaçant la valeur ; ``False`` si absente."""
+        ...
+
+
 class SecretStore(Protocol):
     """Port du magasin de Secrets, en **écriture seule** côté surface.
 
