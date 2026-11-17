@@ -3,17 +3,13 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import sys
-import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import client.__main__ as main_module
-from client.__main__ import _build_app, _enter_loop, cli, main
-from client.app import ClientApp
-from client.config import AppConfig
-from client.wake_word import WakeWordUnavailableError
-from client.ws_client import MissingAccessTokenError
+from client.__main__ import _enter_loop, cli, main
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -35,121 +31,50 @@ class FailingApp:
         raise RuntimeError("transport down")
 
 
-def test_build_app_returns_client_app(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ATHENA_ACCESS_TOKEN", "ath_secret")
-    monkeypatch.setenv("ATHENA_WAKE_WORD", "0")
-    app = _build_app(AppConfig())
-    assert isinstance(app, ClientApp)
-
-
-def test_build_app_builds_the_detector_from_the_wake_word_config(
+def test_main_starts_the_page_daemon_without_a_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("ATHENA_ACCESS_TOKEN", "ath_secret")
-    monkeypatch.setenv("ATHENA_WAKE_WORD", "1")
-    calls: list[object] = []
+    events: list[str] = []
 
-    class RecordingDetector:
-        @classmethod
-        def from_config(cls, cfg: object) -> "RecordingDetector":
-            calls.append(cfg)
-            return cls()
+    class FakeDaemon:
+        def __init__(self, cfg: object, store: object) -> None:
+            events.append("init")
 
-        def process(self, chunk: bytes) -> None:
+        async def start(self) -> None:
+            events.append("start")
+
+        async def stop(self) -> None:
+            events.append("stop")
+
+        async def tap(self) -> None:
             return None
 
-        def close(self) -> None:
-            pass
+    monkeypatch.setattr(main_module, "ClientDaemon", FakeDaemon)
+    monkeypatch.setattr(
+        main_module, "SettingsStore", lambda path: SimpleNamespace(path=path)
+    )
+    monkeypatch.setattr(sys, "stdin", FakeStdin([]))
 
-    monkeypatch.setattr(main_module, "OpenWakeWordDetector", RecordingDetector)
-    cfg = AppConfig()
+    stop = asyncio.Event()
+    stop.set()
+    asyncio.run(main(stop))
 
-    _build_app(cfg)
-
-    assert calls == [cfg.wake_word]
-
-
-def test_build_app_refuses_to_start_without_an_access_token(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("ATHENA_ACCESS_TOKEN", raising=False)
-    with pytest.raises(MissingAccessTokenError) as excinfo:
-        _build_app(AppConfig())
-    assert "ATHENA_ACCESS_TOKEN" in str(excinfo.value)
+    assert events == ["init", "start", "stop"]
 
 
-def test_cli_reports_a_missing_access_token(
+def test_cli_reports_an_unavailable_page(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.delenv("ATHENA_ACCESS_TOKEN", raising=False)
-    with pytest.raises(SystemExit) as excinfo:
-        cli()
-    assert excinfo.value.code == 2
-    assert "ATHENA_ACCESS_TOKEN" in capsys.readouterr().err
+    async def failing(shutdown: object = None) -> None:
+        raise OSError("address already in use")
 
-
-def test_build_app_does_not_load_a_detector_when_wake_word_is_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("ATHENA_ACCESS_TOKEN", "ath_secret")
-    monkeypatch.setenv("ATHENA_WAKE_WORD", "0")
-
-    def fail(*args: object, **kwargs: object) -> None:
-        raise AssertionError("la Veille coupée ne doit pas charger de modèle")
-
-    monkeypatch.setattr(main_module, "OpenWakeWordDetector", fail)
-
-    app = _build_app(AppConfig())
-
-    assert isinstance(app, ClientApp)
-
-
-def test_cli_reports_an_unavailable_wake_word(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setenv("ATHENA_ACCESS_TOKEN", "ath_secret")
-
-    def fail(cfg: AppConfig) -> None:
-        raise WakeWordUnavailableError(
-            "Modèle de Wake word introuvable : /tmp/manquant.onnx."
-        )
-
-    monkeypatch.setattr(main_module, "_build_app", fail)
+    monkeypatch.setattr(main_module, "main", failing)
 
     with pytest.raises(SystemExit) as excinfo:
         cli()
 
     assert excinfo.value.code == 2
-    assert "/tmp/manquant.onnx" in capsys.readouterr().err
-
-
-def test_cli_exits_2_when_the_real_model_constructor_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    model = tmp_path / "athena.onnx"
-    model.write_bytes(b"corrupted")
-    monkeypatch.setenv("ATHENA_ACCESS_TOKEN", "ath_secret")
-    monkeypatch.setenv("ATHENA_WAKE_WORD", "1")
-    monkeypatch.setenv("ATHENA_WAKE_WORD_MODEL", str(model))
-
-    module = types.ModuleType("openwakeword.model")
-
-    def broken_model(**kwargs: object) -> None:
-        raise RuntimeError("ONNX runtime: modèle illisible")
-
-    module.Model = broken_model
-    monkeypatch.setitem(sys.modules, "openwakeword.model", module)
-
-    with pytest.raises(SystemExit) as excinfo:
-        cli()
-
-    assert excinfo.value.code == 2
-    err = capsys.readouterr().err
-    assert "Veille indisponible" in err
-    assert "athena.onnx" in err
-    assert "Traceback" not in err
+    assert "Page de couplage indisponible" in capsys.readouterr().err
 
 
 def test_entrypoints_are_exposed() -> None:
@@ -164,7 +89,7 @@ def test_enter_loop_survives_tap_failure(
     monkeypatch.setattr(sys, "stdin", FakeStdin(["\n", "\n", "\n"]))
 
     with caplog.at_level("ERROR", logger="athena.client"):
-        asyncio.run(_enter_loop(app))
+        asyncio.run(_enter_loop(app))  # type: ignore[arg-type]
 
     assert app.taps == 3
     assert any(record.levelname == "ERROR" for record in caplog.records)

@@ -49,13 +49,17 @@ définitivement dès que le Compte existe.
 Dans un second terminal :
 
 ```sh
-export ATHENA_ACCESS_TOKEN=ath_…   # Jeton de nature client
 python -m client
 ```
 
-Sans cette variable, le Client refuse de démarrer et nomme `ATHENA_ACCESS_TOKEN` ; avec un
-Jeton absent, révoqué ou de nature `source`, le serveur refuse le handshake par `401` et le
-Client affiche un message explicite.
+Ouvrir ensuite `http://127.0.0.1:8768`, y saisir l'URL du serveur et un Jeton de nature
+`client` : la page locale enregistre le couplage dans un fichier privé et reconnecte le
+daemon sans redémarrage. `export ATHENA_ACCESS_TOKEN=ath_…` reste une surcharge de
+processus prioritaire pour un poste administré par l'environnement.
+
+Sans Jeton, le Client démarre quand même et affiche cette page. Avec un Jeton révoqué ou de
+nature `source`, le serveur refuse le handshake par `401` : la page explique le refus, le
+daemon reste vivant et une nouvelle saisie (ou « Reconnecter ») relance l'essai.
 
 La **Veille** est active par défaut. Le chargement du modèle précède l'ouverture du micro
 et apparaît dans le terminal du client :

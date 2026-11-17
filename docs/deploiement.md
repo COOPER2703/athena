@@ -292,13 +292,16 @@ Invariants :
 4. Ouvrir `https://athena.cooper-host.com`, revendiquer l'instance avec ce code, définir le
    mot de passe (12 caractères minimum, Argon2id).
 5. Créer les Jetons d'accès depuis la Console :
-   - nature **`client`** → pour le Client desktop, qui lit `ATHENA_ACCESS_TOKEN` dans son
-     environnement de processus ;
+   - nature **`client`** → pour le Client desktop, saisi sur sa page locale de couplage
+     (ou fourni par `ATHENA_ACCESS_TOKEN` dans son environnement de processus) ;
    - nature **`source`** → pour chaque source du Webhook, une par émetteur (le jeton
      identifie la source ; une source contradictoire dans le corps est refusée `403`).
 
-Le Client desktop se configure avec `WS_SERVER_URL=wss://athena.cooper-host.com/ws` — TLS
-puisque le jeton voyage en en-tête `Authorization`.
+Le Client desktop se configure depuis sa page locale de couplage —
+`http://127.0.0.1:8768` par défaut (`ATHENA_CLIENT_HOST` / `ATHENA_CLIENT_PORT`) — en y
+saisissant `wss://athena.cooper-host.com/ws` et le Jeton. TLS reste requis hors boucle
+locale puisque le Jeton voyage en en-tête `Authorization`. `WS_SERVER_URL` et
+`ATHENA_ACCESS_TOKEN` restent des surcharges de processus prioritaires.
 
 ---
 

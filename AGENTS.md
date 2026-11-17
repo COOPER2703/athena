@@ -72,8 +72,34 @@ Les deux mécanismes de credential (ADR-0017) :
   `401` + `WWW-Authenticate: Bearer`, avant toute trame. Le Webhook
   (`ATHENA_WEBHOOK_ENABLED` / `ATHENA_WEBHOOK_HOST` / `ATHENA_WEBHOOK_PORT`) exige un Jeton
   `source` ; sa Source fait autorité et une Source de corps contradictoire est refusée `403`.
-- **Client desktop** : lit son Jeton dans `ATHENA_ACCESS_TOKEN` (variable de processus
-  uniquement, pas de `.env` client) et refuse de démarrer s'il manque.
+- **Client desktop** : le Jeton se saisit sur la **page locale de couplage** du daemon, ou
+  reste fourni par `ATHENA_ACCESS_TOKEN` (surcharge de processus prioritaire). Il part au
+  handshake en `Authorization: Bearer` et n'est jamais réaffiché.
+
+### Page locale de couplage
+
+Le daemon du Client desktop (`python -m client`) sert une page de couplage en boucle locale
+avant même de joindre Athena. On y saisit l'URL du serveur et le Jeton d'accès, on voit
+l'état du micro, du Wake word et de la connexion, et on peut demander une reconnexion. Un
+Jeton refusé, un serveur injoignable ou un micro absent laissent la page en vie avec une
+explication : le daemon ne sort plus faute de Jeton, et un Jeton invalide se corrige sans
+redémarrer le processus.
+
+- `ATHENA_CLIENT_HOST` / `ATHENA_CLIENT_PORT` : `127.0.0.1:8768` par défaut. Ne pas ouvrir
+  au réseau : la page écrit un Jeton.
+- `ATHENA_CLIENT_CONFIG` : fichier de couplage, `$XDG_CONFIG_HOME/athena/client.json`
+  (`~/.config/athena/client.json`) par défaut, écrit en `0600` dans un dossier `0700`.
+- Précédence : environnement (`ATHENA_ACCESS_TOKEN`, `WS_SERVER_URL`) > fichier > défaut
+  `ws://localhost:8765`. Un champ imposé par l'environnement est en lecture seule dans la
+  page, qui en affiche la provenance.
+- La page refuse `403` tout `Host` non local et tout `Origin` qui ne correspond pas à
+  l'hôte de la requête. Le Jeton n'apparaît ni dans le HTML, ni dans `GET /api/state`, ni
+  dans la réponse d'un couplage : l'état public est une liste blanche de champs, le Jeton
+  n'y figure jamais.
+
+Routes : `GET /` (page autonome, sans ressource externe), `GET /api/state`,
+`POST /api/coupling` (URL, Jeton facultatif — vide conserve le Jeton enregistré),
+`POST /api/reconnect`.
 
 ### Créer un plugin
 

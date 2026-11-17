@@ -124,9 +124,36 @@ class WakeWordConfig:
     )
 
 
+def _default_coupling_path() -> Path:
+    """Fichier de couplage : ``XDG_CONFIG_HOME`` ou ``~/.config``."""
+    root = os.getenv("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(root) / "athena" / "client.json"
+
+
+@dataclass(frozen=True, slots=True)
+class PageConfig:
+    """Page locale de couplage, servie en boucle locale.
+
+    L'hôte par défaut reste ``127.0.0.1`` : la page écrit un Jeton d'accès, elle
+    ne doit pas être joignable depuis le réseau. Le fichier de couplage est
+    privé et survit au redémarrage du daemon.
+    """
+
+    host: str = field(
+        default_factory=lambda: _get_env("ATHENA_CLIENT_HOST", "127.0.0.1")
+    )
+    port: int = field(default_factory=lambda: _get_int("ATHENA_CLIENT_PORT", 8768))
+    config_path: Path = field(
+        default_factory=lambda: _get_path(
+            "ATHENA_CLIENT_CONFIG", _default_coupling_path()
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class AppConfig:
     audio: AudioConfig = field(default_factory=AudioConfig)
     client: ClientConfig = field(default_factory=ClientConfig)
     wake_word: WakeWordConfig = field(default_factory=WakeWordConfig)
+    page: PageConfig = field(default_factory=PageConfig)
     log_level: str = field(default_factory=lambda: _get_env("LOG_LEVEL", "INFO"))

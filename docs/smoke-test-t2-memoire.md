@@ -16,7 +16,8 @@ Toutes les commandes de ce document se lancent **depuis la racine du dépôt**
 - Les dépendances mémoire pré-installées : `sentence-transformers`, `sqlite-vec`,
   `numpy` (modèle local `all-MiniLM-L6-v2` en cache).
 - Un **Compte** et un **Jeton d'accès** de nature `client` (ADR-0017), créés comme au smoke
-  test T1 : le Client exige `ATHENA_ACCESS_TOKEN`.
+  test T1 : le Client l'accepte depuis sa page locale de couplage ou via
+  `ATHENA_ACCESS_TOKEN`.
 
 Créez un fichier `.env` à la racine du dépôt (lu par le serveur) :
 
