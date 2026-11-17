@@ -90,6 +90,25 @@ n'est réinitialisé en silence.
 
 - `GET /api/session` expose `setup_required` (aucun Compte), `authenticated`, `username`,
   `gemini_configured`, `installation_complete`, `restart_required`, `secrets_unreadable`.
+- `GET /api/settings` rend chaque réglage avec sa valeur **effective** (celle que le
+  processus a chargée), son défaut, sa source (`default` | `store` | `env`), ses bornes et
+  ses valeurs autorisées, `pending` / `pending_value`, la liste `pending`, un objet
+  `restart`, la liste `surfaces` (`name`, `host`, `port`, `scheme`, `url` active) et les
+  Secrets par nom (`configured`, `updated_at`, jamais de valeur).
+  `PUT /api/settings` reçoit `{values: {champ: texte}, confirm_url?}`, exige l'objet
+  **complet** des champs éditables non masqués, valide tout avant la première écriture et
+  rend les erreurs par champ dans `fields` (`error: invalid_settings`, `400`).
+- Un champ masqué par l'environnement est en lecture seule et un `PUT` qui le change est
+  refusé ; renvoyer sa valeur courante est accepté sans rien écrire. Les chemins des bases,
+  des Plugins et des journaux sont refusés par nom, jamais seulement par valeur.
+- Un changement d'`hôte` ou de `port` (Console, Webhook, transport) exige `confirm_url`
+  égal à l'URL calculée (`http://hôte:port` pour la Console et le Webhook, `ws://hôte:port`
+  pour le transport ; une liste si plusieurs surfaces changent).
+- **Changements en attente** = écart entre le magasin et la configuration chargée au
+  démarrage ; une valeur égale au défaut efface l'entrée du magasin. L'application passe par
+  un redémarrage : `ATHENA_RESTART_ON_APPLY=1` fait sortir proprement le processus (le
+  superviseur le relance), sinon `GET/PUT` exposent `restart.required` et la commande
+  exacte `ATHENA_RESTART_COMMAND` (`docker restart athena` par défaut).
 - `GET /api/secrets` : noms, `configured`, `updated_at`, jamais de valeur.
   `PUT /api/secrets/{nom}` valide la clé Gemini par un appel réel
   (`count_tokens`) avant de l'enregistrer ; `DELETE /api/secrets/{nom}` l'efface.

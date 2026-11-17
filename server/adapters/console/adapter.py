@@ -36,6 +36,7 @@ from server.adapters.console.contract import (
     PASSWORD_PATH,
     SECRETS_PATH,
     SESSION_PATH,
+    SETTINGS_PATH,
     SETUP_PATH,
     STATUS_PATH,
     STREAM_PATH,
@@ -43,6 +44,7 @@ from server.adapters.console.contract import (
 )
 from server.adapters.console.events import EventInjection
 from server.adapters.console.secrets import SecretsRoutes
+from server.adapters.console.settings import SettingsRoutes
 from server.adapters.console.status import (
     DEFAULT_STATUS_INTERVAL,
     StatusBroadcaster,
@@ -134,6 +136,7 @@ class ConsoleAdapter:
         auth: AuthService | None = None,
         secrets: SecretStore | None = None,
         secret_validator: SecretValidator | None = None,
+        settings: SettingsRoutes | None = None,
         installation: Callable[[], InstallationStatus] | None = None,
         master_key: Callable[[], str | None] | None = None,
     ) -> None:
@@ -155,6 +158,10 @@ class ConsoleAdapter:
         self._secrets_routes = SecretsRoutes(
             secrets=secrets, validator=secret_validator
         )
+        # Les Réglages (ticket #174) reçoivent leurs couches figées au démarrage
+        # et le magasin : l'adaptateur ne relit ni l'environnement ni la
+        # configuration, il rend l'état que la racine lui a décrit.
+        self._settings_routes = settings
         self._chat = ChatEndpoint(installation=self._installation)
         # Cadence du tick qui pousse les changements d'instantané. Le tick est
         # une tâche de fond possédée par l'adaptateur : jamais sur le chemin
@@ -296,6 +303,11 @@ class ConsoleAdapter:
         app.router.add_delete(
             f"{SECRETS_PATH}/{{name}}", self._secrets_routes.handle_delete
         )
+        # Réglages : la lecture rend la valeur effective et sa source, l'écriture
+        # remplace l'objet complet puis annonce ce qui attend un redémarrage.
+        if self._settings_routes is not None:
+            app.router.add_get(SETTINGS_PATH, self._settings_routes.handle_get)
+            app.router.add_put(SETTINGS_PATH, self._settings_routes.handle_put)
         # Conversation : refusée côté serveur tant que l'Installation n'est pas
         # terminée ; le ticket #172 remplace ce refus par le flux du Tour.
         app.router.add_post(CHAT_PATH, self._chat.handle)

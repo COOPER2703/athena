@@ -9,6 +9,7 @@ from typing import Awaitable, Callable, Mapping, Protocol
 from server import __version__
 from server.adapters.auth import SqliteAuthStore
 from server.adapters.console import ConsoleAdapter
+from server.adapters.console.settings import SettingsRoutes
 from server.adapters.console.trace_buffer import TraceBuffer
 from server.adapters.gemini import (
     GeminiEventJudge,
@@ -23,13 +24,15 @@ from server.adapters.memory import (
 )
 from server.adapters.plugins import PluginLoader
 from server.adapters.settings import LayeredSecretResolver, SqliteSettingsStore
-from server.adapters.trace import emit
+from server.adapters.trace import NullTraceSink, emit
 from server.adapters.transport import ClientConnection, WebSocketTransport
 from server.adapters.webhook import WebhookAdapter
 from server.app.clock import AsyncioClock
 from server.app.config import (
     AppConfig,
+    config_with_stored_settings,
     default_env_file,
+    loaded_settings,
     parse_dotenv,
 )
 from server.app.secrets import SecretResolver
@@ -69,10 +72,12 @@ from server.core.ports import (
     MissingSecretError,
     SecretStore,
     SecretValidator,
+    SettingsStore,
+    TraceEntry,
     TraceSink,
 )
 from server.core.session_tools import register_session_tools
-from server.core.settings import GEMINI_SECRET
+from server.core.settings import GEMINI_SECRET, SettingsView
 from server.core.tools import ToolRegistry
 
 _TRACE_SOURCE = "app"
@@ -203,6 +208,26 @@ class ConsoleServer(Protocol):
     ) -> None: ...
 
     async def stop(self) -> None: ...
+
+
+class _DeferredTraceSink:
+    """Relais du flux de traces, branché après la configuration effective.
+
+    Le magasin de réglages est construit avant le fan-out — il porte
+    ``log_level`` — mais il ne peut recevoir son consommateur qu'une fois la
+    configuration effective calculée. Ce relais garde cet ordre sans perdre
+    d'entrée : la clé maître et la connexion SQLite du magasin sont paresseuses,
+    donc rien n'est émis avant ``attach``.
+    """
+
+    def __init__(self) -> None:
+        self._sink: TraceSink = NullTraceSink()
+
+    def attach(self, sink: TraceSink) -> None:
+        self._sink = sink
+
+    def emit(self, entry: TraceEntry) -> None:
+        self._sink.emit(entry)
 
 
 class Installation:
@@ -556,6 +581,7 @@ def build_app(
     clock: Clock | None = None,
     embedder: Embedder | None = None,
     auth_now: Callable[[], float] | None = None,
+    restart: Callable[[], None] | None = None,
 ) -> App:
     """Construit explicitement : config → trace → adaptateurs → Coordinator.
 
@@ -573,50 +599,22 @@ def build_app(
     ``secret_validator`` sont les coutures laissées ouvertes au harnais de test
     serveur : le serveur garde tous ses autres adaptateurs réels (Console, auth,
     mémoire SQLite), et la configuration effective se remplace sans relancer le
-    processus.
+    processus. ``restart`` remplace la sortie propre demandée par
+    l'application des Réglages : le harnais observe le redémarrage sans tuer
+    pytest.
     """
-    # Tampon de traces de la Console : consommateur borné du flux unique, gardé
-    # seulement quand la surface est servie. Le fan-out y pousse chaque entrée,
-    # tous niveaux confondus (ADR-0004).
-    console_trace_buffer = (
-        TraceBuffer(config.console.trace_buffer) if config.console.enabled else None
-    )
-    trace_sink = build_trace_sink(
-        debug_decisions=config.debug_decisions,
-        log_dir=config.log_dir,
-        level=config.log_level,
-        extra_sinks=[console_trace_buffer] if console_trace_buffer else [],
-    )
-    install_logging_bridge(
-        trace_sink,
-        level="DEBUG" if config.debug_decisions else config.log_level,
-    )
-
-    # Authentification applicative : base dédiée, comme la mémoire, et jamais
-    # de secret par défaut. Les surfaces reçoivent ce service par leur
-    # constructeur : Console, transport et Webhook partagent le même store,
-    # donc la révocation vaut partout sans redémarrage (ADR-0017).
-    auth = SqliteAuthStore(
-        db_path=config.auth.db_path,
-        trace_sink=trace_sink,
-        now=auth_now if auth_now is not None else time.time,
-        ticket_ttl_seconds=config.auth.ticket_days * 24 * 60 * 60,
-        ticket_refresh_seconds=config.auth.ticket_refresh_seconds,
-        password_min_length=config.auth.password_min_length,
-        login_max_attempts=config.auth.login_max_attempts,
-        login_block_seconds=config.auth.login_block_minutes * 60,
-    )
-
     # Magasin de réglages et de Secrets (ADR-0024) : base dédiée à côté de la
-    # mémoire et de l'auth. Construit avant les adaptateurs qui le lisent, et
-    # remplaçable en test sans relancer le processus.
+    # mémoire et de l'auth. Il précède le flux de traces — il porte
+    # ``log_level`` — et reçoit un relais dont la cible n'est connue qu'après
+    # l'application du magasin.
+    settings_sink = _DeferredTraceSink()
     settings_store: SecretStore = (
         settings
         if settings is not None
         else SqliteSettingsStore(
             db_path=config.settings.db_path,
             key_path=config.settings.master_key_file,
-            trace_sink=trace_sink,
+            trace_sink=settings_sink,
         )
     )
 
@@ -639,10 +637,45 @@ def build_app(
         or config.gemini.api_key
     ).strip()
     gemini_enabled = bool(api_key)
-    # La configuration effective, gelée au démarrage : c'est la référence des
-    # « changements en attente » du ticket #174.
     config = config.model_copy(
         update={"gemini": config.gemini.model_copy(update={"api_key": api_key})}
+    )
+    # La couche « magasin » s'applique **avant** le premier adaptateur : une
+    # valeur enregistrée prend effet au démarrage, sinon le GET annoncerait une
+    # valeur que le processus n'utilise pas (ADR-0024).
+    config, applied_settings = config_with_stored_settings(
+        config, store=_settings_values(settings_store), process_env=process_env
+    )
+
+    console_trace_buffer = (
+        TraceBuffer(config.console.trace_buffer) if config.console.enabled else None
+    )
+    trace_sink = build_trace_sink(
+        debug_decisions=config.debug_decisions,
+        log_dir=config.log_dir,
+        level=config.log_level,
+        extra_sinks=[console_trace_buffer] if console_trace_buffer else [],
+    )
+    # Le relais rejoint le fan-out : plus aucune entrée du magasin n'est perdue.
+    settings_sink.attach(trace_sink)
+    install_logging_bridge(
+        trace_sink,
+        level="DEBUG" if config.debug_decisions else config.log_level,
+    )
+
+    # Authentification applicative : base dédiée, comme la mémoire, et jamais
+    # de secret par défaut. Les surfaces reçoivent ce service par leur
+    # constructeur : Console, transport et Webhook partagent le même store,
+    # donc la révocation vaut partout sans redémarrage (ADR-0017).
+    auth = SqliteAuthStore(
+        db_path=config.auth.db_path,
+        trace_sink=trace_sink,
+        now=auth_now if auth_now is not None else time.time,
+        ticket_ttl_seconds=config.auth.ticket_days * 24 * 60 * 60,
+        ticket_refresh_seconds=config.auth.ticket_refresh_seconds,
+        password_min_length=config.auth.password_min_length,
+        login_max_attempts=config.auth.login_max_attempts,
+        login_block_seconds=config.auth.login_block_minutes * 60,
     )
 
     # Tools du noyau et Tools de plugin partagent un seul registre : celui du
@@ -753,6 +786,33 @@ def build_app(
     )
     ensure_master_key = getattr(settings_store, "ensure_master_key", None)
 
+    # Réglages : la Console reçoit les couches **figées** du démarrage, pas une
+    # relecture de l'environnement. Le redémarrage est une callable : l'App
+    # n'existe pas encore, la cellule la referme après construction. Une
+    # callable injectée remplace la sortie réelle en test, pour ne pas tuer
+    # pytest — c'est la seule couture de l'application.
+    restart_cell: list[Callable[[], None]] = []
+
+    def request_restart() -> None:
+        if restart is not None:
+            restart()
+        elif restart_cell:
+            restart_cell[0]()
+
+    settings_routes = SettingsRoutes(
+        view=SettingsView(
+            loaded=loaded_settings(config),
+            applied_store=applied_settings,
+            process_env=dict(process_env),
+            dotenv=dict(dotenv),
+        ),
+        store=_settings_store(settings_store),
+        secrets=settings_store,
+        # La présence de la callable est le drapeau : pas de second état.
+        restart=request_restart if config.restart_on_apply else None,
+        restart_command=config.restart_command,
+    )
+
     console: ConsoleAdapter | None = None
     if config.console.enabled:
         console = ConsoleAdapter(
@@ -764,11 +824,12 @@ def build_app(
             auth=auth,
             secrets=settings_store,
             secret_validator=validator,
+            settings=settings_routes,
             installation=installation.status,
             master_key=ensure_master_key,
         )
 
-    return App(
+    app = App(
         transport=transport,
         gemini=gemini,
         clock=clock,
@@ -796,6 +857,27 @@ def build_app(
             "version": __version__,
         },
     )
+    # La cellule est remplie une fois l'App construite : un PUT qui demande le
+    # redémarrage dépose ``ShutdownRequested`` dans la boucle unique.
+    restart_cell.append(app.request_shutdown)
+    return app
+
+
+def _settings_values(store: SecretStore) -> dict[str, str]:
+    """Valeurs du magasin, quand l'objet injecté en est un."""
+    reader = getattr(store, "values", None)
+    return dict(reader()) if callable(reader) else {}
+
+
+def _settings_store(store: SecretStore) -> SettingsStore | None:
+    """Le magasin de réglages, ou ``None`` si l'objet n'en est pas un.
+
+    Réglages et Secrets partagent une base en production ; un test peut
+    injecter un faux qui ne porte que les Secrets. Les routes répondent alors
+    ``503 settings_unavailable`` plutôt que d'inventer un magasin.
+    """
+    required = ("value", "values", "set_value", "delete_value")
+    return store if all(hasattr(store, name) for name in required) else None
 
 
 def _optional_secret(resolver: SecretResolver, name: str) -> str | None:
