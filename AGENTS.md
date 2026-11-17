@@ -103,8 +103,16 @@ n'est réinitialisé en silence.
 - `GET /api/secrets` : noms, `configured`, `updated_at`, jamais de valeur.
   `PUT /api/secrets/{nom}` valide la clé Gemini par un appel réel
   (`count_tokens`) avant de l'enregistrer ; `DELETE /api/secrets/{nom}` l'efface.
-- `POST /api/chat` répond `409 installation_incomplete` tant que la clé Gemini manque
-  (le ticket #172 remplace ce refus par le flux du Tour).
+- `POST /api/chat` ouvre un **Tour** texte (ADR-0023) et répond en
+  `text/event-stream` : événements `text`, `audio` (base64, PCM 16 bits mono 24 kHz),
+  `tool`, `done`, `error` et `busy` ; fermer la réponse annule le Tour. Sans clé Gemini,
+  la route répond toujours `409 installation_incomplete`. Un Tour ne crée aucune Session :
+  `owner_client_id` reste vide et le noyau revient au Repos entre deux Tours. Un seul Tour
+  à la fois : un Tour pendant une Session (ou l'inverse) est refusé avec un motif lisible,
+  côté Console par `busy`, côté Client par le message `Error` existant.
+- `GET /api/thread` lit le **Journal** (origine `text`, `voice` ou `event`, rôle, texte,
+  horodatage ISO UTC, `retention_days`) et pagine par curseur `before` — le `rowid` du
+  Journal, jamais `created_at` qui n'a qu'une seconde de précision.
 - Précédence : **environnement du processus > magasin > `.env` > défauts**, avec la source
   de chaque champ (`server/core/settings.py`). L'environnement masque un champ en lecture
   seule ; les chemins des bases, des Plugins et des journaux sont en lecture seule.

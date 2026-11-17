@@ -12,12 +12,20 @@ from server.core.commands import (
     CancelIdleTimer,
     CloseLiveConnection,
     Command,
+    FailTour,
+    FinishTour,
     OpenLiveConnection,
+    RefuseSession,
+    RefuseTour,
     SendAudioToClient,
     SendAudioToLlm,
     SendAnnouncementToLlm,
+    SendAudioToTour,
     SendMemoryToLlm,
+    SendTextToTour,
+    SendToolCallToTour,
     SendToolResultToLlm,
+    SendUserTextToLlm,
     StartIdleTimer,
     Trace,
 )
@@ -40,6 +48,8 @@ from server.core.events import (
     SessionRequested,
     ShutdownRequested,
     TimerFired,
+    TourCanceled,
+    TourRequested,
 )
 from server.core.plugins import PluginRegistry
 from server.core.ports import EventJudge, Judgment, MemoryStore, ToolSpec
@@ -74,6 +84,10 @@ EVENT_QUEUE_MAX = 120
 # Taille maximale d'un Événement : un contenu plus long est rejeté à l'arrivée
 # (jamais mis en File) et le rejet est tracé.
 EVENT_MAX_CHARS = 4096
+# Garde-fou d'un Tour texte (ADR-0023) : le Tour se referme de lui-même si le
+# modèle ne rend rien, pour que le noyau ne reste jamais occupé par une réponse
+# qui n'arrive pas. Un Tour qui répond se termine bien avant.
+TOUR_TIMEOUT = 30.0
 _MEMORY_HEADER = "[MÉMOIRE]"
 _EVENT_HEADER = "[ÉVÉNEMENTS]"
 # Un contenu externe ne doit jamais pouvoir forger l'en-tête du bloc de faits
@@ -147,6 +161,13 @@ class Coordinator:
         self._judging = False
         self._session_counter = 0
         self._audio_buffer: list[bytes] = []
+        # Tour texte en cours (ADR-0023) : un Tour n'est pas une Session, il ne
+        # franchit jamais ``_become_visible`` et ne possède aucun Client. Le
+        # compteur d'identité est distinct de celui des Sessions pour qu'une
+        # ``LlmClosed`` tardive d'une Session ne referme pas un Tour.
+        self._tour = False
+        self._tour_id = ""
+        self._tour_counter = 0
         self._recent_utterances: list[str] = []
         self._injected_memories: set[str] = set()
         # Identité du Client de référence (Annonce proactive) et File d'attente
@@ -203,6 +224,10 @@ class Coordinator:
             return self._on_client_registered(event)
         if isinstance(event, SessionRequested):
             return await self._on_session_requested(event)
+        if isinstance(event, TourRequested):
+            return await self._on_tour_requested(event)
+        if isinstance(event, TourCanceled):
+            return self._on_tour_canceled(event)
         if isinstance(event, ClientAudio):
             return self._on_client_audio(event)
         if isinstance(event, ClientDisconnected):
@@ -570,11 +595,191 @@ class Coordinator:
         lines = [f"- {cls._safe_fact(event)}" for event in batch]
         return "\n".join([_EVENT_HEADER, *lines])
 
+    async def _on_tour_requested(
+        self, event: TourRequested
+    ) -> list[Command]:
+        """Ouvre un **Tour texte** : une Connexion Live, une réponse, au Repos.
+
+        Le Tour réutilise exactement l'Activation d'une Session — prompt système,
+        instructions de plugin, contexte mémoire, Tools du moment — mais il ne
+        crée aucune Session : ``_visible`` reste faux, ``owner_client_id`` reste
+        vide, et le retour au Repos passe par ``_end_tour``, jamais par
+        ``_teardown``. Un Tour demandé alors que le noyau est occupé est refusé
+        avec un motif lisible, sans mise en file (ADR-0023).
+        """
+        if self._state is not SessionState.IDLE:
+            return [
+                RefuseTour(tour_id=event.tour_id, reason="busy"),
+                self._trace(
+                    "TourRefused",
+                    from_state=self._state,
+                    to_state=self._state,
+                    reason="busy",
+                    extra={"tour_id": event.tour_id},
+                ),
+            ]
+
+        commands: list[Command] = []
+        # Un Tour prime sur la fenêtre d'Événements comme une Session : la
+        # fenêtre se referme, la File reste intacte pour le prochain Repos.
+        if self._window_open:
+            commands.extend(self._cancel_window())
+
+        self._tour_counter += 1
+        self._connection_id = f"t{self._tour_counter}"
+        self._tour_id = event.tour_id
+        self._tour = True
+        self._session_id = ""
+        self._visible = False
+        self._client_id = ""
+        self._auto = False
+        self._judging = False
+        self._announcing = False
+        self._state = SessionState.LIVE_CONNECTING
+        self._recent_utterances = []
+        self._injected_memories = set()
+
+        context = ""
+        if self._memory is not None:
+            context = await self._memory.session_context(self._user_id)
+            self._injected_memories = set(
+                await self._memory.pinned_facts(self._user_id)
+            )
+            # L'entrée entre au Journal **à l'envoi** : un Tour texte n'a pas de
+            # transcription d'entrée, il n'y a pas d'autre moment pour l'écrire.
+            await self._journal("user", event.text, origin="text")
+
+        instruction = self._compose_instruction(
+            self._system_prompt, self._plugin_instruction(), context
+        )
+        commands.append(
+            OpenLiveConnection(
+                connection_id=self._connection_id,
+                instruction=instruction,
+                tools=self._open_tools(),
+            )
+        )
+        commands.append(
+            StartIdleTimer(
+                connection_id=self._connection_id, timeout=TOUR_TIMEOUT
+            )
+        )
+        if self._memory is not None:
+            memory, trace = await self._recall(event.text)
+            commands.append(trace)
+            if memory is not None:
+                commands.append(
+                    SendMemoryToLlm(
+                        connection_id=self._connection_id, text=memory
+                    )
+                )
+        commands.append(
+            SendUserTextToLlm(
+                connection_id=self._connection_id, text=event.text
+            )
+        )
+        commands.append(
+            self._trace(
+                "TourRequested",
+                from_state=SessionState.IDLE,
+                to_state=self._state,
+                extra={
+                    "tour_id": event.tour_id,
+                    "has_context": bool(context),
+                },
+            )
+        )
+        return commands
+
+    def _on_tour_canceled(self, event: TourCanceled) -> list[Command]:
+        """La surface a fermé son flux : le Tour s'arrête, sans réponse écrite."""
+        if not self._owns_tour(event.tour_id):
+            return [
+                self._trace(
+                    "TourCanceled",
+                    from_state=self._state,
+                    to_state=self._state,
+                    level="debug",
+                    stale_tour_id=event.tour_id,
+                )
+            ]
+        return self._end_tour("canceled", kind="TourCanceled")
+
+    def _owns_tour(self, tour_id: str) -> bool:
+        """Une identité de Tour vide n'est pas un joker : seul l'id courant compte."""
+        return self._tour and tour_id != "" and tour_id == self._tour_id
+
+    def _end_tour(
+        self,
+        reason: str,
+        *,
+        kind: str = "TourFinished",
+        cause: str | None = None,
+        failure: str | None = None,
+    ) -> list[Command]:
+        """Chemin unique de fin d'un Tour : fermeture, traces, retour au Repos.
+
+        Distinct de ``_teardown`` (Session) : aucun ``AnnounceSessionEnded``,
+        aucun ``SessionClosed``, et la destination reçoit un ``FinishTour`` ou un
+        ``FailTour`` pour clore son flux ``text/event-stream``.
+        """
+        from_state = self._state
+        old_connection_id = self._connection_id
+        tour_id = self._tour_id
+        self._state = SessionState.CLOSING
+        commands: list[Command] = [
+            CancelIdleTimer(connection_id=old_connection_id),
+            CloseLiveConnection(connection_id=old_connection_id),
+            self._trace(
+                kind,
+                from_state=from_state,
+                to_state=SessionState.CLOSING,
+                reason=reason,
+                cause=cause,
+                connection_id=old_connection_id,
+                session_id="",
+                extra={"tour_id": tour_id},
+            ),
+            self._trace(
+                "TourClosed",
+                from_state=SessionState.CLOSING,
+                to_state=SessionState.IDLE,
+                reason=reason,
+                cause=cause,
+                connection_id=old_connection_id,
+                session_id="",
+                extra={"tour_id": tour_id},
+            ),
+        ]
+        self._state = SessionState.IDLE
+        self._reset()
+        if failure is not None:
+            commands.append(FailTour(tour_id=tour_id, code=failure))
+        else:
+            commands.append(FinishTour(tour_id=tour_id, reason=reason))
+        return commands
+
     async def _on_session_requested(
         self, event: SessionRequested
     ) -> list[Command]:
         commands: list[Command] = []
         original_state = self._state
+
+        # Un seul Tour à la fois (ADR-0023) : une Session demandée pendant un
+        # Tour est refusée, jamais mise en file ni préemptée. Le refus est rendu
+        # au Client par le message ``Error`` du Protocole, sans le changer.
+        if self._tour:
+            return [
+                RefuseSession(client_id=event.client_id, reason="busy"),
+                self._trace(
+                    "SessionRefused",
+                    from_state=original_state,
+                    to_state=original_state,
+                    client_id=event.client_id,
+                    reason="busy",
+                    extra={"tour_id": self._tour_id},
+                ),
+            ]
 
         # « L'utilisateur gagne toujours » (ADR-0007) : un Wake word ou un tap
         # prime sur les automatismes d'Événement. Pendant une fenêtre ouverte il
@@ -742,6 +947,16 @@ class Coordinator:
         ]
 
     async def _on_llm_audio(self, event: LlmAudio) -> list[Command]:
+        if self._tour:
+            # Un Tour ne devient jamais visible : l'audio part vers sa
+            # destination, jamais vers un Client (il n'y en a pas).
+            if self._state is SessionState.LIVE_ACTIVE:
+                return [
+                    self._rearm_timer(),
+                    SendAudioToTour(tour_id=self._tour_id, data=event.data),
+                    *self._decision("LlmAudio"),
+                ]
+            return self._decision("LlmAudio")
         if self._state is SessionState.LIVE_ACTIVE:
             self._audio_buffer.append(event.data)
             return [
@@ -759,6 +974,8 @@ class Coordinator:
     async def _on_llm_transcription(
         self, event: LlmTranscription
     ) -> list[Command]:
+        if self._tour:
+            return await self._on_tour_transcription(event)
         if event.role is Role.USER:
             return await self._on_user_utterance(event)
         if event.role is Role.ASSISTANT and self._state is SessionState.LIVE_ACTIVE:
@@ -782,7 +999,7 @@ class Coordinator:
         self._announcing = False
         commands: list[Command] = [self._rearm_timer()]
         if self._memory is not None:
-            await self._journal("user", event.text)
+            await self._journal("user", event.text, origin="voice")
             text, trace = await self._recall(event.text)
             commands.append(trace)
             if text is not None:
@@ -793,9 +1010,30 @@ class Coordinator:
         self._recent_utterances.append(event.text)
         return commands
 
-    async def _journal(self, role: str, text: str) -> None:
+    async def _on_tour_transcription(
+        self, event: LlmTranscription
+    ) -> list[Command]:
+        """Transcription pendant un Tour : la réponse est écrite, puis le Tour finit.
+
+        L'entrée du Tour est déjà au Journal depuis son envoi : une transcription
+        d'entrée du modèle ne doit jamais produire un second tour utilisateur. La
+        réponse, elle, est journalisée ``assistant`` avec l'origine ``text`` et
+        poussée vers la destination ; le Tour se referme aussitôt, ce qui rend le
+        noyau au Repos et libère la voix.
+        """
+        if event.role is Role.USER or not event.text.strip():
+            return self._decision("LlmTranscription")
+        await self._journal("assistant", event.text, origin="text")
+        return [
+            SendTextToTour(tour_id=self._tour_id, text=event.text),
+            *self._end_tour("completed"),
+        ]
+
+    async def _journal(self, role: str, text: str, origin: str = "") -> None:
         if self._memory is not None:
-            await self._memory.append_turn(self._user_id, role, text)
+            await self._memory.append_turn(
+                self._user_id, role, text, origin=origin
+            )
 
     async def _journal_speech(self, text: str) -> None:
         """Journalise une transcription de l'assistant.
@@ -806,7 +1044,7 @@ class Coordinator:
         tour, la parole est une réponse ordinaire (``assistant``).
         """
         role = RECENT_EVENT_ROLE if self._announcing else "assistant"
-        await self._journal(role, text)
+        await self._journal(role, text, origin="event" if self._announcing else "voice")
 
     async def _journal_judged_facts(self) -> None:
         """Écrit les faits du lot jugé, en rôle ``event``, à l'Annonce.
@@ -817,7 +1055,7 @@ class Coordinator:
         batch = self._judged_batch
         self._judged_batch = []
         for fact in batch:
-            await self._journal(RECENT_EVENT_ROLE, self._format_fact(fact))
+            await self._journal(RECENT_EVENT_ROLE, self._format_fact(fact), origin="event")
 
     async def _recall(self, utterance: str) -> tuple[str | None, Trace]:
         window = self._recent_utterances[-self._recall_window_turns :]
@@ -869,10 +1107,14 @@ class Coordinator:
         plugin = self._tool_owner(event.name)
         is_end_session = event.name == END_SESSION
         # Le Tool de clôture n'a de sens que dans une Session ordinaire active :
-        # ni la Connexion de jugement (``_judging``) ni la Session automatique
-        # d'Annonce (``_auto``) ne peuvent l'appeler (#130, ADR-0020).
+        # ni la Connexion de jugement (``_judging``), ni la Session automatique
+        # d'Annonce (``_auto``), ni un Tour texte (``_tour``) ne peuvent
+        # l'appeler (#130, ADR-0020, ADR-0023).
         ordinary = (
-            self._in_live_session() and not self._judging and not self._auto
+            self._in_live_session()
+            and not self._judging
+            and not self._auto
+            and not self._tour
         )
         commands: list[Command] = [
             self._trace(
@@ -900,6 +1142,17 @@ class Coordinator:
             }
         else:
             result = await self._tools.execute(event.name, event.arguments)
+        if self._tour:
+            # La surface voit le nom, les arguments et l'issue — jamais le corps
+            # du résultat, qui peut porter des données de plugin.
+            commands.append(
+                SendToolCallToTour(
+                    tour_id=self._tour_id,
+                    name=event.name,
+                    arguments=event.arguments,
+                    status=str(result.get("status", "ok")),
+                )
+            )
         commands.append(
             SendToolResultToLlm(
                 connection_id=self._connection_id,
@@ -949,6 +1202,8 @@ class Coordinator:
             return self._decision(
                 "LlmClosed", stale_connection_id=event.connection_id
             )
+        if self._tour:
+            return self._end_tour("closed")
         if self._state in (
             SessionState.LIVE_CONNECTING,
             SessionState.LIVE_ACTIVE,
@@ -964,6 +1219,10 @@ class Coordinator:
                 cause=event.cause.value,
                 stale_connection_id=event.connection_id,
             )
+        if self._tour and self._state is not SessionState.IDLE:
+            return self._end_tour(
+                "failed", cause=event.cause.value, failure="llm_failed"
+            )
         if self._state is not SessionState.IDLE:
             return self._teardown(
                 SessionEndReason.ERROR, "LlmFailed", cause=event.cause.value
@@ -971,7 +1230,13 @@ class Coordinator:
         return self._decision("LlmFailed", cause=event.cause.value)
 
     def _on_shutdown_requested(self, event: ShutdownRequested) -> list[Command]:
-        if self._state is not SessionState.IDLE:
+        if self._tour:
+            # Un Tour en vol se referme avant l'arrêt : la surface reçoit sa fin
+            # au lieu d'une connexion coupée sans explication.
+            commands = self._end_tour(
+                "canceled", kind="TourCanceled", cause="shutdown"
+            )
+        elif self._state is not SessionState.IDLE:
             commands = self._teardown(SessionEndReason.SHUTDOWN, "Shutdown")
         else:
             commands = self._decision("ShutdownRequested")
@@ -987,6 +1252,8 @@ class Coordinator:
         if event.connection_id == EVENT_WINDOW_TIMER_ID:
             return await self._on_event_window_fired()
         if self._owns(event.connection_id) and self._state is not SessionState.IDLE:
+            if self._tour:
+                return self._end_tour("timeout")
             return self._teardown(SessionEndReason.TIMEOUT, "Timeout")
         return self._decision("TimerFired")
 
@@ -1118,6 +1385,8 @@ class Coordinator:
         self._judging = False
         self._announcing = False
         self._judged_batch = []
+        self._tour = False
+        self._tour_id = ""
         self._audio_buffer.clear()
         self._recent_utterances = []
         self._injected_memories = set()
@@ -1155,6 +1424,7 @@ class Coordinator:
         connection_id: str | None = None,
         session_id: str | None = None,
         stale_connection_id: str | None = None,
+        stale_tour_id: str | None = None,
         level: str = "info",
         extra: Mapping[str, object] | None = None,
     ) -> Trace:
@@ -1175,4 +1445,6 @@ class Coordinator:
             payload.update(extra)
         if stale_connection_id is not None:
             payload["stale_connection_id"] = stale_connection_id
+        if stale_tour_id is not None:
+            payload["stale_tour_id"] = stale_tour_id
         return Trace(source=_TRACE_SOURCE, kind=kind, payload=payload, level=level)

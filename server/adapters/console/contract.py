@@ -36,6 +36,9 @@ PASSWORD_PATH = "/api/password"
 SETTINGS_PATH = "/api/settings"
 SECRETS_PATH = "/api/secrets"
 CHAT_PATH = "/api/chat"
+# Fil de la Conversation (ADR-0023) : lecture paginée du Journal, marquée par
+# l'origine de chaque tour. Aucune écriture, aucun état du noyau.
+THREAD_PATH = "/api/thread"
 # Sonde de supervision : publique, réponse fixe, aucun état applicatif.
 HEALTH_PATH = "/healthz"
 # Nom stable et explicite du cookie qui porte le Ticket Console. Le préfixe
