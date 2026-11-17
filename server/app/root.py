@@ -37,6 +37,7 @@ from server.app.config import (
 )
 from server.app.health import database_sizes
 from server.app.secrets import SecretResolver
+from server.app.thread import ThreadView
 from server.app.trace import build_trace_sink, install_logging_bridge
 from server.core.consolidation import (
     Consolidation,
@@ -51,17 +52,31 @@ from server.core.commands import (
     CancelIdleTimer,
     CloseLiveConnection,
     Command,
+    FailTour,
+    FinishTour,
     OpenLiveConnection,
+    RefuseSession,
+    RefuseTour,
     SendAudioToClient,
     SendAudioToLlm,
     SendAnnouncementToLlm,
+    SendAudioToTour,
     SendMemoryToLlm,
+    SendTextToTour,
+    SendToolCallToTour,
     SendToolResultToLlm,
+    SendUserTextToLlm,
     StartIdleTimer,
     Trace,
 )
 from server.core.coordinator import Coordinator
-from server.core.events import Event, EventReceived, ShutdownRequested
+from server.core.events import (
+    Event,
+    EventReceived,
+    ShutdownRequested,
+    TourCanceled,
+    TourRequested,
+)
 from server.core.health import HealthState, health_snapshot
 from server.core.memory_tools import register_memory_tools
 from server.core.plugins import PluginRegistry
@@ -75,6 +90,8 @@ from server.core.ports import (
     SecretStore,
     SecretValidator,
     SettingsStore,
+    TourControl,
+    TourDestination,
     TraceEntry,
     TraceSink,
 )
@@ -207,19 +224,22 @@ class Clock(Protocol):
 
 
 class ConsoleServer(Protocol):
-    """Couture de la Console web : instantané de lecture et injection d'Événement.
+    """Couture de la Console web : instantané, Événement et Tours.
 
     ``snapshot`` est le ``App.snapshot`` injecté à ``start`` : l'adaptateur ne
     connaît ni le Coordinator ni ``SessionState``, et l'instantané est construit
     par la racine de composition au moment de la requête (ADR-0016). ``push``
     est le même ``App.push_event`` que celui du Webhook : l'Événement injecté
     entre dans le Canal d'événements unique, sans file propre à la Console.
+    ``tour`` est la couture du **Tour** (ADR-0023) : la Console soumet et annule,
+    elle n'atteint jamais le Coordinator.
     """
 
     async def start(
         self,
         snapshot: Callable[[], Mapping[str, object]],
         push: Callable[[str, str], None] | None = None,
+        tour: TourControl | None = None,
     ) -> None: ...
 
     async def stop(self) -> None: ...
@@ -339,6 +359,7 @@ class App:
         webhook: WebhookServer | None = None,
         console: ConsoleServer | None = None,
         snapshot_config: Mapping[str, object] | None = None,
+        tour_destination: TourDestination | None = None,
         installation: Callable[[], Mapping[str, object]] | None = None,
         health: HealthState | None = None,
         databases: Mapping[str, str | Path] | None = None,
@@ -356,6 +377,10 @@ class App:
         self._scheduler = scheduler
         self._webhook = webhook
         self._console = console
+        # Destination des Tours (ADR-0023) : l'adaptateur Console l'implémente,
+        # la racine la lui injecte ici. Absente, un Tour se déroule sans être
+        # diffusé — jamais une erreur du noyau.
+        self._tour_destination = tour_destination
         # Instantané non sensible de la configuration : la racine de
         # composition choisit explicitement les clés exposées, pour qu'aucun
         # secret ne puisse s'inviter dans l'instantané par accident.
@@ -524,7 +549,7 @@ class App:
         if self._webhook is not None:
             await self._webhook.start(self.push_event)
         if self._console is not None:
-            await self._console.start(self.snapshot, self.push_event)
+            await self._console.start(self.snapshot, self.push_event, self)
         self._emit("started", payload={"state": self._coordinator.state.value})
 
         pumps = [asyncio.create_task(self._pump(self._clock.recv))]
@@ -599,6 +624,18 @@ class App:
         """
         self._events.put_nowait(EventReceived(source=source, content=content))
 
+    def submit_tour(self, tour_id: str, text: str) -> None:
+        """Dépose un Tour texte dans le Canal (couture ``TourControl``, ADR-0023).
+
+        La Console ne connaît ni le Coordinator ni l'état de Session : elle
+        demande, le noyau décide — y compris de refuser quand il est occupé.
+        """
+        self._events.put_nowait(TourRequested(tour_id=tour_id, text=text))
+
+    def cancel_tour(self, tour_id: str) -> None:
+        """Dépose l'annulation d'un Tour (flux SSE fermé par le navigateur)."""
+        self._events.put_nowait(TourCanceled(tour_id=tour_id))
+
     async def _pump(self, recv: Callable[[], Awaitable[Event]]) -> None:
         while True:
             await self._events.put(await recv())
@@ -628,6 +665,7 @@ class App:
                 CloseLiveConnection,
                 SendAudioToLlm,
                 SendMemoryToLlm,
+                SendUserTextToLlm,
                 SendAnnouncementToLlm,
                 SendToolResultToLlm,
             ),
@@ -651,6 +689,31 @@ class App:
             if self._transport is not None:
                 await self._transport.execute(command)
             return
+        if isinstance(
+            command,
+            (
+                SendTextToTour,
+                SendAudioToTour,
+                SendToolCallToTour,
+                FinishTour,
+                FailTour,
+                RefuseTour,
+            ),
+        ):
+            self._deliver_to_tour(command)
+            return
+        if isinstance(command, RefuseSession):
+            # Refus lisible par le Client, sans changer le Protocole : le
+            # transport le traduit en message ``Error`` existant.
+            if self._transport is not None:
+                await self._transport.execute(command)
+            else:
+                self._emit(
+                    "command_dropped",
+                    payload={"command": type(command).__name__},
+                    level="debug",
+                )
+            return
         if isinstance(command, StartIdleTimer):
             self._clock.schedule(command.connection_id, command.timeout)
             return
@@ -665,6 +728,43 @@ class App:
         level: str = "info",
     ) -> None:
         emit(self._trace_sink, _TRACE_SOURCE, kind, payload=payload, level=level)
+
+    def _deliver_to_tour(self, command: Command) -> None:
+        """Route une Commande de Tour vers sa destination (port du noyau).
+
+        Sans destination (Console fermée, test du noyau seul), la Commande est
+        simplement abandonnée : le Tour s'est déroulé, personne ne l'écoutait.
+        """
+        destination = self._tour_destination
+        if destination is None:
+            self._emit(
+                "command_dropped",
+                payload={"command": type(command).__name__},
+                level="debug",
+            )
+            return
+        if isinstance(command, SendTextToTour):
+            destination.text(command.tour_id, command.text)
+            return
+        if isinstance(command, SendAudioToTour):
+            destination.audio(command.tour_id, command.data)
+            return
+        if isinstance(command, SendToolCallToTour):
+            destination.tool(
+                command.tour_id,
+                command.name,
+                command.arguments,
+                command.status,
+            )
+            return
+        if isinstance(command, FinishTour):
+            destination.done(command.tour_id, command.reason)
+            return
+        if isinstance(command, FailTour):
+            destination.failed(command.tour_id, command.code)
+            return
+        if isinstance(command, RefuseTour):
+            destination.busy(command.tour_id)
 
 
 def build_app(
@@ -933,6 +1033,13 @@ def build_app(
             settings=settings_routes,
             installation=installation.status,
             master_key=ensure_master_key,
+            # Fil de la Conversation : lecture paginée du Journal, bornée à la
+            # rétention de la mémoire courte (ADR-0023).
+            thread=ThreadView(
+                memory=memory,
+                user_id=config.memory.user_id,
+                retention_days=config.memory.journal_retention_days,
+            ),
         )
 
     app = App(
@@ -954,6 +1061,7 @@ def build_app(
         scheduler=scheduler,
         webhook=webhook,
         console=console,
+        tour_destination=console.tour_destination if console is not None else None,
         snapshot_config={
             "model": config.gemini.model,
             "voice": config.gemini.voice,

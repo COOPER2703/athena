@@ -158,7 +158,9 @@ class FakeMemory:
     async def pinned_facts(self, user_id: str) -> list[str]:
         return list(self._pinned)
 
-    async def append_turn(self, user_id: str, role: str, text: str) -> None:
+    async def append_turn(
+        self, user_id: str, role: str, text: str, origin: str = ""
+    ) -> None:
         self.turns.append((role, text))
 
     async def recall(self, user_id: str, query: str) -> list[MemoryHit]:

@@ -317,7 +317,9 @@ class FakeMemory:
     async def pinned_facts(self, user_id: str) -> list[str]:
         return list(self.pinned)
 
-    async def append_turn(self, user_id: str, role: str, text: str) -> None:
+    async def append_turn(
+        self, user_id: str, role: str, text: str, origin: str = ""
+    ) -> None:
         pass
 
 

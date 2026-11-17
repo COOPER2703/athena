@@ -23,7 +23,7 @@ from typing import Callable, Mapping
 from aiohttp import web
 
 from server.adapters.console.auth import ConsoleAuth
-from server.adapters.console.chat import ChatEndpoint
+from server.adapters.console.chat import ChatEndpoint, TourStreams
 from server.adapters.console.contract import (
     API_PREFIX,
     CHAT_PATH,
@@ -40,6 +40,7 @@ from server.adapters.console.contract import (
     SETUP_PATH,
     STATUS_PATH,
     STREAM_PATH,
+    THREAD_PATH,
     TOKENS_PATH,
 )
 from server.adapters.console.events import EventInjection
@@ -50,6 +51,7 @@ from server.adapters.console.status import (
     StatusBroadcaster,
 )
 from server.adapters.console.stream import stream_handler
+from server.adapters.console.thread import ThreadRoutes
 from server.adapters.console.trace_buffer import TraceBuffer
 from server.adapters.event_body import MAX_BODY_BYTES
 from server.adapters.trace import NullTraceSink
@@ -58,7 +60,9 @@ from server.core.ports import (
     InstallationStatus,
     SecretStore,
     SecretValidator,
+    ThreadReader,
     TraceSink,
+    TourControl,
 )
 
 # Build de la SPA, produit par `make web`. Le répertoire n'existe pas
@@ -139,6 +143,7 @@ class ConsoleAdapter:
         settings: SettingsRoutes | None = None,
         installation: Callable[[], InstallationStatus] | None = None,
         master_key: Callable[[], str | None] | None = None,
+        thread: ThreadReader | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -163,6 +168,9 @@ class ConsoleAdapter:
         # configuration, il rend l'état que la racine lui a décrit.
         self._settings_routes = settings
         self._chat = ChatEndpoint(installation=self._installation)
+        # Fil de la Conversation : lecture paginée du Journal, sans état du
+        # noyau. Absent, la route explique que le fil n'est pas disponible.
+        self._thread_routes = ThreadRoutes(reader=thread)
         # Cadence du tick qui pousse les changements d'instantané. Le tick est
         # une tâche de fond possédée par l'adaptateur : jamais sur le chemin
         # d'une requête (ADR-0005, ADR-0016).
@@ -186,6 +194,11 @@ class ConsoleAdapter:
         return self._trace_buffer
 
     @property
+    def tour_destination(self) -> TourStreams:
+        """Destination des Tours, injectée dans la racine de composition (ADR-0023)."""
+        return self._chat.destination
+
+    @property
     def port(self) -> int:
         """Port réellement lié (utile quand ``port=0`` en test)."""
         server = self._site._server if self._site is not None else None
@@ -198,14 +211,18 @@ class ConsoleAdapter:
         self,
         snapshot: Callable[[], Mapping[str, object]],
         push: Callable[[str, str], None] | None = None,
+        tour: TourControl | None = None,
     ) -> None:
-        """Lie la surface HTTP, l'instantané et la couture ``push``.
+        """Lie la surface HTTP, l'instantané et les coutures du noyau.
 
         ``push`` est le ``App.push_event`` injecté : comme le Webhook, la Console
         ne possède aucune file propre, elle dépose dans le Canal d'événements
-        unique (ADR-0007). Sans couture, l'injection répond 503.
+        unique (ADR-0007). Sans couture, l'injection répond 503. ``tour`` est la
+        couture du **Tour** (ADR-0023) : soumettre et annuler, jamais atteindre
+        le Coordinator. Sans elle, la Conversation répond 501.
         """
         self._snapshot = snapshot
+        self._chat.bind(tour)
         self._event_injection = EventInjection(
             push=push, trace_sink=self._trace_sink
         )
@@ -309,8 +326,10 @@ class ConsoleAdapter:
             app.router.add_get(SETTINGS_PATH, self._settings_routes.handle_get)
             app.router.add_put(SETTINGS_PATH, self._settings_routes.handle_put)
         # Conversation : refusée côté serveur tant que l'Installation n'est pas
-        # terminée ; le ticket #172 remplace ce refus par le flux du Tour.
+        # terminée, puis Tour complet en ``text/event-stream`` (ADR-0023).
         app.router.add_post(CHAT_PATH, self._chat.handle)
+        # Fil de la Conversation : lecture paginée du Journal, en lecture seule.
+        app.router.add_get(THREAD_PATH, self._thread_routes.handle)
         # Tout chemin inconnu **sous /api** reste du JSON : un client de l'API
         # ne reçoit jamais une page HTML ou du texte. Le repli est enregistré
         # après les routes exactes, qui gardent la priorité.

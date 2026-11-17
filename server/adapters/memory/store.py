@@ -8,7 +8,7 @@ from typing import Sequence
 
 import sqlite_vec
 
-from server.core.ports import Embedder, JournalEntry, MemoryHit
+from server.core.ports import Embedder, JournalEntry, MemoryHit, ThreadEntry
 
 DEFAULT_SHORT_TERM_WINDOW = 20
 DEFAULT_RECENT_EVENTS_WINDOW = 20
@@ -51,6 +51,18 @@ _CONSOLIDATION_STATE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS consolidation_state (
     key TEXT PRIMARY KEY,
     value TEXT
+)
+"""
+
+# Origine d'un tour du Journal (ADR-0023) : ``text`` (Tour de la Console),
+# ``voice`` (Session vocale), ``event`` (Annonce proactive). C'est une table
+# annexe **additive** : la table ``journal`` est virtuelle (``vec0``) et
+# n'accepte pas ``ALTER TABLE ADD COLUMN``. Un tour sans ligne d'origine reste
+# lisible : son origine vaut alors la chaîne vide.
+_JOURNAL_ORIGIN_SCHEMA = """
+CREATE TABLE IF NOT EXISTS journal_origin (
+    journal_id INTEGER PRIMARY KEY,
+    origin TEXT
 )
 """
 
@@ -103,6 +115,7 @@ class SqliteMemoryStore:
             db.execute(_FACTS_SCHEMA)
             db.execute(_FACT_SOURCES_SCHEMA)
             db.execute(_CONSOLIDATION_STATE_SCHEMA)
+            db.execute(_JOURNAL_ORIGIN_SCHEMA)
             db.commit()
             self._db = db
         return self._db
@@ -179,15 +192,25 @@ class SqliteMemoryStore:
             ).fetchall()
         return [row[0] for row in reversed(rows)]
 
-    async def append_turn(self, user_id: str, role: str, text: str) -> None:
+    async def append_turn(
+        self, user_id: str, role: str, text: str, origin: str = ""
+    ) -> None:
         vector = await self._embedder.embed(text)
         db = self._get_db()
         with self._lock:
-            db.execute(
+            cursor = db.execute(
                 "INSERT INTO journal (embedding, user_id, role, content, created_at) "
                 "VALUES (?, ?, ?, ?, datetime('now'))",
                 (json.dumps(vector), user_id, role, text),
             )
+            if origin:
+                journal_id = cursor.lastrowid
+                if journal_id is not None:
+                    db.execute(
+                        "INSERT OR REPLACE INTO journal_origin (journal_id, origin) "
+                        "VALUES (?, ?)",
+                        (journal_id, origin),
+                    )
             self._purge(db)
             db.commit()
 
@@ -332,6 +355,42 @@ class SqliteMemoryStore:
             JournalEntry(id=row[0], role=row[1], text=row[2]) for row in rows
         ]
 
+    async def recent_entries(
+        self, user_id: str, *, limit: int, before: int | None = None
+    ) -> list[ThreadEntry]:
+        """Les ``limit`` entrées du fil les plus récentes, du plus ancien au plus récent.
+
+        Le curseur est le ``rowid`` (``before`` exclu), jamais ``created_at`` :
+        deux tours écrits dans la même seconde restent ordonnables. L'origine
+        vient de la table annexe ``journal_origin`` ; un tour sans origine
+        (écrit avant l'ajout, ou par un autre producteur) rend la chaîne vide.
+        """
+        db = self._get_db()
+        query = (
+            "SELECT j.rowid, j.role, j.content, j.created_at, "
+            "COALESCE(o.origin, '') FROM journal j "
+            "LEFT JOIN journal_origin o ON o.journal_id = j.rowid "
+            "WHERE j.user_id = ?"
+        )
+        params: list[object] = [user_id]
+        if before is not None:
+            query += " AND j.rowid < ?"
+            params.append(before)
+        query += " ORDER BY j.rowid DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = db.execute(query, params).fetchall()
+        return [
+            ThreadEntry(
+                id=row[0],
+                role=row[1],
+                origin=row[4],
+                text=row[2],
+                created_at=self._iso_utc(row[3]),
+            )
+            for row in reversed(rows)
+        ]
+
     async def last_consolidation(self, user_id: str) -> datetime | None:
         """Instant of the last Consolidation for ``user_id``, or ``None``."""
         db = self._get_db()
@@ -412,6 +471,11 @@ class SqliteMemoryStore:
         if moment.tzinfo is None:
             moment = moment.replace(tzinfo=timezone.utc)
         return moment.astimezone(timezone.utc).strftime(_UTC_FORMAT)
+
+    @staticmethod
+    def _iso_utc(stored: str) -> str:
+        """``"2026-11-17 20:01:08"`` (UTC SQLite) → ``"2026-11-17T20:01:08Z"``."""
+        return stored.replace(" ", "T") + "Z"
 
     @staticmethod
     def _consolidation_key(user_id: str) -> str:
