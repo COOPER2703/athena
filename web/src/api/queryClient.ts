@@ -73,4 +73,7 @@ export const queryKeys = {
   session: ["session"] as const,
   status: ["status"] as const,
   plugins: ["plugins"] as const,
+  settings: ["settings"] as const,
+  secrets: ["secrets"] as const,
+  tokens: ["tokens"] as const,
 } as const;
