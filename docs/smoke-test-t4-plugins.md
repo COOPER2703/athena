@@ -147,7 +147,7 @@ Compte ; le détail des écrans et des refus est dans `docs/smoke-test-t5-consol
 curl -i -c /tmp/athena-cookies.txt -X POST http://127.0.0.1:8767/api/setup \
   -H 'Origin: http://127.0.0.1:8767' \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"un-mot-de-passe-de-12-caracteres"}'
+  -d '{"username":"admin","password":"un-mot-de-passe-de-12-caracteres"}'  # gitleaks:allow
 ```
 
 Attendu : `200`, `authenticated: true`, et un cookie `athena_ticket` dans la jar. Aux

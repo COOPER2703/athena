@@ -1,0 +1,4 @@
+# Faux positifs assumés : les smoke tests montrent une requête d'installation
+# avec un mot de passe d'exemple, pas un secret réel.
+a04421de0158ccfce264ce0169532c1c8cb62620:docs/smoke-test-t5-console.md:generic-api-key:106
+a04421de0158ccfce264ce0169532c1c8cb62620:docs/smoke-test-t5-console.md:generic-api-key:127

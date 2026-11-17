@@ -103,7 +103,7 @@ exemples ci-dessous installent le Compte en `curl` puis réutilisent le cookie d
 curl -i -c /tmp/athena-cookies.txt -X POST http://127.0.0.1:8767/api/setup \
   -H 'Origin: http://127.0.0.1:8767' \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"un-mot-de-passe-de-12-caracteres"}'
+  -d '{"username":"admin","password":"un-mot-de-passe-de-12-caracteres"}'  # gitleaks:allow
 ```
 
 Attendu : `200`, `authenticated: true`, un champ `master_key` (à sauvegarder avec
@@ -124,7 +124,7 @@ curl -s -b /tmp/athena-cookies.txt http://127.0.0.1:8767/api/session
 # Un second essai d'installation est refusé.
 curl -i -X POST http://127.0.0.1:8767/api/setup -H 'Content-Type: application/json' \
   -H 'Origin: http://127.0.0.1:8767' \
-  -d '{"username":"autre","password":"un-mot-de-passe-de-12-caracteres"}'
+  -d '{"username":"autre","password":"un-mot-de-passe-de-12-caracteres"}'  # gitleaks:allow
 ```
 
 Attendu : `setup_required: false`, `authenticated: true`, `username: "admin"` ; puis `409`
@@ -135,7 +135,7 @@ l'installation par une connexion :
 curl -i -c /tmp/athena-cookies.txt -X POST http://127.0.0.1:8767/api/login \
   -H 'Origin: http://127.0.0.1:8767' \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"un-mot-de-passe-de-12-caracteres"}'
+  -d '{"username":"admin","password":"un-mot-de-passe-de-12-caracteres"}'  # gitleaks:allow
 ```
 
 Un mauvais mot de passe répond `401` avec un message générique ; cinq échecs bloquent le nom
