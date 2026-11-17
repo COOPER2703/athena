@@ -17,6 +17,11 @@ from server.adapters.auth.store import (
 from server.adapters.memory.embedder import DEFAULT_EMBED_MODEL
 from server.app.secrets import EnvSecretResolver, SecretResolver
 from server.core.ports import MissingSecretError
+from server.core.settings import (
+    DEFAULT_RESTART_COMMAND,
+    LOG_LEVELS,
+    SETTINGS,
+)
 
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-live-preview"
 DEFAULT_GEMINI_VOICE = "Leda"
@@ -69,6 +74,12 @@ DEFAULT_PLUGINS_STATE = "plugins.json"
 # chemin de la clé peut pointer vers un répertoire de credentials systemd.
 DEFAULT_SETTINGS_DB = "settings.db"
 DEFAULT_MASTER_KEY_FILE = "master.key"
+# Redémarrage automatique après application des Réglages (ADR-0024). Désactivé
+# par défaut : un serveur lancé à la main ne doit pas s'arrêter sans
+# superviseur. Activé, le processus sort proprement et son superviseur le
+# relance. La commande affichée sinon suit le déploiement : Docker est le seul
+# artefact livré, un service systemd la remplace par ``ATHENA_RESTART_COMMAND``.
+DEFAULT_RESTART_ON_APPLY = "0"
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"", "0", "false", "no", "off"}
@@ -89,14 +100,10 @@ def _coerce_bool(value: object, *, variable: str) -> bool:
     raise ValueError(f"Expected a boolean for {variable}, got {value!r}")
 
 
-class LogLevel(StrEnum):
-    """Niveaux de log reconnus par la configuration."""
-
-    DEBUG = "DEBUG"
-    INFO = "INFO"
-    WARNING = "WARNING"
-    ERROR = "ERROR"
-    CRITICAL = "CRITICAL"
+# Niveaux de log reconnus : la liste appartient au noyau (``LOG_LEVELS``), que
+# la validation des Réglages applique aussi. Une seule liste, donc un seul
+# ensemble de valeurs acceptées à l'écriture et au démarrage.
+LogLevel = StrEnum("LogLevel", {level: level for level in LOG_LEVELS}, module=__name__)
 
 
 class ServerConfig(BaseModel):
@@ -341,6 +348,10 @@ class AppConfig(BaseModel):
     log_level: LogLevel = LogLevel.INFO
     log_dir: str = Field(default=DEFAULT_LOG_DIR, min_length=1)
     debug_decisions: bool = False
+    # Application des Réglages (ticket #174) : autorise la sortie propre du
+    # processus, et nomme la commande montrée quand elle est refusée.
+    restart_on_apply: bool = False
+    restart_command: str = Field(default=DEFAULT_RESTART_COMMAND, min_length=1)
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -349,9 +360,9 @@ class AppConfig(BaseModel):
             return value.strip().upper()
         return value
 
-    @field_validator("log_dir", mode="before")
+    @field_validator("log_dir", "restart_command", mode="before")
     @classmethod
-    def _strip_log_dir(cls, value: object) -> object:
+    def _strip_path(cls, value: object) -> object:
         if isinstance(value, str):
             return value.strip()
         return value
@@ -360,6 +371,55 @@ class AppConfig(BaseModel):
     @classmethod
     def _debug_decisions(cls, value: object) -> object:
         return _coerce_bool(value, variable="ATHENA_DEBUG_DECISIONS")
+
+    @field_validator("restart_on_apply", mode="before")
+    @classmethod
+    def _restart_on_apply(cls, value: object) -> object:
+        return _coerce_bool(value, variable="ATHENA_RESTART_ON_APPLY")
+
+
+# Où chaque champ de ``SETTINGS`` atterrit dans ``AppConfig``. La section vide
+# désigne un champ de premier niveau. C'est cette table qui permet au chargeur,
+# à la résolution et à l'application du magasin de ne jamais redire la liste des
+# réglages ni le nom d'une variable d'environnement.
+SETTING_TARGETS: dict[str, tuple[str, str]] = {
+    "voice": ("gemini", "voice"),
+    "live_model": ("gemini", "model"),
+    "judge_model": ("gemini", "judge_model"),
+    "consolidation_model": ("memory", "consolidation_model"),
+    "user_id": ("memory", "user_id"),
+    "short_term_window": ("memory", "short_term_window"),
+    "recent_events_window": ("memory", "recent_events_window"),
+    "recall_k": ("memory", "recall_k"),
+    "recall_window_turns": ("memory", "recall_window_turns"),
+    "recall_max_distance": ("memory", "recall_max_distance"),
+    "dedup_threshold": ("memory", "dedup_threshold"),
+    "journal_retention_days": ("memory", "journal_retention_days"),
+    "consolidation_hours": ("memory", "consolidation_hours"),
+    "server_host": ("server", "host"),
+    "server_port": ("server", "port"),
+    "webhook_enabled": ("webhook", "enabled"),
+    "webhook_host": ("webhook", "host"),
+    "webhook_port": ("webhook", "port"),
+    "console_enabled": ("console", "enabled"),
+    "console_host": ("console", "host"),
+    "console_port": ("console", "port"),
+    "console_trace_buffer": ("console", "trace_buffer"),
+    "ticket_days": ("auth", "ticket_days"),
+    "ticket_refresh_seconds": ("auth", "ticket_refresh_seconds"),
+    "password_min_length": ("auth", "password_min_length"),
+    "login_max_attempts": ("auth", "login_max_attempts"),
+    "login_block_minutes": ("auth", "login_block_minutes"),
+    "log_level": ("", "log_level"),
+    "memory_db": ("memory", "db_path"),
+    "auth_db": ("auth", "db_path"),
+    "settings_db": ("settings", "db_path"),
+    "master_key_file": ("settings", "master_key_file"),
+    "plugins_dir": ("plugins", "directory"),
+    "plugins_state": ("plugins", "state_path"),
+    "embed_model": ("memory", "embed_model"),
+    "log_dir": ("", "log_dir"),
+}
 
 
 def parse_dotenv(path: str | Path) -> dict[str, str]:
@@ -418,6 +478,11 @@ def load_config(
     ``SecretResolver`` injecté (ou un résolveur d'environnement par défaut) ;
     il est **facultatif** : sans clé, l'instance démarre en mode Installation
     (ADR-0025) et la racine de composition consultera le magasin de Secrets.
+
+    Les champs viennent de la table ``SETTINGS`` : un réglage n'a qu'un nom,
+    qu'une variable et qu'un défaut, ici comme dans l'API des Réglages. Les
+    quelques champs hors table (clé Gemini, build statique, drapeaux internes)
+    restent explicites.
     """
     merged = merged_environment(env, env_file=env_file)
 
@@ -429,82 +494,126 @@ def load_config(
     except MissingSecretError:
         api_key = ""
 
-    return AppConfig(
-        server=ServerConfig(
-            host=merged.get("WS_HOST", "0.0.0.0"),
-            port=merged.get("WS_PORT", "8765"),
-        ),
-        gemini=GeminiConfig(
-            api_key=api_key,
-            model=merged.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
-            voice=merged.get("GEMINI_VOICE", DEFAULT_GEMINI_VOICE),
-            judge_model=merged.get("GEMINI_JUDGE_MODEL", DEFAULT_JUDGE_MODEL),
-        ),
-        memory=MemoryConfig(
-            user_id=merged.get("ATHENA_USER_ID", "owner"),
-            db_path=merged.get("ATHENA_MEMORY_DB", DEFAULT_MEMORY_DB),
-            short_term_window=merged.get("ATHENA_SHORT_TERM_WINDOW", "20"),
-            recent_events_window=merged.get("ATHENA_RECENT_EVENTS_WINDOW", "20"),
-            recall_k=merged.get("ATHENA_RECALL_K", "5"),
-            recall_window_turns=merged.get("ATHENA_RECALL_WINDOW_TURNS", "3"),
-            recall_max_distance=merged.get("ATHENA_RECALL_MAX_DISTANCE", "0.6"),
-            dedup_threshold=merged.get("ATHENA_DEDUP_THRESHOLD", "0.15"),
-            journal_retention_days=merged.get("ATHENA_JOURNAL_RETENTION_DAYS", "3"),
-            embed_model=merged.get("ATHENA_EMBED_MODEL", DEFAULT_EMBED_MODEL),
-            consolidation_model=merged.get(
-                "ATHENA_CONSOLIDATION_MODEL", DEFAULT_CONSOLIDATION_MODEL
-            ),
-            consolidation_hours=merged.get("ATHENA_CONSOLIDATION_HOURS", "0,12"),
-        ),
-        webhook=WebhookConfig(
-            enabled=merged.get("ATHENA_WEBHOOK_ENABLED", "1"),
-            host=merged.get("ATHENA_WEBHOOK_HOST", DEFAULT_WEBHOOK_HOST),
-            port=merged.get("ATHENA_WEBHOOK_PORT", str(DEFAULT_WEBHOOK_PORT)),
-        ),
-        console=ConsoleConfig(
-            enabled=merged.get("ATHENA_CONSOLE_ENABLED", "1"),
-            host=merged.get("ATHENA_CONSOLE_HOST", DEFAULT_CONSOLE_HOST),
-            port=merged.get("ATHENA_CONSOLE_PORT", str(DEFAULT_CONSOLE_PORT)),
-            static_dir=merged.get(
+    # Sections construites depuis la table : les valeurs restent des chaînes,
+    # Pydantic applique les coercions et les bornes de chaque modèle.
+    sections: dict[str, dict[str, object]] = {
+        "server": {},
+        "gemini": {"api_key": api_key},
+        "memory": {},
+        "webhook": {},
+        "console": {
+            "static_dir": merged.get(
                 "ATHENA_CONSOLE_STATIC_DIR", DEFAULT_CONSOLE_STATIC_DIR
-            ),
-            trace_buffer=merged.get(
-                "ATHENA_CONSOLE_TRACE_BUFFER", str(DEFAULT_CONSOLE_TRACE_BUFFER)
-            ),
-        ),
-        plugins=PluginsConfig(
-            directory=merged.get("ATHENA_PLUGINS_DIR", DEFAULT_PLUGINS_DIR),
-            state_path=merged.get("ATHENA_PLUGINS_STATE", DEFAULT_PLUGINS_STATE),
-        ),
-        settings=SettingsConfig(
-            db_path=merged.get("ATHENA_SETTINGS_DB", DEFAULT_SETTINGS_DB),
-            master_key_file=merged.get(
-                "ATHENA_MASTER_KEY_FILE", DEFAULT_MASTER_KEY_FILE
-            ),
-        ),
-        auth=AuthConfig(
-            db_path=merged.get("ATHENA_AUTH_DB", DEFAULT_AUTH_DB),
-            ticket_days=merged.get(
-                "ATHENA_CONSOLE_TICKET_DAYS", str(DEFAULT_CONSOLE_TICKET_DAYS)
-            ),
-            ticket_refresh_seconds=merged.get(
-                "ATHENA_CONSOLE_TICKET_REFRESH_SECONDS",
-                str(DEFAULT_CONSOLE_TICKET_REFRESH_SECONDS),
-            ),
-            password_min_length=merged.get(
-                "ATHENA_AUTH_PASSWORD_MIN_LENGTH",
-                str(DEFAULT_AUTH_PASSWORD_MIN_LENGTH),
-            ),
-            login_max_attempts=merged.get(
-                "ATHENA_AUTH_LOGIN_MAX_ATTEMPTS",
-                str(DEFAULT_AUTH_LOGIN_MAX_ATTEMPTS),
-            ),
-            login_block_minutes=merged.get(
-                "ATHENA_AUTH_LOGIN_BLOCK_MINUTES",
-                str(DEFAULT_AUTH_LOGIN_BLOCK_MINUTES),
-            ),
-        ),
-        log_level=merged.get("LOG_LEVEL", "INFO"),
-        log_dir=merged.get("ATHENA_LOG_DIR", DEFAULT_LOG_DIR),
+            )
+        },
+        "auth": {},
+        "plugins": {},
+        "settings": {},
+    }
+    for field in SETTINGS:
+        section, attribute = SETTING_TARGETS[field.key]
+        value = merged.get(field.env, field.default)
+        if section:
+            sections[section][attribute] = value
+        else:
+            sections.setdefault("", {})[attribute] = value
+
+    top_level = sections.pop("", {})
+    return AppConfig(
+        **sections,
+        log_level=top_level.get("log_level", "INFO"),
+        log_dir=top_level.get("log_dir", DEFAULT_LOG_DIR),
         debug_decisions=merged.get("ATHENA_DEBUG_DECISIONS", "0"),
+        restart_on_apply=merged.get(
+            "ATHENA_RESTART_ON_APPLY", DEFAULT_RESTART_ON_APPLY
+        ),
+        restart_command=merged.get("ATHENA_RESTART_COMMAND", DEFAULT_RESTART_COMMAND),
     )
+
+
+def loaded_settings(config: AppConfig) -> dict[str, str]:
+    """Valeurs de la configuration **réellement chargée**, par nom de champ.
+
+    C'est la référence des « changements en attente » : le GET annonce ce que
+    le processus utilise, jamais une re-résolution qui pourrait diverger.
+    """
+    return {
+        field.key: _render_setting(config, SETTING_TARGETS[field.key])
+        for field in SETTINGS
+    }
+
+
+def overlay_environment(
+    config: AppConfig, env: Mapping[str, str]
+) -> AppConfig:
+    """Applique un environnement du processus à une configuration construite.
+
+    ``load_config`` fait déjà ce travail. Cette variante sert aux compositions
+    **programmatiques** (le harnais de test) qui doivent rester cohérentes avec
+    la précédence : un environnement qui masque un réglage doit aussi être la
+    valeur que le processus charge, sinon ``GET /api/settings`` annoncerait
+    autre chose que le comportement réel.
+    """
+    if not env:
+        return config
+    data = config.model_dump()
+    for field in SETTINGS:
+        value = env.get(field.env)
+        if not value:
+            continue
+        section, attribute = SETTING_TARGETS[field.key]
+        holder = data[section] if section else data
+        holder[attribute] = value
+    return AppConfig.model_validate(data)
+
+
+def config_with_stored_settings(
+    config: AppConfig,
+    *,
+    store: Mapping[str, str],
+    process_env: Mapping[str, str],
+) -> tuple[AppConfig, dict[str, str]]:
+    """Applique la couche « magasin » à une configuration chargée.
+
+    La précédence de l'ADR-0024 vaut aussi au démarrage : environnement du
+    processus > magasin > ``.env`` > défauts. La configuration reçue porte déjà
+    l'environnement et le ``.env`` ; on ne superpose donc que les champs du
+    magasin que l'environnement ne masque pas. Les chemins en lecture seule ne
+    sont **jamais** repris du magasin, même édité à la main : ils ne peuvent
+    pas déplacer une base ni couper l'accès.
+
+    Rend la configuration effective et les champs du magasin qui ont
+    réellement pris effet — la couche dont ``GET /api/settings`` tire la source.
+    """
+    applied: dict[str, str] = {}
+    for field in SETTINGS:
+        if not field.editable:
+            continue
+        if process_env.get(field.env):
+            continue
+        value = store.get(field.key)
+        if value is not None:
+            applied[field.key] = value
+    if not applied:
+        return config, {}
+
+    data = config.model_dump()
+    for key, value in applied.items():
+        section, attribute = SETTING_TARGETS[key]
+        holder = data[section] if section else data
+        holder[attribute] = value
+    # ``model_validate`` applique les bornes : une valeur stockée illisible fait
+    # échouer le démarrage en nommant le champ, jamais démarrer sur autre chose.
+    return AppConfig.model_validate(data), applied
+
+
+def _render_setting(config: AppConfig, target: tuple[str, str]) -> str:
+    section, attribute = target
+    holder = getattr(config, section) if section else config
+    value = getattr(holder, attribute)
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (tuple, list)):
+        return ",".join(str(item) for item in value)
+    return str(value)
+

@@ -96,7 +96,10 @@ class SqliteSettingsStore:
 
     def value(self, key: str) -> str | None:
         with self._lock:
-            row = self._get_db().execute(
+            db = self._read_db()
+            if db is None:
+                return None
+            row = db.execute(
                 "SELECT value FROM settings WHERE key = ?", (key,)
             ).fetchone()
         if row is None:
@@ -106,7 +109,10 @@ class SqliteSettingsStore:
 
     def values(self) -> dict[str, str]:
         with self._lock:
-            rows = self._get_db().execute(
+            db = self._read_db()
+            if db is None:
+                return {}
+            rows = db.execute(
                 "SELECT key, value FROM settings ORDER BY key"
             ).fetchall()
         values: dict[str, str] = {}
@@ -163,9 +169,16 @@ class SqliteSettingsStore:
 
     def statuses(self) -> Sequence[SecretStatus]:
         with self._lock:
-            rows = self._get_db().execute(
-                "SELECT name, updated_at FROM secrets ORDER BY name"
-            ).fetchall()
+            # Une lecture ne crée pas le magasin : une instance neuve se décrit
+            # (tous les Secrets connus, aucun configuré) sans écrire de base.
+            db = self._read_db()
+            rows = (
+                []
+                if db is None
+                else db.execute(
+                    "SELECT name, updated_at FROM secrets ORDER BY name"
+                ).fetchall()
+            )
             stored = {
                 str(name): float(updated_at) for name, updated_at in rows
             }

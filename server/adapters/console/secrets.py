@@ -45,7 +45,7 @@ class SecretsRoutes:
         return web.json_response(
             {
                 "v": ENVELOPE_VERSION,
-                "secrets": [_secret_json(status) for status in secrets.statuses()],
+                "secrets": [secret_status_json(status) for status in secrets.statuses()],
                 "secrets_unreadable": secrets.unreadable,
             }
         )
@@ -74,7 +74,7 @@ class SecretsRoutes:
 
         status = self._secrets.set_secret(name, value)
         return web.json_response(
-            {"v": ENVELOPE_VERSION, "secret": _secret_json(status)}
+            {"v": ENVELOPE_VERSION, "secret": secret_status_json(status)}
         )
 
     async def handle_delete(self, request: web.Request) -> web.Response:
@@ -90,7 +90,7 @@ class SecretsRoutes:
         return web.json_response(
             {
                 "v": ENVELOPE_VERSION,
-                "secret": _secret_json(
+                "secret": secret_status_json(
                     SecretStatus(name=name, configured=False, updated_at=None)
                 ),
             }
@@ -109,7 +109,8 @@ class SecretsRoutes:
             )
 
 
-def _secret_json(status: SecretStatus) -> dict[str, object]:
+def secret_status_json(status: SecretStatus) -> dict[str, object]:
+    """État public d'un Secret : nom, configuré, date — jamais la valeur."""
     return {
         "name": status.name,
         "configured": status.configured,

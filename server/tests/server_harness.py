@@ -35,8 +35,11 @@ API publique
     processus pour la configuration effective, ``secrets`` remplace le
     résolveur à trois couches, ``settings`` remplace le magasin de réglages,
     ``webhook`` ouvre aussi la surface Webhook, et ``secret_validator``
-    remplace la validation réelle d'une clé Gemini. Le serveur est arrêté
-    proprement à la sortie du bloc, et le logging racine est restauré.
+    remplace la validation réelle d'une clé Gemini. ``restart_on_apply``,
+    ``restart_command`` et ``restart`` règlent l'application des Réglages : la
+    callable injectée remplace la sortie du processus, pour qu'un test observe
+    le redémarrage sans tuer pytest. Le serveur est arrêté proprement à la
+    sortie du bloc, et le logging racine est restauré.
 
 ``AthenaServer`` (ce que rend la fixture)
     ``root`` / ``url`` / ``transport_url``  : le répertoire et les deux surfaces.
@@ -133,6 +136,7 @@ from server.app.config import (
     ServerConfig,
     SettingsConfig,
     WebhookConfig,
+    overlay_environment,
 )
 from server.app.root import App, build_app
 from server.core.events import TimerFired
@@ -1100,6 +1104,15 @@ class AthenaServer:
         """Attend qu'une condition synchrone devienne vraie."""
         await wait_until(predicate, timeout)
 
+    async def wait_stopped(self, timeout: float = 2.0) -> None:
+        """Attend la fin de la boucle du serveur (sortie propre).
+
+        L'application des Réglages redémarre le processus en demandant l'arrêt
+        du serveur : un test peut observer cette sortie sans tuer pytest, le
+        serveur n'étant qu'une tâche de la boucle du test.
+        """
+        await asyncio.wait_for(asyncio.shield(self._runner), timeout)
+
     # --- cycle de vie -------------------------------------------------------
 
     async def stop(self) -> None:
@@ -1168,6 +1181,8 @@ def _config(
     transport_port: int,
     webhook_port: int | None,
     gemini_key: str,
+    restart_on_apply: bool = False,
+    restart_command: str = "docker restart athena",
 ) -> AppConfig:
     return AppConfig(
         gemini=GeminiConfig(api_key=gemini_key, model="gemini-live-test"),
@@ -1195,6 +1210,8 @@ def _config(
         ),
         log_dir=str(paths.log_dir),
         log_level=_LOG_LEVEL,
+        restart_on_apply=restart_on_apply,
+        restart_command=restart_command,
     )
 
 
@@ -1256,6 +1273,9 @@ async def running_server(
     settings: SecretStore | None = None,
     webhook: bool = False,
     secret_validator: SecretValidator | None = None,
+    restart_on_apply: bool = False,
+    restart_command: str = "docker restart athena",
+    restart: Callable[[], None] | None = None,
 ) -> AsyncIterator[AthenaServer]:
     """Démarre le serveur complet sur des ports éphémères et l'arrête à la sortie.
 
@@ -1285,12 +1305,21 @@ async def running_server(
     saved_logging = (root_logger.handlers[:], root_logger.level)
 
     app = build_app(
-        _config(
-            paths,
-            console_port=console_port,
-            transport_port=transport_port,
-            webhook_port=webhook_port,
-            gemini_key=gemini_key,
+        # La configuration programmatique est d'abord recouverte par
+        # l'environnement injecté : un test qui masque un réglage observe la
+        # même valeur que le processus aurait chargée, jamais une divergence
+        # entre le GET et le comportement.
+        overlay_environment(
+            _config(
+                paths,
+                console_port=console_port,
+                transport_port=transport_port,
+                webhook_port=webhook_port,
+                gemini_key=gemini_key,
+                restart_on_apply=restart_on_apply,
+                restart_command=restart_command,
+            ),
+            {} if env is None else env,
         ),
         secrets=secrets,
         settings=settings,
@@ -1302,6 +1331,7 @@ async def running_server(
         embedder=FakeEmbedder(),
         auth_now=clock,
         monotonic=clock,
+        restart=restart,
     )
     runner = asyncio.create_task(app.run())
     server = AthenaServer(

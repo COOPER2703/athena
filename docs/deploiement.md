@@ -126,6 +126,13 @@ resterait active.
 | `ATHENA_PLUGIN_HOMEASSISTANT_TOKEN` | si `homeassistant` est activé | Jeton Home Assistant. |
 | `ATHENA_PLUGIN_WEBSEARCH_API_KEY` | si `websearch` est activé | Clé Tavily. |
 | `LOG_LEVEL` | non | `INFO` par défaut. |
+| `ATHENA_RESTART_ON_APPLY` | non | `1` : appliquer un Réglage depuis la Console fait sortir proprement le processus, que `--restart unless-stopped` relance. Défaut `0` : rien ne s'arrête, la Console affiche la commande à exécuter. |
+| `ATHENA_RESTART_COMMAND` | non | Commande exacte montrée quand le redémarrage automatique est refusé. `docker restart athena` par défaut ; `systemctl restart athena` pour un service systemd. |
+
+Le couple `ATHENA_RESTART_ON_APPLY=1` / `ATHENA_RESTART_COMMAND` n'est pas un Réglage
+éditable : il appartient à l'orchestrateur, pas à l'utilisateur de la Console. Avec le
+drapeau à `1`, chaque `PUT /api/settings` qui laisse des changements en attente redémarre
+le conteneur : la réponse part d'abord, puis le processus sort avec le code `0`.
 
 Un secret de plugin manquant **n'est pas toléré** : le démarrage échoue en nommant la
 variable et le code de sortie est `2`. C'est volontaire — un plugin activé sans secret est
