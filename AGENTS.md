@@ -230,3 +230,14 @@ Le build n'est jamais committé : `node_modules/` et `web/dist/` sont ignorés.
 - `make web-check` vérifie les types (`tsc --noEmit`), `make web-test` lance `vitest run`.
 - En développement, `npm run dev` dans `web/` proxifie `/api` et le WebSocket vers la
   Console (`127.0.0.1:8767` par défaut, port surchargeable par `ATHENA_CONSOLE_PORT`).
+
+La coquille vit dans `web/src/app/` (routeur, identité, palette de commandes), les quatre
+zones dans `web/src/modules/` et la couche partagée dans `web/src/api/` (client JSON,
+`ApiError`, analyseur SSE, TanStack Query) et `web/src/styles/` (tokens sombre/clair).
+Les autres tickets remplissent un module sans réécrire la coquille : chaque zone a sa
+route (`/conversation`, `/settings`, `/plugins`, `/diagnostic`), son état vide et son
+fichier. Une erreur d'API ne s'affiche jamais brute : tout code stable passe par
+`describeError` (`web/src/api/errors.ts`), qui centralise les phrases françaises.
+Le Ticket Console seul authentifie (cookie `HttpOnly`) ; un `401` de requête ramène à
+`/login` en conservant la route demandée, et les brouillons de saisie passent par
+`useDraft` (stockage de l'onglet) plutôt que par un état global.

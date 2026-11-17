@@ -1,0 +1,136 @@
+@import "tailwindcss";
+@import "./tokens.css";
+
+@theme {
+  /* Grotesque pour le texte, monospace pour les données. */
+  --font-sans: "Inter", "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular,
+    Menlo, Consolas, monospace;
+
+  --radius-sm: 3px;
+  --radius-md: 6px;
+
+  --ease-quiet: cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+/* Les utilitaires pointent les tokens : le thème bascule sans reconstruire. */
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-accent: var(--accent);
+  --color-accent-fill: var(--accent-fill);
+  --color-accent-fill-hover: var(--accent-fill-hover);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-line: var(--accent-line);
+  --color-focus: var(--focus);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-line: var(--danger-line);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-warning-line: var(--warning-line);
+}
+
+@layer base {
+  html {
+    background: var(--canvas);
+    scrollbar-color: var(--border-strong) transparent;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100dvh;
+    background: var(--canvas);
+    color: var(--text);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Le focus est toujours visible, y compris sur fond accentué. */
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--accent-fill);
+    color: var(--accent-ink);
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+}
+
+/* Transition commune : couleur, bord, ombre — jamais de transform. */
+.transition-quiet {
+  transition-property: color, background-color, border-color, box-shadow,
+    opacity, outline-color;
+  transition-duration: var(--motion-fast);
+  transition-timing-function: var(--ease-quiet);
+}
+
+/* Halo réservé à l'état actif : un seul endroit le porte. */
+.halo-active {
+  box-shadow: var(--halo);
+}
+
+/* Lien d'évitement : visible seulement au clavier. */
+.skip-link {
+  position: fixed;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 100;
+  transform: translateY(-150%);
+  border: 1px solid var(--accent-line);
+  background: var(--surface);
+  color: var(--accent);
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  transition: transform var(--motion-fast) var(--ease-quiet);
+}
+
+.skip-link:focus-visible {
+  transform: translateY(0);
+}
+
+/* Trame discrète des écrans d'entrée : pas de flou, pas d'image. */
+.hud-grid {
+  background-image:
+    linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+  background-size: 56px 56px;
+  -webkit-mask-image: radial-gradient(
+    ellipse 80% 70% at 50% 40%,
+    #000 25%,
+    transparent 78%
+  );
+  mask-image: radial-gradient(
+    ellipse 80% 70% at 50% 40%,
+    #000 25%,
+    transparent 78%
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skip-link {
+    transition: none;
+  }
+}

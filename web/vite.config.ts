@@ -1,3 +1,4 @@
+import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
@@ -8,7 +9,7 @@ const consolePort = process.env.ATHENA_CONSOLE_PORT ?? "8767";
 const consoleTarget = `http://127.0.0.1:${consolePort}`;
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   server: {
     proxy: {
       // Une seule entrée : l'API REST et le WebSocket de traces vivent tous
@@ -22,6 +23,6 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.{ts,tsx}"],
   },
 });
