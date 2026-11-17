@@ -1,36 +1,27 @@
-"""Câblage réel : la production est fermée et le Code d'installation est publié.
+"""Câblage réel : la production est fermée et l'Installation ne demande aucun code.
 
 Le harnais démarre le vrai serveur (racine de composition + Console) sur des
-ports éphémères. ``install()`` lit le Code d'installation dans le journal
-(``server.log``, le même que ``stderr``) et s'en sert pour installer l'instance.
-Un second démarrage sur la même base ne doit plus jamais publier de code.
+ports éphémères. ``setup_required`` ne veut dire qu'une chose : aucun Compte.
+Une fois le premier visiteur installé, la route d'installation est fermée pour
+de bon et aucun Code d'installation n'apparaît jamais dans le journal
+(ADR-0025).
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import re
 from pathlib import Path
-from typing import Any
 
 from server_harness import running_server
 
-_CODE_LINE = re.compile(r"InstallationCode .*?\{\"code\": \"([^\"]+)\"}")
 
-
-def _installation_code(journal: str) -> str:
-    match = _CODE_LINE.search(journal)
-    assert match is not None, journal
-    return match.group(1)
-
-
-def test_the_production_console_installs_from_the_journal_then_stays_closed(
+def test_the_production_console_installs_without_a_code_then_stays_closed(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
         async with running_server(tmp_path) as server:
-            # Avant installation, aucune route d'API n'est utilisable.
+            # Avant installation, aucune route d'API n'est utilisable que par
+            # les routes publiques d'identité et d'installation.
             async with server.console() as http:
                 async with http.get(f"{server.url}/api/status") as response:
                     assert response.status == 409
@@ -38,20 +29,13 @@ def test_the_production_console_installs_from_the_journal_then_stays_closed(
 
                 async with http.post(
                     f"{server.url}/api/setup",
-                    json={
-                        "code": "faux-code",
-                        "username": "admin",
-                        "password": "correct horse battery staple",
-                    },
+                    json={"username": "admin", "password": "correct horse battery staple"},
                 ) as response:
-                    assert response.status == 403
+                    assert response.status == 200, await response.text()
+                    assert (await response.json())["master_key"]
 
-            await server.install()
-
-            # Le journal ne contient le code qu'une fois, au démarrage.
-            journal = server.read_log()
-            assert journal.count("InstallationCode") == 1
-            assert _installation_code(journal)
+            # Plus jamais de Code d'installation dans le journal.
+            assert "InstallationCode" not in server.read_log()
 
             # Un autre navigateur, sans Ticket, n'obtient que du JSON 401.
             async with server.anonymous() as anonymous:
@@ -62,36 +46,36 @@ def test_the_production_console_installs_from_the_journal_then_stays_closed(
     asyncio.run(scenario())
 
 
-def test_a_restart_with_an_account_never_publishes_an_installation_code(
+def test_a_restart_with_an_account_never_reopens_the_setup_route(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
         async with running_server(tmp_path) as server:
             await server.install()
-            log_file = server.paths.log_file
-            assert "InstallationCode" in server.read_log()
+            assert "InstallationCode" not in server.read_log()
 
-        # Redémarrage sur la même base d'auth, avec un journal neuf : le code
-        # n'est jamais réémis dès qu'un Compte existe.
+        # Redémarrage sur la même base d'auth, avec un journal neuf.
+        log_file = server.paths.log_file
         log_file.unlink()
         async with running_server(tmp_path) as restarted:
             assert "InstallationCode" not in restarted.read_log()
 
-            # L'instance est installée : l'API exige un Ticket Console.
-            async with restarted.anonymous() as http:
+            # L'instance est installée : l'API exige un Ticket Console et la
+            # route d'installation refuse, même sans code à présenter.
+            async with restarted.console() as http:
                 async with http.get(f"{restarted.url}/api/status") as response:
                     assert response.status == 401
                     assert (await response.json())["error"] == "unauthorized"
+                async with http.post(
+                    f"{restarted.url}/api/setup",
+                    json={
+                        "username": "intruder",
+                        "password": "correct horse battery staple",
+                    },
+                ) as response:
+                    assert response.status == 409
+                    assert (
+                        await response.json()
+                    )["error"] == "already_installed"
 
     asyncio.run(scenario())
-
-
-def test_the_installation_code_line_is_json_parseable() -> None:
-    """Le journal reste lisible par un outil : le code est un champ, pas du texte."""
-    line = (
-        "2026-01-01T00:00:00.000+00:00 INFO     [auth] InstallationCode "
-        '{"code": "abc-123"}'
-    )
-    assert _installation_code(line) == "abc-123"
-    payload: dict[str, Any] = json.loads(line.split("InstallationCode ", 1)[1])
-    assert payload == {"code": "abc-123"}

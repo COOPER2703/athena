@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping, Protocol
@@ -11,6 +12,7 @@ from server.adapters.console import ConsoleAdapter
 from server.adapters.console.trace_buffer import TraceBuffer
 from server.adapters.gemini import (
     GeminiEventJudge,
+    GeminiKeyValidator,
     GeminiLiveAdapter,
     LiveConnect,
 )
@@ -20,12 +22,17 @@ from server.adapters.memory import (
     SqliteMemoryStore,
 )
 from server.adapters.plugins import PluginLoader
+from server.adapters.settings import LayeredSecretResolver, SqliteSettingsStore
 from server.adapters.trace import emit
 from server.adapters.transport import ClientConnection, WebSocketTransport
 from server.adapters.webhook import WebhookAdapter
 from server.app.clock import AsyncioClock
-from server.app.config import AppConfig, default_env_file, merged_environment
-from server.app.secrets import EnvSecretResolver, SecretResolver
+from server.app.config import (
+    AppConfig,
+    default_env_file,
+    parse_dotenv,
+)
+from server.app.secrets import SecretResolver
 from server.app.trace import build_trace_sink, install_logging_bridge
 from server.core.consolidation import (
     Consolidation,
@@ -57,10 +64,15 @@ from server.core.ports import (
     AuthService,
     Embedder,
     EventJudge,
+    InstallationStatus,
     MemoryStore,
+    MissingSecretError,
+    SecretStore,
+    SecretValidator,
     TraceSink,
 )
 from server.core.session_tools import register_session_tools
+from server.core.settings import GEMINI_SECRET
 from server.core.tools import ToolRegistry
 
 _TRACE_SOURCE = "app"
@@ -193,6 +205,52 @@ class ConsoleServer(Protocol):
     async def stop(self) -> None: ...
 
 
+class Installation:
+    """État d'Installation d'une instance (ADR-0025), recalculé à la demande.
+
+    ``setup_required`` appartient toujours au module d'auth : « aucun Compte ».
+    L'Installation est plus large — elle se termine quand le Compte existe **et**
+    qu'un Secret Gemini utilisable est disponible. La valeur effective suit la
+    précédence de la résolution (environnement d'abord, puis magasin), et
+    ``restart_required`` naît de l'écart entre cette valeur et celle chargée au
+    démarrage : écrire une clé ne redémarre rien, mais la rend visible.
+    """
+
+    def __init__(
+        self,
+        *,
+        auth: AuthService | None,
+        secrets: SecretStore | None,
+        runtime_key: str,
+    ) -> None:
+        self._auth = auth
+        self._secrets = secrets
+        self._runtime_key = runtime_key.strip()
+
+    @property
+    def gemini_configured(self) -> bool:
+        """Vraie si une clé utilisable existe maintenant (runtime ou magasin)."""
+        if self._runtime_key:
+            return True
+        if self._secrets is None:
+            return False
+        stored = self._secrets.secret(GEMINI_SECRET)
+        return bool(stored and stored.strip())
+
+    def status(self) -> InstallationStatus:
+        account_exists = self._auth is None or not self._auth.setup_required
+        configured = self.gemini_configured
+        running = bool(self._runtime_key)
+        return InstallationStatus(
+            gemini_configured=configured,
+            installation_complete=account_exists and configured,
+            restart_required=configured != running,
+            secrets_unreadable=bool(
+                self._secrets is not None and self._secrets.unreadable
+            ),
+        )
+
+
 class App:
     """Racine de composition : possède les adaptateurs et la boucle de propriété.
 
@@ -205,8 +263,8 @@ class App:
     def __init__(
         self,
         *,
-        transport: Transport,
-        gemini: GeminiLiveAdapter,
+        transport: Transport | None = None,
+        gemini: GeminiLiveAdapter | None = None,
         clock: Clock,
         trace_sink: TraceSink,
         memory: MemoryStore | None = None,
@@ -224,9 +282,11 @@ class App:
         scheduler: ConsolidationScheduler | None = None,
         webhook: WebhookServer | None = None,
         console: ConsoleServer | None = None,
-        auth: AuthService | None = None,
         snapshot_config: Mapping[str, object] | None = None,
     ) -> None:
+        # Le transport et Gemini peuvent être **absents** : sans clé Gemini,
+        # l'instance est en Installation et ces surfaces d'exécution restent
+        # fermées (ADR-0025). Le noyau ne reçoit alors aucun Événement d'eux.
         self._transport = transport
         self._gemini = gemini
         self._clock = clock
@@ -235,11 +295,6 @@ class App:
         self._scheduler = scheduler
         self._webhook = webhook
         self._console = console
-        # Le module d'auth est possédé par la racine de composition. L'App ne
-        # s'en sert qu'au démarrage, pour publier le Code d'installation une
-        # seule fois tant qu'aucun Compte n'existe ; les surfaces le reçoivent
-        # par leur constructeur.
-        self._auth = auth
         # Instantané non sensible de la configuration : la racine de
         # composition choisit explicitement les clés exposées, pour qu'aucun
         # secret ne puisse s'inviter dans l'instantané par accident.
@@ -291,7 +346,7 @@ class App:
         atteindre le Coordinator (ADR-0016). Aucun secret : ``config`` ne porte
         que les valeurs explicitement injectées par ``build_app``.
         """
-        clients = self._transport.clients
+        clients = self._transport.clients if self._transport is not None else {}
         return {
             "session": {
                 "state": self._coordinator.state.value,
@@ -341,24 +396,19 @@ class App:
         """
         await self._load_plugins()
         await self._warmup_memory()
-        # Le Code d'installation entre dans le flux de traces (donc dans le
-        # journal) avant que la moindre surface ne serve : un visiteur ne peut
-        # pas revendiquer l'instance avant que l'admin n'ait lu le code. Sans
-        # Compte seulement, et une fois par démarrage.
-        if self._auth is not None:
-            self._auth.announce_installation_code()
-        await self._transport.start()
+        if self._transport is not None:
+            await self._transport.start()
         if self._webhook is not None:
             await self._webhook.start(self.push_event)
         if self._console is not None:
             await self._console.start(self.snapshot, self.push_event)
         self._emit("started", payload={"state": self._coordinator.state.value})
 
-        pumps = [
-            asyncio.create_task(self._pump(self._transport.recv)),
-            asyncio.create_task(self._pump(self._gemini.recv)),
-            asyncio.create_task(self._pump(self._clock.recv)),
-        ]
+        pumps = [asyncio.create_task(self._pump(self._clock.recv))]
+        if self._transport is not None:
+            pumps.append(asyncio.create_task(self._pump(self._transport.recv)))
+        if self._gemini is not None:
+            pumps.append(asyncio.create_task(self._pump(self._gemini.recv)))
         if self._scheduler is not None:
             # Background task: never on the event-handling path (ADR-0009).
             pumps.append(asyncio.create_task(self._scheduler.run()))
@@ -372,7 +422,8 @@ class App:
             for pump in pumps:
                 pump.cancel()
             await asyncio.gather(*pumps, return_exceptions=True)
-            await self._transport.stop()
+            if self._transport is not None:
+                await self._transport.stop()
             if self._webhook is not None:
                 await self._webhook.stop()
             if self._console is not None:
@@ -458,13 +509,24 @@ class App:
                 SendToolResultToLlm,
             ),
         ):
-            await self._gemini.execute(command)
+            if self._gemini is not None:
+                await self._gemini.execute(command)
+            else:
+                # Installation sans clé : aucune Connexion Live ne peut exister.
+                # Le noyau n'en émet pas, mais une Commande tardive ne doit pas
+                # faire tomber la boucle.
+                self._emit(
+                    "command_dropped",
+                    payload={"command": type(command).__name__},
+                    level="debug",
+                )
             return
         if isinstance(
             command,
             (SendAudioToClient, AnnounceSessionStarted, AnnounceSessionEnded),
         ):
-            await self._transport.execute(command)
+            if self._transport is not None:
+                await self._transport.execute(command)
             return
         if isinstance(command, StartIdleTimer):
             self._clock.schedule(command.connection_id, command.timeout)
@@ -486,6 +548,8 @@ def build_app(
     config: AppConfig,
     *,
     secrets: SecretResolver | None = None,
+    settings: SecretStore | None = None,
+    secret_validator: SecretValidator | None = None,
     env: Mapping[str, str] | None = None,
     env_file: str | Path | None = None,
     live_connect: LiveConnect | None = None,
@@ -495,19 +559,21 @@ def build_app(
 ) -> App:
     """Construit explicitement : config → trace → adaptateurs → Coordinator.
 
-    ``secrets`` résout les secrets des plugins (variables
-    ``ATHENA_PLUGIN_<PLUGIN>_<SECRET>``) ; par défaut la même vue fusionnée que
-    le reste de la configuration : fichier ``.env`` (celui du répertoire
-    courant, ou ``env_file``) recouvert par l'environnement du processus. Un
-    jeton posé dans le ``.env`` est donc visible des plugins sans être passé par
-    ``AppConfig``. La racine de composition fournit aussi le ``TraceSink`` au
-    chargeur, pour que les états de plugin entrent dans le flux unique.
+    ``secrets`` résout les secrets des plugins et la clé Gemini ; par défaut un
+    résolveur à trois couches (environnement du processus > magasin > ``.env``)
+    applique la précédence de l'ADR-0024. ``settings`` remplace le magasin
+    construit depuis ``config.settings`` (seam de test). ``secret_validator``
+    remplace la validation réelle d'une clé Gemini.
 
-    ``live_connect``, ``clock``, ``embedder`` et ``auth_now`` sont les coutures
-    laissées ouvertes au harnais de test serveur : le serveur garde tous ses
-    autres adaptateurs réels (transport, Console, auth, mémoire SQLite), et seul
-    le modèle Live, l'horloge (noyau et auth) ou le modèle d'embedding sont
-    remplacés.
+    Sans clé Gemini utilisable, l'instance démarre en **Installation** : le
+    transport, le Webhook et Gemini ne sont pas construits, la Console et ses
+    routes de Réglages et de Secrets restent servies (ADR-0025).
+
+    ``live_connect``, ``clock``, ``embedder``, ``auth_now``, ``settings`` et
+    ``secret_validator`` sont les coutures laissées ouvertes au harnais de test
+    serveur : le serveur garde tous ses autres adaptateurs réels (Console, auth,
+    mémoire SQLite), et la configuration effective se remplace sans relancer le
+    processus.
     """
     # Tampon de traces de la Console : consommateur borné du flux unique, gardé
     # seulement quand la surface est servie. Le fan-out y pousse chaque entrée,
@@ -539,18 +605,44 @@ def build_app(
         password_min_length=config.auth.password_min_length,
         login_max_attempts=config.auth.login_max_attempts,
         login_block_seconds=config.auth.login_block_minutes * 60,
-        setup_max_attempts=config.auth.setup_max_attempts,
     )
 
-    plugin_secrets = (
+    # Magasin de réglages et de Secrets (ADR-0024) : base dédiée à côté de la
+    # mémoire et de l'auth. Construit avant les adaptateurs qui le lisent, et
+    # remplaçable en test sans relancer le processus.
+    settings_store: SecretStore = (
+        settings
+        if settings is not None
+        else SqliteSettingsStore(
+            db_path=config.settings.db_path,
+            key_path=config.settings.master_key_file,
+            trace_sink=trace_sink,
+        )
+    )
+
+    # Précédence des Secrets : environnement du processus > magasin > .env.
+    # Le fichier reste une couche distincte, sinon un Secret du magasin serait
+    # masqué par une vieille valeur du fichier.
+    process_env = os.environ if env is None else env
+    dotenv = parse_dotenv(
+        env_file if env_file is not None else default_env_file()
+    )
+    secret_resolver: SecretResolver = (
         secrets
         if secrets is not None
-        else EnvSecretResolver(
-            merged_environment(
-                env,
-                env_file=env_file if env_file is not None else default_env_file(),
-            )
+        else LayeredSecretResolver(
+            process_env=process_env, store=settings_store, dotenv=dotenv
         )
+    )
+    api_key = (
+        _optional_secret(secret_resolver, GEMINI_SECRET)
+        or config.gemini.api_key
+    ).strip()
+    gemini_enabled = bool(api_key)
+    # La configuration effective, gelée au démarrage : c'est la référence des
+    # « changements en attente » du ticket #174.
+    config = config.model_copy(
+        update={"gemini": config.gemini.model_copy(update={"api_key": api_key})}
     )
 
     # Tools du noyau et Tools de plugin partagent un seul registre : celui du
@@ -560,22 +652,25 @@ def build_app(
     # enregistrement, plugin chargé ou non.
     plugins = PluginRegistry()
 
-    transport = WebSocketTransport(
-        host=config.server.host,
-        port=config.server.port,
-        server_tools=server_tool_names(plugins),
-        trace_sink=trace_sink,
-        # Même store que la Console : une révocation prononcée depuis la
-        # surface d'observation vaut pour le transport, sans redémarrage.
-        auth=auth,
-    )
-    gemini = GeminiLiveAdapter(
-        api_key=config.gemini.api_key,
-        model=config.gemini.model,
-        voice=config.gemini.voice,
-        live_connect=live_connect,
-        trace_sink=trace_sink,
-    )
+    transport: WebSocketTransport | None = None
+    gemini: GeminiLiveAdapter | None = None
+    if gemini_enabled:
+        transport = WebSocketTransport(
+            host=config.server.host,
+            port=config.server.port,
+            server_tools=server_tool_names(plugins),
+            trace_sink=trace_sink,
+            # Même store que la Console : une révocation prononcée depuis la
+            # surface d'observation vaut pour le transport, sans redémarrage.
+            auth=auth,
+        )
+        gemini = GeminiLiveAdapter(
+            api_key=api_key,
+            model=config.gemini.model,
+            voice=config.gemini.voice,
+            live_connect=live_connect,
+            trace_sink=trace_sink,
+        )
     clock = clock if clock is not None else AsyncioClock()
 
     embedder = (
@@ -591,33 +686,36 @@ def build_app(
         journal_retention_days=config.memory.journal_retention_days,
     )
 
-    extractor = GeminiFactExtractor(
-        api_key=config.gemini.api_key,
-        model=config.memory.consolidation_model,
-        trace_sink=trace_sink,
-    )
-    judge = GeminiEventJudge(
-        api_key=config.gemini.api_key,
-        model=config.gemini.judge_model,
-        prompt=load_judge_prompt(),
-        trace_sink=trace_sink,
-    )
-    policy = ConsolidationPolicy(config.memory.consolidation_hours)
-    consolidation = Consolidation(
-        memory=memory,
-        extractor=extractor,
-        policy=policy,
-        user_id=config.memory.user_id,
-        dedup_threshold=config.memory.dedup_threshold,
-        journal_retention_days=config.memory.journal_retention_days,
-    )
-    scheduler = ConsolidationScheduler(
-        consolidation=consolidation,
-        policy=policy,
-        now=local_now,
-        sleep=asyncio.sleep,
-        on_run=lambda report: _trace_consolidation(trace_sink, report),
-    )
+    judge: GeminiEventJudge | None = None
+    scheduler: ConsolidationScheduler | None = None
+    if gemini_enabled:
+        extractor = GeminiFactExtractor(
+            api_key=api_key,
+            model=config.memory.consolidation_model,
+            trace_sink=trace_sink,
+        )
+        judge = GeminiEventJudge(
+            api_key=api_key,
+            model=config.gemini.judge_model,
+            prompt=load_judge_prompt(),
+            trace_sink=trace_sink,
+        )
+        policy = ConsolidationPolicy(config.memory.consolidation_hours)
+        consolidation = Consolidation(
+            memory=memory,
+            extractor=extractor,
+            policy=policy,
+            user_id=config.memory.user_id,
+            dedup_threshold=config.memory.dedup_threshold,
+            journal_retention_days=config.memory.journal_retention_days,
+        )
+        scheduler = ConsolidationScheduler(
+            consolidation=consolidation,
+            policy=policy,
+            now=local_now,
+            sleep=asyncio.sleep,
+            on_run=lambda report: _trace_consolidation(trace_sink, report),
+        )
 
     # Les Tools du noyau entrent au propriétaire ``core`` ; les plugins activés
     # s'y ajoutent au démarrage.
@@ -633,18 +731,27 @@ def build_app(
     plugin_loader = PluginLoader(
         directory=config.plugins.directory,
         state_path=config.plugins.state_path,
-        secrets=plugin_secrets,
+        secrets=secret_resolver,
         trace_sink=trace_sink,
     )
 
     webhook: WebhookAdapter | None = None
-    if config.webhook.enabled:
+    if config.webhook.enabled and gemini_enabled:
         webhook = WebhookAdapter(
             host=config.webhook.host,
             port=config.webhook.port,
             trace_sink=trace_sink,
             auth=auth,
         )
+
+    # État d'Installation : Compte + Secret Gemini utilisable (ADR-0025).
+    installation = Installation(auth=auth, secrets=settings_store, runtime_key=api_key)
+    validator = (
+        secret_validator
+        if secret_validator is not None
+        else GeminiKeyValidator(model=config.gemini.judge_model)
+    )
+    ensure_master_key = getattr(settings_store, "ensure_master_key", None)
 
     console: ConsoleAdapter | None = None
     if config.console.enabled:
@@ -655,6 +762,10 @@ def build_app(
             trace_buffer=console_trace_buffer,
             trace_sink=trace_sink,
             auth=auth,
+            secrets=settings_store,
+            secret_validator=validator,
+            installation=installation.status,
+            master_key=ensure_master_key,
         )
 
     return App(
@@ -676,7 +787,6 @@ def build_app(
         scheduler=scheduler,
         webhook=webhook,
         console=console,
-        auth=auth,
         snapshot_config={
             "model": config.gemini.model,
             "voice": config.gemini.voice,
@@ -686,3 +796,11 @@ def build_app(
             "version": __version__,
         },
     )
+
+
+def _optional_secret(resolver: SecretResolver, name: str) -> str | None:
+    """Résout un Secret facultatif : son absence n'est pas une erreur ici."""
+    try:
+        return resolver.resolve(name)
+    except MissingSecretError:
+        return None

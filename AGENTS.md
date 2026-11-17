@@ -49,9 +49,10 @@ Le module d'auth vit dans `server/adapters/auth/` (port `AuthService` dans
 `server/core/ports.py`). Il possède sa propre base SQLite, **distincte de la mémoire** :
 `ATHENA_AUTH_DB` (`auth.db` par défaut, relatif au répertoire de travail). Les tables
 (Comptes, Tickets Console, Jetons d'accès) sont créées par `CREATE TABLE IF NOT EXISTS`,
-sans migration. Au démarrage sans Compte, un Code d'installation à usage unique est écrit
-dans le journal (`logs/server.log`) sous `[auth] InstallationCode` ; il n'est plus jamais
-émis dès qu'un Compte existe.
+sans migration. L'Installation ne demande **aucun code** (ADR-0025) : au premier
+démarrage sans Compte, `POST /api/setup` crée l'unique Compte et le premier visiteur
+devient propriétaire ; une fois le Compte créé, la route refuse définitivement
+(`409 already_installed`). Aucune trace `InstallationCode` n'existe plus.
 
 - `ATHENA_CONSOLE_TICKET_DAYS` : `30` jours glissants par défaut.
 - `ATHENA_CONSOLE_TICKET_REFRESH_SECONDS` : `3600` (l'expiration n'est repoussée qu'au
@@ -60,7 +61,6 @@ dans le journal (`logs/server.log`) sous `[auth] InstallationCode` ; il n'est pl
   (hachage Argon2id).
 - `ATHENA_AUTH_LOGIN_MAX_ATTEMPTS` : `5` échecs avant blocage.
 - `ATHENA_AUTH_LOGIN_BLOCK_MINUTES` : `15` minutes de blocage, levé automatiquement.
-- `ATHENA_AUTH_SETUP_MAX_ATTEMPTS` : `5` tentatives d'installation avant blocage.
 
 Les deux mécanismes de credential (ADR-0017) :
 
@@ -75,6 +75,32 @@ Les deux mécanismes de credential (ADR-0017) :
 - **Client desktop** : le Jeton se saisit sur la **page locale de couplage** du daemon, ou
   reste fourni par `ATHENA_ACCESS_TOKEN` (surcharge de processus prioritaire). Il part au
   handshake en `Authorization: Bearer` et n'est jamais réaffiché.
+
+### Réglages, Secrets et Installation
+
+Le **magasin de réglages** vit dans `server/adapters/settings/` (ports `SettingsStore` /
+`SecretStore` dans `server/core/ports.py`) : base SQLite dédiée
+`ATHENA_SETTINGS_DB` (`settings.db` par défaut) et **clé maître** chiffrante
+`ATHENA_MASTER_KEY_FILE` (`master.key` par défaut), fichier `0600` **séparé** du magasin.
+Les Secrets sont chiffrés au repos en AES-GCM (`cryptography`) : la clé maître est générée
+au `POST /api/setup` et renvoyée **une seule fois** dans la réponse (`master_key`, à
+sauvegarder avec le magasin). Perdue, le serveur démarre quand même, expose
+`secrets_unreadable` dans `GET /api/session` et demande de re-saisir les Secrets ; rien
+n'est réinitialisé en silence.
+
+- `GET /api/session` expose `setup_required` (aucun Compte), `authenticated`, `username`,
+  `gemini_configured`, `installation_complete`, `restart_required`, `secrets_unreadable`.
+- `GET /api/secrets` : noms, `configured`, `updated_at`, jamais de valeur.
+  `PUT /api/secrets/{nom}` valide la clé Gemini par un appel réel
+  (`count_tokens`) avant de l'enregistrer ; `DELETE /api/secrets/{nom}` l'efface.
+- `POST /api/chat` répond `409 installation_incomplete` tant que la clé Gemini manque
+  (le ticket #172 remplace ce refus par le flux du Tour).
+- Précédence : **environnement du processus > magasin > `.env` > défauts**, avec la source
+  de chaque champ (`server/core/settings.py`). L'environnement masque un champ en lecture
+  seule ; les chemins des bases, des Plugins et des journaux sont en lecture seule.
+- Sans clé Gemini, le serveur démarre en **Installation** : transport des Clients, Webhook
+  et Gemini ne sont pas démarrés ; la Console, les Réglages et le Diagnostic répondent.
+  `GEMINI_API_KEY` n'est plus obligatoire au démarrage.
 
 ### Page locale de couplage
 

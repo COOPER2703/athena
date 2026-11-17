@@ -11,12 +11,12 @@ from server.adapters.auth.store import (
     DEFAULT_LOGIN_BLOCK_SECONDS,
     DEFAULT_LOGIN_MAX_ATTEMPTS,
     DEFAULT_PASSWORD_MIN_LENGTH,
-    DEFAULT_SETUP_MAX_ATTEMPTS,
     DEFAULT_TICKET_REFRESH_SECONDS,
     DEFAULT_TICKET_TTL_SECONDS,
 )
 from server.adapters.memory.embedder import DEFAULT_EMBED_MODEL
 from server.app.secrets import EnvSecretResolver, SecretResolver
+from server.core.ports import MissingSecretError
 
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-live-preview"
 DEFAULT_GEMINI_VOICE = "Leda"
@@ -40,7 +40,6 @@ DEFAULT_CONSOLE_TICKET_REFRESH_SECONDS = DEFAULT_TICKET_REFRESH_SECONDS
 DEFAULT_AUTH_PASSWORD_MIN_LENGTH = DEFAULT_PASSWORD_MIN_LENGTH
 DEFAULT_AUTH_LOGIN_MAX_ATTEMPTS = DEFAULT_LOGIN_MAX_ATTEMPTS
 DEFAULT_AUTH_LOGIN_BLOCK_MINUTES = DEFAULT_LOGIN_BLOCK_SECONDS // 60
-DEFAULT_AUTH_SETUP_MAX_ATTEMPTS = DEFAULT_SETUP_MAX_ATTEMPTS
 # Modèle de Consolidation : Flash-Lite, disponible sur l'échelle gratuite. Le
 # précédent défaut (`gemini-2.0-flash`) a été retiré et renvoyait 404.
 DEFAULT_CONSOLIDATION_MODEL = "gemini-3.1-flash-lite"
@@ -65,6 +64,11 @@ DEFAULT_LOG_DIR = "logs"
 # déploiements.
 DEFAULT_PLUGINS_DIR = "plugins"
 DEFAULT_PLUGINS_STATE = "plugins.json"
+# Magasin de réglages et de Secrets (ADR-0024) : base dédiée, à côté de la
+# mémoire et de l'auth, et clé maître dans un fichier séparé en ``0600``. Le
+# chemin de la clé peut pointer vers un répertoire de credentials systemd.
+DEFAULT_SETTINGS_DB = "settings.db"
+DEFAULT_MASTER_KEY_FILE = "master.key"
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"", "0", "false", "no", "off"}
@@ -105,11 +109,16 @@ class ServerConfig(BaseModel):
 
 
 class GeminiConfig(BaseModel):
-    """Paramètres de connexion à Gemini Live."""
+    """Paramètres de connexion à Gemini Live.
+
+    La clé est **facultative** (ADR-0025) : une instance neuve démarre sans
+    elle, en mode Installation. Vide, elle ferme le transport, le Webhook et
+    Gemini ; la Console et les Réglages restent joignables.
+    """
 
     model_config = ConfigDict(frozen=True)
 
-    api_key: str
+    api_key: str = ""
     model: str = DEFAULT_GEMINI_MODEL
     voice: str = DEFAULT_GEMINI_VOICE
     judge_model: str = Field(default=DEFAULT_JUDGE_MODEL, min_length=1)
@@ -246,16 +255,15 @@ class AuthConfig(BaseModel):
 
     La base d'auth est **distincte** de la mémoire ; elle est créée sans
     infrastructure de migration (``CREATE TABLE IF NOT EXISTS``). Les valeurs
-    sont des bornes de sécurité, jamais des secrets : le Code d'installation,
-    les Tickets Console et les Jetons d'accès sont générés au démarrage ou à la
-    demande.
+    sont des bornes de sécurité, jamais des secrets : les Tickets Console et les
+    Jetons d'accès sont générés à la demande.
 
     Défauts : ``auth.db``, Ticket de 30 jours glissants rafraîchi au plus une
     fois par heure, mot de passe d'au moins 12 caractères, blocage après
     cinq échecs pendant quinze minutes. Surchargeables par ``ATHENA_AUTH_DB``,
     ``ATHENA_CONSOLE_TICKET_DAYS``, ``ATHENA_CONSOLE_TICKET_REFRESH_SECONDS``,
-    ``ATHENA_AUTH_PASSWORD_MIN_LENGTH``, ``ATHENA_AUTH_LOGIN_MAX_ATTEMPTS``,
-    ``ATHENA_AUTH_LOGIN_BLOCK_MINUTES`` et ``ATHENA_AUTH_SETUP_MAX_ATTEMPTS``.
+    ``ATHENA_AUTH_PASSWORD_MIN_LENGTH``, ``ATHENA_AUTH_LOGIN_MAX_ATTEMPTS`` et
+    ``ATHENA_AUTH_LOGIN_BLOCK_MINUTES``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -270,7 +278,6 @@ class AuthConfig(BaseModel):
     )
     login_max_attempts: int = Field(default=DEFAULT_AUTH_LOGIN_MAX_ATTEMPTS, ge=1)
     login_block_minutes: int = Field(default=DEFAULT_AUTH_LOGIN_BLOCK_MINUTES, ge=1)
-    setup_max_attempts: int = Field(default=DEFAULT_AUTH_SETUP_MAX_ATTEMPTS, ge=1)
 
     @field_validator("db_path", mode="before")
     @classmethod
@@ -298,6 +305,26 @@ class PluginsConfig(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
+class SettingsConfig(BaseModel):
+    """Emplacements du magasin de réglages et de la clé maître (ADR-0024).
+
+    Les deux chemins sont en **lecture seule** dans l'interface : une faute de
+    frappe ferait démarrer le serveur sur une base vide, ou rendrait les
+    Secrets illisibles sans recours. ``master_key_file`` peut pointer vers le
+    répertoire de credentials d'un service systemd (``systemd-creds``).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    db_path: str = Field(default=DEFAULT_SETTINGS_DB, min_length=1)
+    master_key_file: str = Field(default=DEFAULT_MASTER_KEY_FILE, min_length=1)
+
+    @field_validator("db_path", "master_key_file", mode="before")
+    @classmethod
+    def _strip_path(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
 class AppConfig(BaseModel):
     """Configuration validée au démarrage, injectée par constructeur."""
 
@@ -310,6 +337,7 @@ class AppConfig(BaseModel):
     console: ConsoleConfig = Field(default_factory=ConsoleConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
+    settings: SettingsConfig = Field(default_factory=SettingsConfig)
     log_level: LogLevel = LogLevel.INFO
     log_dir: str = Field(default=DEFAULT_LOG_DIR, min_length=1)
     debug_decisions: bool = False
@@ -387,15 +415,19 @@ def load_config(
     """Construit la configuration depuis l'environnement et un fichier ``.env``.
 
     L'environnement prime sur le fichier. Le secret Gemini est résolu via le
-    ``SecretResolver`` injecté (ou un résolveur d'environnement par défaut) :
-    une variable manquante lève ``MissingSecretError``.
+    ``SecretResolver`` injecté (ou un résolveur d'environnement par défaut) ;
+    il est **facultatif** : sans clé, l'instance démarre en mode Installation
+    (ADR-0025) et la racine de composition consultera le magasin de Secrets.
     """
     merged = merged_environment(env, env_file=env_file)
 
     resolver: SecretResolver = (
         secrets if secrets is not None else EnvSecretResolver(merged)
     )
-    api_key = resolver.resolve("GEMINI_API_KEY")
+    try:
+        api_key = resolver.resolve("GEMINI_API_KEY")
+    except MissingSecretError:
+        api_key = ""
 
     return AppConfig(
         server=ServerConfig(
@@ -444,6 +476,12 @@ def load_config(
             directory=merged.get("ATHENA_PLUGINS_DIR", DEFAULT_PLUGINS_DIR),
             state_path=merged.get("ATHENA_PLUGINS_STATE", DEFAULT_PLUGINS_STATE),
         ),
+        settings=SettingsConfig(
+            db_path=merged.get("ATHENA_SETTINGS_DB", DEFAULT_SETTINGS_DB),
+            master_key_file=merged.get(
+                "ATHENA_MASTER_KEY_FILE", DEFAULT_MASTER_KEY_FILE
+            ),
+        ),
         auth=AuthConfig(
             db_path=merged.get("ATHENA_AUTH_DB", DEFAULT_AUTH_DB),
             ticket_days=merged.get(
@@ -464,10 +502,6 @@ def load_config(
             login_block_minutes=merged.get(
                 "ATHENA_AUTH_LOGIN_BLOCK_MINUTES",
                 str(DEFAULT_AUTH_LOGIN_BLOCK_MINUTES),
-            ),
-            setup_max_attempts=merged.get(
-                "ATHENA_AUTH_SETUP_MAX_ATTEMPTS",
-                str(DEFAULT_AUTH_SETUP_MAX_ATTEMPTS),
             ),
         ),
         log_level=merged.get("LOG_LEVEL", "INFO"),

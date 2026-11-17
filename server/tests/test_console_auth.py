@@ -35,6 +35,16 @@ from server.adapters.console.contract import (
     TICKET_COOKIE,
 )
 
+def _installed_status() -> dict[str, bool]:
+    """Champs d'Installation par défaut d'un adaptateur sans racine de composition."""
+    return {
+        "gemini_configured": True,
+        "installation_complete": True,
+        "restart_required": False,
+        "secrets_unreadable": False,
+    }
+
+
 NEW_PASSWORD = "an entirely different passphrase"
 WEAK_PASSWORD = "short"
 
@@ -53,11 +63,7 @@ async def _install(
 ) -> aiohttp.ClientResponse:
     return await client.post(
         f"{console.url}{SETUP_PATH}",
-        json={
-            "code": console.install_code(),
-            "username": username,
-            "password": TEST_PASSWORD,
-        },
+        json={"username": username, "password": TEST_PASSWORD},
     )
 
 
@@ -91,6 +97,7 @@ def test_a_fresh_instance_answers_setup_required_before_anything_else(
                         "setup_required": True,
                         "authenticated": False,
                         "username": None,
+                        **_installed_status(),
                     }
 
                 async with http.get(f"{console.url}{SETUP_PATH}") as response:
@@ -100,31 +107,6 @@ def test_a_fresh_instance_answers_setup_required_before_anything_else(
                 async with http.get(f"{console.url}/") as response:
                     assert response.status == 200
                     assert "text/html" in response.headers["Content-Type"]
-        finally:
-            await console.stop()
-
-    asyncio.run(scenario())
-
-
-def test_install_with_a_wrong_code_is_forbidden(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        console = Console(tmp_path)
-        await console.start()
-        try:
-            async with console.client() as http:
-                async with http.post(
-                    f"{console.url}{SETUP_PATH}",
-                    json={
-                        "code": "not-the-code",
-                        "username": "admin",
-                        "password": TEST_PASSWORD,
-                    },
-                ) as response:
-                    assert response.status == 403
-                    assert (await _json(response))["error"] == "invalid_code"
-
-                async with http.get(f"{console.url}{SESSION_PATH}") as response:
-                    assert (await _json(response))["setup_required"] is True
         finally:
             await console.stop()
 
@@ -145,6 +127,7 @@ def test_install_opens_an_httponly_secure_ticket_and_unlocks_the_api(
                         "v": 1,
                         "authenticated": True,
                         "username": "admin",
+                        "master_key": None,
                     }
                     [cookie] = _set_cookies(response)
                     assert cookie.startswith(f"{TICKET_COOKIE}=")
@@ -164,6 +147,7 @@ def test_install_opens_an_httponly_secure_ticket_and_unlocks_the_api(
                         "setup_required": False,
                         "authenticated": True,
                         "username": "admin",
+                        **_installed_status(),
                     }
         finally:
             await console.stop()
@@ -178,7 +162,6 @@ def test_a_second_install_is_refused_once_the_account_exists(
         console = Console(tmp_path)
         await console.start()
         try:
-            code = console.install_code()
             async with console.client() as http:
                 async with await _install(console, http) as response:
                     assert response.status == 200
@@ -188,7 +171,7 @@ def test_a_second_install_is_refused_once_the_account_exists(
             async with console.client() as http:
                 async with http.post(
                     f"{console.url}{SETUP_PATH}",
-                    json={"code": code, "username": "intruder", "password": TEST_PASSWORD},
+                    json={"username": "intruder", "password": TEST_PASSWORD},
                 ) as response:
                     assert response.status == 409
                     assert (await _json(response))["error"] == "already_installed"
@@ -209,10 +192,9 @@ def test_the_minimum_password_length_is_enforced_by_the_server(
         await console.start()
         try:
             async with console.client() as http:
-                code = console.install_code()
                 async with http.post(
                     f"{console.url}{SETUP_PATH}",
-                    json={"code": code, "username": "admin", "password": WEAK_PASSWORD},
+                    json={"username": "admin", "password": WEAK_PASSWORD},
                 ) as response:
                     assert response.status == 400
                     body = await _json(response)
@@ -483,7 +465,6 @@ def test_a_mutating_request_without_an_origin_is_refused(tmp_path: Path) -> None
                 async with http.post(
                     f"{console.url}{SETUP_PATH}",
                     json={
-                        "code": console.install_code(),
                         "username": "admin",
                         "password": TEST_PASSWORD,
                     },

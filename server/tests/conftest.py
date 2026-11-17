@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator, Callable, Iterable, Mapping
@@ -159,11 +158,6 @@ class Console:
         headers = {"Origin": self.url} if origin else {}
         return aiohttp.ClientSession(cookie_jar=jar, headers=headers)
 
-    def install_code(self) -> str:
-        code = self.store.announce_installation_code()
-        assert code is not None
-        return code
-
     async def install(
         self,
         http: aiohttp.ClientSession,
@@ -174,11 +168,7 @@ class Console:
         """Installe le Compte par la vraie route ; le jar garde le Ticket."""
         async with http.post(
             f"{self.url}{SETUP_PATH}",
-            json={
-                "code": self.install_code(),
-                "username": username,
-                "password": password,
-            },
+            json={"username": username, "password": password},
         ) as response:
             assert response.status == 200, await response.text()
 
@@ -190,23 +180,6 @@ async def wait_until(predicate: Callable[[], bool], timeout: float = 1.0) -> Non
         if loop.time() > deadline:
             raise AssertionError("condition not met in time")
         await asyncio.sleep(0.001)
-
-
-_INSTALLATION_CODE = re.compile(r'"code": "([^"]+)"')
-
-
-async def read_installation_code(path: Path, timeout: float = 5.0) -> str:
-    """Lit le Code d'installation écrit au démarrage dans le journal."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while True:
-        if path.is_file():
-            match = _INSTALLATION_CODE.search(path.read_text(encoding="utf-8"))
-            if match is not None:
-                return match.group(1)
-        if loop.time() > deadline:
-            raise AssertionError(f"aucun Code d'installation dans {path}")
-        await asyncio.sleep(0.01)
 
 
 def console_session(base_url: str) -> aiohttp.ClientSession:
@@ -226,21 +199,19 @@ def console_session(base_url: str) -> aiohttp.ClientSession:
 async def install_console(
     http: aiohttp.ClientSession,
     base_url: str,
-    log_path: Path,
     *,
     username: str = "admin",
     password: str = TEST_PASSWORD,
     timeout: float = 5.0,
 ) -> None:
-    """Installe l'instance à partir du journal et garde le Ticket dans le jar."""
-    code = await read_installation_code(log_path, timeout)
+    """Installe l'instance sans code et garde le Ticket dans le jar."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while True:
         try:
             async with http.post(
                 f"{base_url}/api/setup",
-                json={"code": code, "username": username, "password": password},
+                json={"username": username, "password": password},
             ) as response:
                 assert response.status == 200, await response.text()
                 return

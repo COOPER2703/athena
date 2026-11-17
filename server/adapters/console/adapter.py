@@ -23,8 +23,10 @@ from typing import Callable, Mapping
 from aiohttp import web
 
 from server.adapters.console.auth import ConsoleAuth
+from server.adapters.console.chat import ChatEndpoint
 from server.adapters.console.contract import (
     API_PREFIX,
+    CHAT_PATH,
     ENVELOPE_VERSION,
     EVENTS_PATH,
     HEALTH_PATH,
@@ -32,6 +34,7 @@ from server.adapters.console.contract import (
     LOGOUT_ALL_PATH,
     LOGOUT_PATH,
     PASSWORD_PATH,
+    SECRETS_PATH,
     SESSION_PATH,
     SETUP_PATH,
     STATUS_PATH,
@@ -39,6 +42,7 @@ from server.adapters.console.contract import (
     TOKENS_PATH,
 )
 from server.adapters.console.events import EventInjection
+from server.adapters.console.secrets import SecretsRoutes
 from server.adapters.console.status import (
     DEFAULT_STATUS_INTERVAL,
     StatusBroadcaster,
@@ -47,7 +51,13 @@ from server.adapters.console.stream import stream_handler
 from server.adapters.console.trace_buffer import TraceBuffer
 from server.adapters.event_body import MAX_BODY_BYTES
 from server.adapters.trace import NullTraceSink
-from server.core.ports import AuthService, TraceSink
+from server.core.ports import (
+    AuthService,
+    InstallationStatus,
+    SecretStore,
+    SecretValidator,
+    TraceSink,
+)
 
 # Build de la SPA, produit par `make web`. Le répertoire n'existe pas
 # nécessairement : l'API ne dépend pas du front (ADR-0003).
@@ -95,6 +105,16 @@ _EXPLANATION_PAGE = """<!doctype html>
 """
 
 
+def _installed() -> InstallationStatus:
+    """État d'Installation par défaut de l'adaptateur sans racine de composition."""
+    return InstallationStatus(
+        gemini_configured=True,
+        installation_complete=True,
+        restart_required=False,
+        secrets_unreadable=False,
+    )
+
+
 class ConsoleAdapter:
     """Surface d'observation en lecture seule, alimentée par ``snapshot``.
 
@@ -112,14 +132,30 @@ class ConsoleAdapter:
         trace_sink: TraceSink | None = None,
         status_interval: float = DEFAULT_STATUS_INTERVAL,
         auth: AuthService | None = None,
+        secrets: SecretStore | None = None,
+        secret_validator: SecretValidator | None = None,
+        installation: Callable[[], InstallationStatus] | None = None,
+        master_key: Callable[[], str | None] | None = None,
     ) -> None:
         self._host = host
         self._port = port
         self._static_dir = Path(static_dir)
-        # La couture d'authentification est injectée par la racine de
-        # composition. Sans elle, la surface reste ouverte : c'est le mode des
-        # tests unitaires de l'adaptateur, jamais celui de ``build_app``.
-        self._console_auth = ConsoleAuth(auth)
+        # La couture d'identité et d'Installation est injectée par la racine de
+        # composition. Sans elle, la surface reste ouverte et se comporte comme
+        # une instance installée : c'est le mode des tests unitaires de
+        # l'adaptateur, jamais celui de ``build_app``.
+        self._installation = installation or _installed
+        self._console_auth = ConsoleAuth(
+            auth,
+            installation=self._installation,
+            master_key=master_key,
+        )
+        # Les Secrets sont en écriture seule ; leur validation distante est
+        # injectée (faux validateur dans les tests, Gemini en production).
+        self._secrets_routes = SecretsRoutes(
+            secrets=secrets, validator=secret_validator
+        )
+        self._chat = ChatEndpoint(installation=self._installation)
         # Cadence du tick qui pousse les changements d'instantané. Le tick est
         # une tâche de fond possédée par l'adaptateur : jamais sur le chemin
         # d'une requête (ADR-0005, ADR-0016).
@@ -251,6 +287,18 @@ class ConsoleAdapter:
             ),
         )
         app.router.add_post(EVENTS_PATH, self._handle_event)
+        # Réglages et Secrets (ADR-0024) : lecture des noms seulement, écriture
+        # et effacement par nom. Enregistrés avant le repli ``/api/*``.
+        app.router.add_get(SECRETS_PATH, self._secrets_routes.handle_list)
+        app.router.add_put(
+            f"{SECRETS_PATH}/{{name}}", self._secrets_routes.handle_set
+        )
+        app.router.add_delete(
+            f"{SECRETS_PATH}/{{name}}", self._secrets_routes.handle_delete
+        )
+        # Conversation : refusée côté serveur tant que l'Installation n'est pas
+        # terminée ; le ticket #172 remplace ce refus par le flux du Tour.
+        app.router.add_post(CHAT_PATH, self._chat.handle)
         # Tout chemin inconnu **sous /api** reste du JSON : un client de l'API
         # ne reçoit jamais une page HTML ou du texte. Le repli est enregistré
         # après les routes exactes, qui gardent la priorité.

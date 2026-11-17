@@ -11,16 +11,15 @@ empreinte SHA-256 l'est (ce sont des secrets à haute entropie, pas des mots de
 passe). Le mot de passe du Compte est haché en Argon2id ; le calcul est déporté
 hors de la boucle asyncio unique (ADR-0005) par ``asyncio.to_thread``.
 
-Comme les autres adaptateurs, ce module n'importe pas ``logging`` : le Code
-d'installation et les états passent par le ``TraceSink`` injecté, donc par le
-flux unique de traces et le journal (ADR-0004).
+Comme les autres adaptateurs, ce module n'importe pas ``logging`` : les états
+passent par le ``TraceSink`` injecté, donc par le flux unique de traces et le
+journal (ADR-0004).
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
-import hmac
 import secrets
 import sqlite3
 import threading
@@ -30,7 +29,7 @@ from typing import Callable
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
 
-from server.adapters.trace import NullTraceSink, emit
+from server.adapters.trace import NullTraceSink
 from server.core.ports import (
     AccessToken,
     Account,
@@ -51,7 +50,6 @@ DEFAULT_PASSWORD_MIN_LENGTH = 12
 # un proxy elle serait constante ou contournable par en-tête forgé).
 DEFAULT_LOGIN_MAX_ATTEMPTS = 5
 DEFAULT_LOGIN_BLOCK_SECONDS = 15 * 60
-DEFAULT_SETUP_MAX_ATTEMPTS = 5
 # Plafond des noms suivis par le compteur d'échecs. Sans borne, un attaquant
 # créerait une entrée par nom aléatoire et ferait croître la mémoire sans fin ;
 # les entrées expirées sont purgées et les plus anciennes évincées.
@@ -166,7 +164,6 @@ class SqliteAuthStore:
         password_min_length: int = DEFAULT_PASSWORD_MIN_LENGTH,
         login_max_attempts: int = DEFAULT_LOGIN_MAX_ATTEMPTS,
         login_block_seconds: float = DEFAULT_LOGIN_BLOCK_SECONDS,
-        setup_max_attempts: int = DEFAULT_SETUP_MAX_ATTEMPTS,
         max_tracked_attempts: int = DEFAULT_MAX_TRACKED_ATTEMPTS,
         last_used_resolution_seconds: float = DEFAULT_LAST_USED_RESOLUTION_SECONDS,
     ) -> None:
@@ -178,7 +175,6 @@ class SqliteAuthStore:
         self._password_min_length = password_min_length
         self._login_max_attempts = login_max_attempts
         self._login_block = login_block_seconds
-        self._setup_max_attempts = setup_max_attempts
         self._max_tracked_attempts = max(1, max_tracked_attempts)
         self._last_used_resolution = last_used_resolution_seconds
         # Paramètres par défaut de la bibliothèque : Argon2id, mémoire dure.
@@ -186,9 +182,6 @@ class SqliteAuthStore:
         self._db: sqlite3.Connection | None = None
         self._lock = threading.Lock()
         self._attempts: dict[str, _Attempts] = {}
-        # Code d'installation à usage unique, en mémoire seulement : il ne
-        # survit ni au redémarrage ni à la création du Compte.
-        self._installation_code: str | None = None
 
     @property
     def setup_required(self) -> bool:
@@ -209,39 +202,11 @@ class SqliteAuthStore:
         """Nombre de noms suivis par le compteur : toujours borné par le plafond."""
         return len(self._attempts)
 
-    def announce_installation_code(self) -> str | None:
-        """Émet le Code d'installation, une fois par démarrage, sans Compte."""
-        if not self.setup_required:
-            return None
-        if self._installation_code is None:
-            self._installation_code = secrets.token_urlsafe(24)
-            emit(
-                self._trace_sink,
-                TRACE_SOURCE,
-                "InstallationCode",
-                payload={"code": self._installation_code},
-            )
-        return self._installation_code
-
-    async def install(
-        self, code: str, username: str, password: str
-    ) -> IssuedTicket:
-        # Dès qu'un Compte existe, l'installation est fermée pour de bon : le
-        # contrôle passe avant le code, donc un code encore en mémoire ne peut
-        # pas rouvrir la porte.
+    async def install(self, username: str, password: str) -> IssuedTicket:
+        # Dès qu'un Compte existe, l'installation est fermée pour de bon
+        # (ADR-0025) : aucun code n'est demandé au premier visiteur.
         if not self.setup_required:
             raise AuthError("already_installed")
-
-        now = self._now()
-        self._check_attempts(_SETUP_KEY, now)
-
-        expected = self._installation_code
-        if expected is None or not hmac.compare_digest(str(code), expected):
-            self._record_failure(
-                _SETUP_KEY, now, self._setup_max_attempts, self._login_block
-            )
-            self._raise_if_locked(_SETUP_KEY, now)
-            raise AuthError("invalid_code")
 
         username = username.strip()
         if not username:
@@ -249,10 +214,9 @@ class SqliteAuthStore:
         if len(password) < self._password_min_length:
             raise AuthError("weak_password")
 
+        now = self._now()
         password_hash = await asyncio.to_thread(self._hasher.hash, password)
         ticket = self._install_account(username, password_hash, now)
-        self._installation_code = None
-        self._attempts.pop(_SETUP_KEY, None)
         return ticket
 
     async def login(self, username: str, password: str) -> IssuedTicket:
@@ -643,5 +607,3 @@ class SqliteAuthStore:
                 "too_many_attempts", retry_after=state.locked_until - now
             )
 
-
-_SETUP_KEY = "\x00setup"

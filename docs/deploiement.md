@@ -62,7 +62,6 @@ docker run -d \
   --network <reseau-traefik> \
   -v /srv/athena/data:/data \
   -v /srv/athena/logs:/logs \
-  -e GEMINI_API_KEY=... \
   -e TZ=Europe/Paris \
   --log-opt max-size=10m --log-opt max-file=3 \
   --label traefik.enable=true \
@@ -122,7 +121,7 @@ resterait active.
 
 | Variable | Requis | Valeur |
 | --- | --- | --- |
-| `GEMINI_API_KEY` | **toujours** | Clé de l'API Gemini. Absente ou vide → sortie code `2` au démarrage. |
+| `GEMINI_API_KEY` | non | Clé de l'API Gemini. Absente, le serveur démarre en **Installation** : la clé se saisit dans la Console après création du Compte. Fournie ici, elle prime sur le magasin (porte de secours). |
 | `TZ` | recommandé | `Europe/Paris`. Détermine l'heure locale de la consolidation (`ATHENA_CONSOLIDATION_HOURS=0,12`) et l'horodatage des journaux. Défaut image : UTC. |
 | `ATHENA_PLUGIN_HOMEASSISTANT_TOKEN` | si `homeassistant` est activé | Jeton Home Assistant. |
 | `ATHENA_PLUGIN_WEBSEARCH_API_KEY` | si `websearch` est activé | Clé Tavily. |
@@ -142,6 +141,8 @@ dans un `env_file` versionné du dépôt.
 | --- | --- |
 | `ATHENA_AUTH_DB` | `/data/auth.db` |
 | `ATHENA_MEMORY_DB` | `/data/athena_memory.db` |
+| `ATHENA_SETTINGS_DB` | `/data/settings.db` |
+| `ATHENA_MASTER_KEY_FILE` | `/data/master.key` |
 | `ATHENA_LOG_DIR` | `/logs` |
 | `ATHENA_PLUGINS_STATE` | `/data/plugins.json` |
 | `ATHENA_CONSOLE_STATIC_DIR` | `/app/web/dist` |
@@ -169,7 +170,7 @@ possible mais c'est alors une décision explicite, à documenter dans l'inventai
 
 | Chemin hôte | Chemin conteneur | Propriétaire | Contenu |
 | --- | --- | --- | --- |
-| `/srv/athena/data` | `/data` | `1000:1000`, `0750` | `auth.db`, `athena_memory.db`, `plugins.json` |
+| `/srv/athena/data` | `/data` | `1000:1000`, `0750` | `auth.db`, `athena_memory.db`, `settings.db`, `master.key` (`0600`), `plugins.json` |
 | `/srv/athena/logs` | `/logs` | `1000:1000`, `0750` | `server.log` + `.1`…`.3` (rotation 5 Mio) |
 
 Invariants :
@@ -203,16 +204,22 @@ Invariants :
 
 ### Sauvegarde
 
-Les deux bases sont indépendantes et se sauvegardent ensemble :
+Les bases sont indépendantes et se sauvegardent ensemble. Le magasin de réglages et le
+fichier de **clé maître** forment une **paire** : sauvegarder l'un sans l'autre rend les
+Secrets illisibles (signalé par `secrets_unreadable`, sans réinitialisation silencieuse).
 
 ```sh
 sqlite3 /srv/athena/data/auth.db ".backup '/backup/auth.db'"
 sqlite3 /srv/athena/data/athena_memory.db ".backup '/backup/athena_memory.db'"
+sqlite3 /srv/athena/data/settings.db ".backup '/backup/settings.db'"
+cp /srv/athena/data/master.key /backup/master.key
+chmod 600 /backup/master.key
 ```
 
 Une copie de fichier à chaud peut attraper un état incohérent (WAL) ; `.backup` non. Sans
-sauvegarde de `auth.db`, un `/data` perdu signifie **un nouveau Code d'installation** et
-donc une instance à revendiquer depuis zéro.
+sauvegarde de `auth.db`, un `/data` perdu signifie une instance à revendiquer depuis zéro
+(le premier visiteur devient propriétaire) ; sans `master.key`, les Secrets sont à
+re-saisir.
 
 ---
 
@@ -279,19 +286,17 @@ Invariants :
 
 1. Créer `/srv/athena/{data,logs}` avec `1000:1000`.
 2. Si des plugins sont attendus, écrire `/srv/athena/data/plugins.json` (§5).
-3. Démarrer le conteneur. Tant qu'aucun Compte n'existe, un **Code d'installation à usage
-   unique** est écrit dans le journal :
-
-   ```sh
-   docker logs athena 2>&1 | grep '\[auth\] InstallationCode'
-   # ou
-   grep '\[auth\] InstallationCode' /srv/athena/logs/server.log
-   ```
-
-   Il n'est **plus jamais émis** dès qu'un Compte existe. Si `/data` est perdu, il réapparaît.
-4. Ouvrir `https://athena.cooper-host.com`, revendiquer l'instance avec ce code, définir le
-   mot de passe (12 caractères minimum, Argon2id).
-5. Créer les Jetons d'accès depuis la Console :
+3. Démarrer le conteneur. Le serveur démarre **sans clé Gemini** : transport des Clients,
+   Webhook et Gemini restent fermés, la Console répond.
+4. Ouvrir `https://athena.cooper-host.com` et créer le **premier Compte** (nom d'utilisateur
+   et mot de passe d'au moins 12 caractères, Argon2id, aucun code à recopier). L'écran
+   d'Installation affiche ensuite la **clé maître** une seule fois : la sauvegarder avec
+   `settings.db` avant de continuer.
+5. Saisir la **clé Gemini** dans les Réglages ; elle est validée par un appel réel avant
+   d'être chiffrée dans `settings.db`. L'Installation se termine sans redémarrage, mais le
+   transport, le Webhook et Gemini ne s'ouvrent qu'au **redémarrage** du processus
+   (`restart_required` est exposé par `GET /api/session`).
+6. Créer les Jetons d'accès depuis la Console :
    - nature **`client`** → pour le Client desktop, saisi sur sa page locale de couplage
      (ou fourni par `ATHENA_ACCESS_TOKEN` dans son environnement de processus) ;
    - nature **`source`** → pour chaque source du Webhook, une par émetteur (le jeton
@@ -333,7 +338,7 @@ problème de routage ou de bind.
 | `/events` renvoie une page de SPA | priorité du routeur Console supérieure ou égale à celle du Webhook. |
 | Aucun plugin actif, Console normale | `plugins.json` absent de `/data`. |
 | Démarrage en code `2` avec un nom de variable | secret de plugin requis par `enabled`. |
-| Démarrage en code `2` sans message de secret | `GEMINI_API_KEY` absente ou vide. |
+| `secrets_unreadable` dans `GET /api/session` | `master.key` absent du `/data` ou sauvegardé sans `settings.db` : re-saisir les Secrets dans la Console. |
 | `unable to open database file` | `/data` absent, ou propriétaire différent de `1000`. |
 | Le conteneur démarre mais se vide à chaque recréation | montages manquants (les répertoires créés dans l'Image sont éphémères). |
 | La consolidation ne se déclenche pas aux heures attendues | `TZ` non fourni : le conteneur est en UTC. |

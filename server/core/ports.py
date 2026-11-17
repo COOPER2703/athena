@@ -26,6 +26,102 @@ class SecretResolver(Protocol):
     def resolve(self, name: str) -> str: ...
 
 
+@dataclass(frozen=True, slots=True)
+class SecretStatus:
+    """État public d'un Secret : jamais sa valeur (ADR-0024).
+
+    ``configured`` dit qu'une valeur est enregistrée ; ``updated_at`` date sa
+    dernière écriture. Un Secret illisible (clé maître perdue) reste
+    ``configured`` — la ligne existe — et le magasin signale l'état global.
+    """
+
+    name: str
+    configured: bool
+    updated_at: float | None = None
+
+
+class SettingsStore(Protocol):
+    """Port du magasin de réglages : valeurs JSON et métadonnées (ADR-0024).
+
+    Le noyau ne connaît ni SQL ni le chiffrement. Le ticket #174 lit ces
+    valeurs pour calculer la source de chaque champ et les changements en
+    attente ; la Console ne fait qu'écrire, et l'application passe par un
+    redémarrage.
+    """
+
+    def value(self, key: str) -> str | None:
+        """Valeur enregistrée pour un champ, ou ``None``."""
+        ...
+
+    def values(self) -> Mapping[str, str]:
+        """Toutes les valeurs enregistrées, triées par nom de champ."""
+        ...
+
+    def set_value(self, key: str, value: str) -> None:
+        """Enregistre une valeur et sa date de mise à jour."""
+        ...
+
+    def delete_value(self, key: str) -> bool:
+        """Revient au défaut en effaçant la valeur ; ``False`` si absente."""
+        ...
+
+
+class SecretStore(Protocol):
+    """Port du magasin de Secrets, en **écriture seule** côté surface.
+
+    ``secret`` existe pour la racine de composition (résolution de la config et
+    des Secrets de plugin), jamais pour une route de l'API : aucune route ne
+    renvoie une valeur (ADR-0024).
+    """
+
+    @property
+    def unreadable(self) -> bool:
+        """Vrai si au moins un Secret stocké ne peut plus être déchiffré."""
+        ...
+
+    def secret(self, name: str) -> str | None:
+        """Valeur déchiffrée, ou ``None`` si absente ou illisible."""
+        ...
+
+    def statuses(self) -> Sequence[SecretStatus]:
+        """Nom, état et date de chaque Secret connu, sans valeur."""
+        ...
+
+    def set_secret(self, name: str, value: str) -> SecretStatus:
+        """Chiffre et enregistre un Secret, en créant la clé maître s'il en faut."""
+        ...
+
+    def delete_secret(self, name: str) -> bool:
+        """Efface un Secret ; ``False`` s'il n'existait pas."""
+        ...
+
+
+class SecretValidator(Protocol):
+    """Validation distante d'un Secret avant enregistrement (ADR-0024).
+
+    Seule la clé Gemini sait être vérifiée : ``validate`` rend un message
+    d'erreur en français, ou ``None`` si le Secret est utilisable. Aucune
+    implémentation ne doit mettre la valeur dans le message.
+    """
+
+    async def validate(self, name: str, value: str) -> str | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class InstallationStatus:
+    """État d'Installation d'une instance, calculé par la racine de composition.
+
+    ``setup_required`` reste la seule propriété du module d'auth (aucun Compte) ;
+    l'Installation, elle, se termine quand un Compte existe **et** qu'un Secret
+    Gemini utilisable est enregistré (ADR-0025).
+    """
+
+    gemini_configured: bool
+    installation_complete: bool
+    restart_required: bool
+    secrets_unreadable: bool
+
+
 class ClientLink(Protocol):
     async def send_audio(self, client_id: str, data: bytes) -> None: ...
 
@@ -204,9 +300,9 @@ class TraceSink(Protocol):
 class AuthError(Exception):
     """Échec d'une opération d'authentification, porteur d'un code stable.
 
-    Le code appartient au vocabulaire du port (``invalid_code``,
-    ``already_installed``, ``invalid_credentials``, ``too_many_attempts``,
-    ``weak_password``, ``invalid_username``) : les surfaces le traduisent en
+    Le code appartient au vocabulaire du port (``already_installed``,
+    ``invalid_credentials``, ``too_many_attempts``, ``weak_password``,
+    ``invalid_username``) : les surfaces le traduisent en
     statut HTTP, le port ne connaît pas HTTP. ``retry_after`` accompagne
     ``too_many_attempts`` avec le nombre de secondes restantes.
     """
@@ -311,23 +407,14 @@ class AuthService(Protocol):
         """Longueur minimale du mot de passe imposée côté serveur."""
         ...
 
-    def announce_installation_code(self) -> str | None:
-        """Écrit le Code d'installation au démarrage, s'il en faut un.
-
-        Sans Compte, génère (une fois par démarrage) le code à usage unique et
-        l'émet dans le flux de traces — donc dans le journal. Avec un Compte,
-        ne fait rien et renvoie ``None`` : le code ne doit jamais réapparaître.
-        """
-        ...
-
-    async def install(
-        self, code: str, username: str, password: str
-    ) -> IssuedTicket:
+    async def install(self, username: str, password: str) -> IssuedTicket:
         """Crée l'unique Compte et ouvre un Ticket Console.
 
-        Lève ``AuthError`` : ``invalid_code`` (code erroné ou consommé),
-        ``already_installed`` (un Compte existe), ``weak_password``,
-        ``invalid_username`` ou ``too_many_attempts``.
+        Aucun code n'est demandé (ADR-0025) : le premier visiteur est
+        propriétaire. Une fois le Compte créé, la route refuse pour de bon.
+
+        Lève ``AuthError`` : ``already_installed`` (un Compte existe),
+        ``weak_password`` ou ``invalid_username``.
         """
         ...
 

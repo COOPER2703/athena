@@ -15,7 +15,6 @@ Ce module ne connaît que le port ``AuthService`` du noyau : ni SQL, ni Argon2.
 
 from __future__ import annotations
 
-import math
 from typing import Awaitable, Callable, Mapping
 from urllib.parse import urlsplit
 
@@ -31,11 +30,13 @@ from server.adapters.console.contract import (
     TICKET_COOKIE,
     TOKENS_PATH,
 )
+from server.adapters.console.errors import error_response
 from server.core.ports import (
     AccessToken,
     AuthError,
     AuthService,
     AuthenticatedTicket,
+    InstallationStatus,
     IssuedTicket,
 )
 
@@ -51,7 +52,6 @@ _CONSOLE_TICKET = web.RequestKey[AuthenticatedTicket]("console_ticket")
 # Une seule table : ajouter un code d'auth n'exige de toucher ni un statut ni
 # un message à deux endroits. ``{min_length}`` est interpolé depuis le store.
 _AUTH_ERRORS: dict[str, tuple[int, str]] = {
-    "invalid_code": (403, "Code d'installation invalide ou déjà utilisé."),
     "already_installed": (
         409,
         "Un Compte existe déjà : l'installation est fermée.",
@@ -97,19 +97,12 @@ def _error(
     status: int,
     *,
     message: str,
+    fields: Mapping[str, str] | None = None,
     retry_after: float | None = None,
 ) -> web.Response:
-    body: dict[str, object] = {
-        "v": ENVELOPE_VERSION,
-        "error": code,
-        "message": message,
-    }
-    headers: dict[str, str] = {}
-    if retry_after is not None:
-        seconds = max(1, math.ceil(retry_after))
-        body["retry_after"] = seconds
-        headers["Retry-After"] = str(seconds)
-    return web.json_response(body, status=status, headers=headers)
+    return error_response(
+        code, status, message=message, fields=fields, retry_after=retry_after
+    )
 
 
 def _origin_refused() -> web.Response:
@@ -160,16 +153,39 @@ class ConsoleAuth:
     ``auth=None`` garde la surface ouverte : c'est le mode des tests unitaires
     de l'adaptateur et des déploiements sans module d'auth. La racine de
     composition injecte toujours un vrai service, donc la production est close.
+
+    ``installation`` rend l'état d'Installation (clé Gemini, Secrets lisibles) ;
+    ``master_key`` crée la clé maître au moment de l'Installation et rend sa
+    forme encodée **une seule fois**. Sans ces coutures, la surface se comporte
+    comme une instance installée, ce qui suffit aux tests unitaires d'auth.
     """
 
-    def __init__(self, auth: AuthService | None) -> None:
+    def __init__(
+        self,
+        auth: AuthService | None,
+        *,
+        installation: Callable[[], InstallationStatus] | None = None,
+        master_key: Callable[[], str | None] | None = None,
+    ) -> None:
         self._auth = auth
+        self._installation = installation
+        self._master_key = master_key
 
     @property
     def _service(self) -> AuthService:
         """Service d'auth des routes et middlewares, garanti présent."""
         assert self._auth is not None
         return self._auth
+
+    def _installation_status(self) -> InstallationStatus:
+        if self._installation is not None:
+            return self._installation()
+        return InstallationStatus(
+            gemini_configured=True,
+            installation_complete=True,
+            restart_required=False,
+            secrets_unreadable=False,
+        )
 
     async def _authenticate_cookie(
         self, request: web.Request
@@ -268,6 +284,7 @@ class ConsoleAuth:
         return web.json_response({"status": "ok"})
 
     async def handle_session(self, request: web.Request) -> web.Response:
+        installation = self._installation_status()
         if self._auth is None:
             return web.json_response(
                 {
@@ -275,6 +292,7 @@ class ConsoleAuth:
                     "setup_required": False,
                     "authenticated": True,
                     "username": None,
+                    **_installation_json(installation),
                 }
             )
 
@@ -287,6 +305,7 @@ class ConsoleAuth:
                 "username": (
                     session.account.username if session is not None else None
                 ),
+                **_installation_json(installation),
             }
         )
         if session is not None and session.refreshed and secret is not None:
@@ -307,19 +326,23 @@ class ConsoleAuth:
         if self._auth is None:
             return self._auth_disabled()
         payload = await _json_object(request)
-        fields = _fields(payload, "code", "username", "password")
+        fields = _fields(payload, "username", "password")
         if fields is None:
             return _error(
                 "invalid_request",
                 400,
-                message="Corps JSON attendu : code, username, password.",
+                message="Corps JSON attendu : username, password.",
             )
-        code, username, password = fields
+        username, password = fields
         try:
-            ticket = await self._service.install(code, username, password)
+            ticket = await self._service.install(username, password)
         except AuthError as error:
             return self._auth_error(error)
-        return self._opened(ticket)
+        # La clé maître est créée ici, à l'Installation, et rendue une seule
+        # fois : c'est le seul moment où l'API l'expose (ADR-0024). Une clé
+        # déjà présente (préparée par un déploiement) n'est pas réaffichée.
+        master_key = self._master_key() if self._master_key is not None else None
+        return self._opened(ticket, master_key=master_key, include_key=True)
 
     async def handle_login_post(self, request: web.Request) -> web.Response:
         if self._auth is None:
@@ -468,14 +491,23 @@ class ConsoleAuth:
         _clear_ticket_cookie(response)
         return response
 
-    def _opened(self, ticket: IssuedTicket) -> web.Response:
-        response = web.json_response(
-            {
-                "v": ENVELOPE_VERSION,
-                "authenticated": True,
-                "username": ticket.account.username,
-            }
-        )
+    def _opened(
+        self,
+        ticket: IssuedTicket,
+        *,
+        master_key: str | None = None,
+        include_key: bool = False,
+    ) -> web.Response:
+        body: dict[str, object] = {
+            "v": ENVELOPE_VERSION,
+            "authenticated": True,
+            "username": ticket.account.username,
+        }
+        if include_key:
+            # La réponse d'Installation porte la clé maître, même nulle quand
+            # elle existait déjà : le front sait ainsi qu'il n'y a rien à noter.
+            body["master_key"] = master_key
+        response = web.json_response(body)
         _set_ticket_cookie(response, ticket.secret, self._service.ticket_ttl)
         return response
 
@@ -491,6 +523,20 @@ class ConsoleAuth:
             ),
             retry_after=error.retry_after,
         )
+
+
+def _installation_json(status: InstallationStatus) -> dict[str, object]:
+    """Champs d'Installation de ``GET /api/session`` (ADR-0025).
+
+    Ajout compatible de l'enveloppe ``v=1`` : les clients existants continuent
+    de lire ``setup_required``, ``authenticated`` et ``username``.
+    """
+    return {
+        "gemini_configured": status.gemini_configured,
+        "installation_complete": status.installation_complete,
+        "restart_required": status.restart_required,
+        "secrets_unreadable": status.secrets_unreadable,
+    }
 
 
 def _token_json(token: AccessToken) -> dict[str, object]:

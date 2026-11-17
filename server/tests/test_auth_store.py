@@ -1,10 +1,10 @@
 """Comportement du module d'authentification, sur une vraie base SQLite.
 
 Ces tests parlent au port ``AuthService`` (installation, connexion, tickets) et
-observent des effets externes : le Compte créé, le Ticket accepté ou refusé, le
-Code d'installation écrit dans le flux de traces. Aucune assertion ne porte sur
-le schéma SQL ni sur une méthode privée — sauf la nature du hachage stocké, qui
-est précisément l'exigence de la spec (« Argon2id, jamais le mot de passe »).
+observent des effets externes : le Compte créé, le Ticket accepté ou refusé.
+Aucune assertion ne porte sur le schéma SQL ni sur une méthode privée — sauf la
+nature du hachage stocké, qui est précisément l'exigence de la spec (« Argon2id,
+jamais le mot de passe »).
 """
 
 from __future__ import annotations
@@ -34,25 +34,13 @@ def _store(
     )
 
 
-def _announced_code(store: SqliteAuthStore, sink: RecordingTraceSink) -> str:
-    assert store.announce_installation_code() is not None
-    [entry] = sink.of_kind("InstallationCode")
-    return str(entry.payload["code"])
-
-
-def test_install_accepts_only_the_code_announced_at_startup(tmp_path: Path) -> None:
+def test_install_creates_the_first_account_without_a_code(tmp_path: Path) -> None:
     async def scenario() -> None:
-        sink = RecordingTraceSink()
-        store = _store(tmp_path, sink=sink)
-        code = _announced_code(store, sink)
+        store = _store(tmp_path)
         assert store.setup_required is True
 
-        with pytest.raises(AuthError) as excinfo:
-            await store.install("not-the-code", "admin", TEST_PASSWORD)
-        assert excinfo.value.code == "invalid_code"
-        assert store.setup_required is True
+        ticket = await store.install("admin", TEST_PASSWORD)
 
-        ticket = await store.install(code, "admin", TEST_PASSWORD)
         assert ticket.account.username == "admin"
         assert store.setup_required is False
         assert (await store.authenticate_ticket(ticket.secret)) is not None
@@ -60,34 +48,13 @@ def test_install_accepts_only_the_code_announced_at_startup(tmp_path: Path) -> N
     asyncio.run(scenario())
 
 
-def test_no_code_is_announced_once_an_account_exists(tmp_path: Path) -> None:
+def test_a_second_install_is_refused_once_an_account_exists(tmp_path: Path) -> None:
     async def scenario() -> None:
-        sink = RecordingTraceSink()
-        store = _store(tmp_path, sink=sink)
-        await store.install(_announced_code(store, sink), "admin", TEST_PASSWORD)
-
-        assert store.announce_installation_code() is None
-        assert [entry.kind for entry in sink.entries] == ["InstallationCode"]
-
-        # Un second démarrage sur la même base ne réémet rien non plus.
-        restarted = _store(tmp_path, sink=sink)
-        assert restarted.announce_installation_code() is None
-        assert len(sink.of_kind("InstallationCode")) == 1
-
-    asyncio.run(scenario())
-
-
-def test_a_second_install_is_refused_even_with_the_right_code(
-    tmp_path: Path,
-) -> None:
-    async def scenario() -> None:
-        sink = RecordingTraceSink()
-        store = _store(tmp_path, sink=sink)
-        code = _announced_code(store, sink)
-        await store.install(code, "admin", TEST_PASSWORD)
+        store = _store(tmp_path)
+        await store.install("admin", TEST_PASSWORD)
 
         with pytest.raises(AuthError) as excinfo:
-            await store.install(code, "intruder", "another long password")
+            await store.install("intruder", "another long password")
 
         assert excinfo.value.code == "already_installed"
 
@@ -98,7 +65,7 @@ def test_the_password_is_stored_as_an_argon2id_hash(tmp_path: Path) -> None:
     async def scenario() -> None:
         sink = RecordingTraceSink()
         store = _store(tmp_path, sink=sink)
-        await store.install(_announced_code(store, sink), "admin", TEST_PASSWORD)
+        await store.install("admin", TEST_PASSWORD)
 
     asyncio.run(scenario())
 
@@ -111,15 +78,14 @@ def test_the_server_refuses_a_password_below_the_minimum(tmp_path: Path) -> None
     async def scenario() -> None:
         sink = RecordingTraceSink()
         store = _store(tmp_path, sink=sink, password_min_length=12)
-        code = _announced_code(store, sink)
 
         with pytest.raises(AuthError) as excinfo:
-            await store.install(code, "admin", "short")
+            await store.install("admin", "short")
 
         assert excinfo.value.code == "weak_password"
         assert store.setup_required is True
 
-        ticket = await store.install(code, "admin", TEST_PASSWORD)
+        ticket = await store.install("admin", TEST_PASSWORD)
         assert ticket.account.username == "admin"
 
     asyncio.run(scenario())
@@ -131,7 +97,7 @@ def test_login_refuses_unknown_user_and_wrong_password_alike(
     async def scenario() -> None:
         sink = RecordingTraceSink()
         store = _store(tmp_path, sink=sink)
-        await store.install(_announced_code(store, sink), "admin", TEST_PASSWORD)
+        await store.install("admin", TEST_PASSWORD)
 
         wrong_password = await _login_error(store, "admin", "not the password")
         unknown_user = await _login_error(store, "somebody", TEST_PASSWORD)
@@ -162,7 +128,7 @@ def test_five_failures_lock_the_login_for_fifteen_minutes_then_lift(
         clock = FakeClock()
         sink = RecordingTraceSink()
         store = _store(tmp_path, clock=clock, sink=sink)
-        await store.install(_announced_code(store, sink), "admin", TEST_PASSWORD)
+        await store.install("admin", TEST_PASSWORD)
 
         for _ in range(4):
             assert (await _login_error(store, "admin", "wrong")).code == (
@@ -209,7 +175,7 @@ def test_the_attempt_counter_is_bounded_while_lockout_still_holds(
         store = _store(
             tmp_path, clock=clock, sink=sink, max_tracked_attempts=8
         )
-        await store.install(_announced_code(store, sink), "admin", TEST_PASSWORD)
+        await store.install("admin", TEST_PASSWORD)
 
         for _ in range(5):
             assert (await _login_error(store, "admin", "wrong")).code in (
@@ -247,7 +213,7 @@ def test_a_ticket_expires_after_thirty_days_and_slides_while_used(
         clock = FakeClock()
         sink = RecordingTraceSink()
         store = _store(tmp_path, clock=clock, sink=sink)
-        ticket = await store.install(_announced_code(store, sink), "admin", TEST_PASSWORD)
+        ticket = await store.install("admin", TEST_PASSWORD)
 
         session = await store.authenticate_ticket(ticket.secret)
         assert session is not None
@@ -277,7 +243,7 @@ def test_a_revoked_ticket_is_refused_immediately(tmp_path: Path) -> None:
     async def scenario() -> None:
         sink = RecordingTraceSink()
         store = _store(tmp_path, sink=sink)
-        await store.install(_announced_code(store, sink), "admin", TEST_PASSWORD)
+        await store.install("admin", TEST_PASSWORD)
         ticket = await store.login("admin", TEST_PASSWORD)
 
         await store.revoke_ticket(ticket.secret)
@@ -285,31 +251,3 @@ def test_a_revoked_ticket_is_refused_immediately(tmp_path: Path) -> None:
         assert (await store.authenticate_ticket(ticket.secret)) is None
 
     asyncio.run(scenario())
-
-
-def test_setup_attempts_are_capped_globally(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        sink = RecordingTraceSink()
-        store = _store(tmp_path, sink=sink, setup_max_attempts=2)
-        code = _announced_code(store, sink)
-
-        assert (await _install_error(store, "nope", "admin", TEST_PASSWORD)).code == (
-            "invalid_code"
-        )
-        limited = await _install_error(store, "nope", "admin", TEST_PASSWORD)
-        assert limited.code == "too_many_attempts"
-        assert limited.retry_after is not None
-
-        # Même le bon code attend la fin du blocage.
-        blocked = await _install_error(store, code, "admin", TEST_PASSWORD)
-        assert blocked.code == "too_many_attempts"
-
-    asyncio.run(scenario())
-
-
-async def _install_error(
-    store: SqliteAuthStore, code: str, username: str, password: str
-) -> AuthError:
-    with pytest.raises(AuthError) as excinfo:
-        await store.install(code, username, password)
-    return excinfo.value
