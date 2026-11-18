@@ -21,3 +21,18 @@ export const E2E_SLOW_MESSAGE = "Réponds lentement, s'il te plaît.";
 
 /** Premier message d'un Tour ordinaire. */
 export const E2E_MESSAGE = "Bonjour Athena, réponds-moi.";
+
+/**
+ * Paroles que le faux modèle attribue au micro simulé.
+ *
+ * Le micro factice de Chromium rejoue `client/tests/data/athena.wav` ; le faux
+ * modèle ne l'écoute pas réellement et rend cette transcription d'entrée
+ * déterministe, puis la réponse vocale ci-dessous.
+ */
+export const E2E_VOICE_HEARD = "Bonjour Athena, ceci est un test vocal.";
+
+/** Réponse textuelle et audio du faux modèle à l'audio du micro simulé. */
+export const E2E_VOICE_REPLY = "Je vous entends bien. Réponse vocale de test.";
+
+/** Début du motif de refus quand un autre Client tient déjà une Session. */
+export const E2E_VOICE_BUSY = "Une autre conversation est déjà en cours.";
