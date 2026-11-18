@@ -48,6 +48,10 @@ export function AppShell() {
   const navigate = useNavigate();
   const location = useLocation();
   const zone = zoneForPath(location.pathname);
+  // La Conversation occupe la hauteur disponible : le fil défile seul et la
+  // barre de saisie reste au bas de l'écran. Les autres zones gardent le
+  // défilement de la page.
+  const conversation = zone?.id === "conversation";
   const voice = useVoiceConversation();
   const inVoice = voiceBarVisible(voice.state.phase);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -176,7 +180,12 @@ export function AppShell() {
         </div>
       </aside>
 
-      <div className="flex min-h-0 min-w-0 flex-col lg:min-h-dvh">
+      <div
+        className={cn(
+          "flex min-h-0 min-w-0 flex-col",
+          conversation ? "lg:h-dvh" : "lg:min-h-dvh",
+        )}
+      >
         <header className="flex flex-wrap items-start justify-between gap-4 border-b border-border px-5 py-4 sm:px-8 lg:px-10">
           <div className="min-w-0">
             <p className="font-mono text-[0.625rem] uppercase tracking-[0.2em] text-subtle">
@@ -256,7 +265,14 @@ export function AppShell() {
           </div>
         ) : null}
 
-        <main id="main" tabIndex={-1} className="flex-1 focus:outline-none">
+        <main
+          id="main"
+          tabIndex={-1}
+          className={cn(
+            "flex-1 focus:outline-none",
+            conversation && "lg:flex lg:min-h-0 lg:flex-col lg:overflow-hidden",
+          )}
+        >
           <Outlet />
         </main>
 

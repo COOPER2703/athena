@@ -243,97 +243,101 @@ export function ConversationZone() {
   }, [refetchOccupancy, voice.state.phase]);
 
   return (
-    <div className="flex flex-col gap-5 px-5 py-6 sm:px-8 lg:px-10 lg:py-8">
-      {voiceSession ? (
-        <Notice tone="warning" title="Session vocale en cours">
-          Athena tient une session vocale avec un Client : elle ne peut pas
-          recevoir de message écrit en même temps. Votre envoi risque d'être
-          refusé tant qu'elle dure.
-        </Notice>
-      ) : null}
+    <div className="flex flex-col gap-5 px-5 py-6 sm:px-8 lg:h-full lg:min-h-0 lg:px-10 lg:py-8">
+      <div className="flex flex-col gap-5 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:pr-1">
+        {voiceSession ? (
+          <Notice tone="warning" title="Session vocale en cours">
+            Athena tient une session vocale avec un Client : elle ne peut pas
+            recevoir de message écrit en même temps. Votre envoi risque d'être
+            refusé tant qu'elle dure.
+          </Notice>
+        ) : null}
 
-      <Thread
-        lines={lines}
-        loading={thread.isPending}
-        error={thread.error}
-        hasMore={thread.hasNextPage}
-        loadingMore={thread.isFetchingNextPage}
-        onLoadMore={() => {
-          void thread.fetchNextPage();
-        }}
-        onRetry={() => {
-          void thread.refetch();
-        }}
-        retentionDays={retentionDays}
-      />
+        <Thread
+          lines={lines}
+          loading={thread.isPending}
+          error={thread.error}
+          hasMore={thread.hasNextPage}
+          loadingMore={thread.isFetchingNextPage}
+          onLoadMore={() => {
+            void thread.fetchNextPage();
+          }}
+          onRetry={() => {
+            void thread.refetch();
+          }}
+          retentionDays={retentionDays}
+        />
 
-      <div ref={liveRef}>
-        {turn.turn !== null ? <LiveTurn turn={turn.turn} /> : null}
+        <div ref={liveRef}>
+          {turn.turn !== null ? <LiveTurn turn={turn.turn} /> : null}
+        </div>
+
+        {turn.issue !== null ? (
+          <Notice
+            tone={turn.issue.kind === "busy" ? "warning" : "danger"}
+            title={
+              turn.issue.kind === "busy"
+                ? "Athena est occupée"
+                : "La réponse a échoué"
+            }
+          >
+            <p>{describeCode(turn.issue.code)}</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleRetry}
+                icon={<RefreshIcon />}
+              >
+                Réessayer
+              </Button>
+              <Button variant="ghost" size="sm" onClick={turn.dismissIssue}>
+                Fermer
+              </Button>
+            </div>
+          </Notice>
+        ) : null}
+
+        {voice.state.phase === "ended" ? (
+          <EndedNotice state={voice.state} onDismiss={voice.dismiss} />
+        ) : null}
+
+        {voice.state.phase === "refused" ? (
+          <Notice tone="warning" title="Conversation vocale indisponible">
+            <p>
+              {voice.state.problem?.message ||
+                "La conversation vocale n'a pas pu démarrer."}
+            </p>
+            <div className="mt-3">
+              <Button variant="ghost" size="sm" onClick={voice.dismiss}>
+                Fermer
+              </Button>
+            </div>
+          </Notice>
+        ) : null}
       </div>
 
-      {turn.issue !== null ? (
-        <Notice
-          tone={turn.issue.kind === "busy" ? "warning" : "danger"}
-          title={
-            turn.issue.kind === "busy"
-              ? "Athena est occupée"
-              : "La réponse a échoué"
-          }
-        >
-          <p>{describeCode(turn.issue.code)}</p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={handleRetry}
-              icon={<RefreshIcon />}
-            >
-              Réessayer
-            </Button>
-            <Button variant="ghost" size="sm" onClick={turn.dismissIssue}>
-              Fermer
-            </Button>
-          </div>
-        </Notice>
-      ) : null}
-
-      {voice.state.phase === "ended" ? (
-        <EndedNotice state={voice.state} onDismiss={voice.dismiss} />
-      ) : null}
-
-      {voice.state.phase === "refused" ? (
-        <Notice tone="warning" title="Conversation vocale indisponible">
-          <p>
-            {voice.state.problem?.message ||
-              "La conversation vocale n'a pas pu démarrer."}
-          </p>
-          <div className="mt-3">
-            <Button variant="ghost" size="sm" onClick={voice.dismiss}>
-              Fermer
-            </Button>
-          </div>
-        </Notice>
-      ) : null}
-
-      {inVoice ? (
-        <VoiceBar
-          state={voice.state}
-          getLevel={voice.getLevel}
-          onStop={voice.stop}
-          onResume={voice.resume}
-        />
-      ) : (
-        <Composer
-          value={draft}
-          onChange={updateDraft}
-          onSend={handleSend}
-          onCancel={handleCancel}
-          onStartVoice={startVoice}
-          streaming={turn.streaming}
-          muted={muted}
-          onToggleMute={handleToggleMute}
-        />
-      )}
+      <div className="sticky bottom-0 z-20 -mx-5 -mb-6 shrink-0 border-t border-border bg-canvas/95 px-5 py-3 backdrop-blur sm:-mx-8 sm:px-8 lg:static lg:z-auto lg:mx-0 lg:mb-0 lg:border-0 lg:bg-transparent lg:p-0 lg:backdrop-blur-none">
+        {inVoice ? (
+          <VoiceBar
+            state={voice.state}
+            getLevel={voice.getLevel}
+            onStop={voice.stop}
+            onResume={voice.resume}
+          />
+        ) : (
+          <Composer
+            value={draft}
+            onChange={updateDraft}
+            onSend={handleSend}
+            onCancel={handleCancel}
+            onStartVoice={startVoice}
+            streaming={turn.streaming}
+            muted={muted}
+            onToggleMute={handleToggleMute}
+          />
+        )}
+      </div>
     </div>
   );
 }
