@@ -53,7 +53,9 @@ La **conversation vocale** (ADR-0027) passe par `GET /api/voice`, une WebSocket 
 par le **Ticket Console** comme `/api/stream` : trames binaires montantes PCM 16 bits mono
 16 kHz, trames JSON descendantes `ready` (la Connexion Live est ouverte), `transcript`
 (`role`, `text`), `audio` (base64, `audio/pcm;rate=24000`), `ended` (`reason` du protocole) et
-`refused` (`code` stable, `message` lisible). Le serveur y héberge un **Client Console**
+`refused` (`code` stable, `message` lisible). La page ajoute `?tab=<identifiant>` : la
+reconnexion automatique du même onglet remplace son propre Client Console abandonné (coupure
+pas encore constatée), un second onglet reste refusé. Le serveur y héberge un **Client Console**
 éphémère : il naît au démarrage, tient une Session ordinaire, meurt à sa fin
 (`CLIENT_GONE`, `COMPLETED`, `TIMEOUT`), et se refuse à préempter la Session d'un autre
 Client (`session_busy`) ou un Tour (`tour_busy`).

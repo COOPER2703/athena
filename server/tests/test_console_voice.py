@@ -24,7 +24,11 @@ import websockets
 from harness import Console
 from protocol import Audio
 from server.adapters.console.contract import VOICE_PATH
-from server.adapters.console.voice import console_client_name
+from server.adapters.console.voice import (
+    MAX_FRAMES,
+    VoiceSurface,
+    console_client_name,
+)
 from server.core import (
     Coordinator,
     LlmOpened,
@@ -55,7 +59,12 @@ class FakeSessionControl:
         self.closed: list[str] = []
 
     def open_session(
-        self, *, client_id: str, client_name: str, surface: SessionSurface
+        self,
+        *,
+        client_id: str,
+        client_name: str,
+        surface: SessionSurface,
+        tab: str = "",
     ) -> bool:
         if self.refuse:
             surface.refused(self.refuse)
@@ -123,10 +132,12 @@ async def _open_voice(
     base_url: str,
     *,
     user_agent: str = FIREFOX,
+    tab: str = "onglet-e2e",
 ) -> aiohttp.ClientWebSocketResponse:
     return await http.ws_connect(
         f"{base_url}{VOICE_PATH}",
         headers={"User-Agent": user_agent},
+        params={"tab": tab},
     )
 
 
@@ -137,6 +148,56 @@ async def _wait_for(predicate, timeout: float = 2.0) -> None:
         if loop.time() > deadline:
             raise AssertionError("condition jamais atteinte")
         await asyncio.sleep(0.01)
+
+
+def _single_client(server: Any) -> str | None:
+    """``client_id`` du seul Client Console de l'instantané, sinon ``None``."""
+    clients = server.app.snapshot()["clients"]
+    if len(clients) != 1:
+        return None
+    return str(clients[0]["client_id"])
+
+
+def test_audio_frames_are_dropped_before_control_frames_when_the_queue_is_full() -> None:
+    """Une page qui ne lit plus ne fait pas grossir la file sans fin.
+
+    L'audio cède la place ; ``transcript`` et ``ended`` arrivent toujours : ce
+    sont eux qui racontent la conversation, pas les morceaux de son.
+    """
+
+    async def scenario() -> None:
+        surface = VoiceSurface()
+        for _ in range(MAX_FRAMES):
+            surface.audio(b"\x00\x01")
+        # File pleine : ces trames d'audio ne prennent pas de place.
+        for _ in range(32):
+            surface.audio(b"\x00\x01")
+        surface.transcript("user", "Bonjour")
+        surface.ended("COMPLETED")
+
+        frames = [
+            await asyncio.wait_for(surface.next_frame(), 0.2)
+            for _ in range(MAX_FRAMES)
+        ]
+        kinds = [kind for kind, _ in frames]
+        assert kinds.count("audio") == MAX_FRAMES - 2
+        assert frames[-2] == ("transcript", {"role": "user", "text": "Bonjour"})
+        assert frames[-1] == ("ended", {"reason": "COMPLETED"})
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(surface.next_frame(), 0.01)
+
+    asyncio.run(scenario())
+
+
+def test_a_dead_surface_is_closed_and_silent() -> None:
+    """La surface refermée n'accepte plus rien : la racine peut la remplacer."""
+    surface = VoiceSurface()
+    assert surface.alive() is True
+    surface.close()
+    assert surface.alive() is False
+    surface.ready()
+    surface.audio(b"\x00")
+    assert surface.pending() == 0
 
 
 # --- nom du Client Console ---------------------------------------------------
@@ -378,6 +439,88 @@ def test_a_voice_conversation_runs_until_the_model_ends_it(tmp_path: Path) -> No
             assert after["clients"] == []
             assert after["session"]["console"] is False
             assert after["session"]["state"] == "Idle"
+
+    asyncio.run(scenario())
+
+
+def test_an_abandoned_socket_is_replaced_by_its_own_reconnect(
+    tmp_path: Path,
+) -> None:
+    """Coupure non encore constatée : le même onglet reprend sans Client fantôme.
+
+    Le serveur ne peut pas encore avoir vu la coupure (le battement de cœur met
+    30 s) : la nouvelle connexion du même onglet remplace le Client Console
+    fantôme au lieu de recevoir ``session_busy``.
+    """
+
+    async def scenario() -> None:
+        async with running_server(tmp_path) as server:
+            await server.install()
+
+            first = await _open_voice(server.http, server.url, tab="onglet-A")
+            await _next_type(first, "ready")
+            await server.wait_until(
+                lambda: len(server.app.snapshot()["clients"]) == 1, timeout=2.0
+            )
+            abandoned = server.app.snapshot()["clients"][0]["client_id"]
+
+            second = await _open_voice(server.http, server.url, tab="onglet-A")
+            try:
+                assert (await _next_type(second, "ready"))["type"] == "ready"
+
+                await server.wait_until(
+                    lambda: _single_client(server) not in {None, abandoned},
+                    timeout=2.0,
+                )
+                during = await server.status()
+                assert len(during["clients"]) == 1
+                assert during["clients"][0]["client_id"] != abandoned
+                assert during["session"]["console"] is True
+                assert during["session"]["state"] != "Idle"
+
+                # La Session abandonnée est morte en CLIENT_GONE, pas REPLACED.
+                await server.wait_until(
+                    lambda: any(
+                        entry["kind"] == "SessionClosed"
+                        and entry["payload"].get("reason") == "CLIENT_GONE"
+                        for entry in server.trace_log()
+                    ),
+                    timeout=2.0,
+                )
+            finally:
+                await second.close()
+
+            await server.wait_until(
+                lambda: server.app.snapshot()["clients"] == [], timeout=2.0
+            )
+            await first.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_second_tab_is_still_refused_while_the_surface_is_alive(
+    tmp_path: Path,
+) -> None:
+    """Contention entre onglets : la règle de l'ADR-0027 reste intacte."""
+
+    async def scenario() -> None:
+        async with running_server(tmp_path) as server:
+            await server.install()
+            first = await _open_voice(server.http, server.url, tab="onglet-A")
+            try:
+                await _next_type(first, "ready")
+                second = await _open_voice(server.http, server.url, tab="onglet-B")
+                try:
+                    refused = await _next_type(second, "refused")
+                    assert refused["data"]["code"] == "session_busy"
+                finally:
+                    await second.close()
+                # Le premier onglet n'a jamais été préempté.
+                during = await server.status()
+                assert len(during["clients"]) == 1
+                assert during["session"]["state"] != "Idle"
+            finally:
+                await first.close()
 
     asyncio.run(scenario())
 

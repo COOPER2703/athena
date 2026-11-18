@@ -320,6 +320,13 @@ class SessionSurface(Protocol):
 
     def refused(self, code: str) -> None: ...
 
+    def alive(self) -> bool:
+        """Vrai tant que l'échange peut encore porter des trames.
+
+        Une surface morte (socket refermé, trame terminale déjà déposée) peut
+        être remplacée par la reconnexion de son propre onglet.
+        """
+
 
 class SessionControl(Protocol):
     """Ce que la Console peut demander au noyau pour une **Session vocale**.
@@ -331,19 +338,26 @@ class SessionControl(Protocol):
     """
 
     def open_session(
-        self, *, client_id: str, client_name: str, surface: SessionSurface
+        self,
+        *,
+        client_id: str,
+        client_name: str,
+        surface: SessionSurface,
+        tab: str = "",
     ) -> bool:
         """Crée le Client Console et demande la Session.
 
         Rend ``False`` quand la demande est refusée (contention, Installation
         incomplète) : la surface a déjà reçu son motif et aucun Client n'existe.
+        ``tab`` identifie l'onglet : la reconnexion du même onglet remplace son
+        propre Client abandonné, un second onglet reste refusé.
         """
 
     def send_audio(self, client_id: str, data: bytes) -> None:
         """Dépose l'audio PCM 16 bits mono 16 kHz du navigateur."""
 
     def close_session(self, client_id: str) -> None:
-        """Le navigateur a fermé : le Client Console disparaît et la Session s'arrête."""
+        """Le navigateur a fermé : le Client Console meurt avec sa Session."""
 
 
 class MemoryStore(Protocol):

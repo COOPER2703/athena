@@ -14,6 +14,12 @@ conversation comme pour le flux de Traces. La création du Client, la demande de
 Session et le routage passent par la couture ``SessionControl`` injectée par la
 racine de composition : cet adaptateur ne connaît ni le Coordinator ni l'état de
 Session.
+
+Le paramètre de requête ``tab`` est un identifiant aléatoire que la page tire
+pour **son** onglet et renvoie à chaque tentative : il permet à une reconnexion
+automatique de reconnaître son propre Client Console abandonné (coupure pas
+encore constatée) sans jamais voler la Session d'un second onglet, qui porte un
+autre identifiant.
 """
 
 from __future__ import annotations
@@ -21,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import uuid
+from collections import deque
 from typing import Awaitable, Callable, Mapping
 
 from aiohttp import WSMsgType, web
@@ -34,6 +41,9 @@ AUDIO_MIME_TYPE = "audio/pcm;rate=24000"
 # Cadence de revérification du Ticket d'un socket déjà ouvert : même borne que
 # le flux de Traces, pour qu'une révocation coupe la voix sans attendre.
 TICKET_CHECK_SECONDS = 30.0
+# File descendante bornée : une page laissée en arrière-plan peut cesser de
+# lire. L'audio cède la place ; les trames de contrôle, jamais.
+MAX_FRAMES = 256
 # Motifs lisibles des refus : le code reste stable et anglais, la phrase est
 # destinée à la page (jamais un message brut du noyau).
 _REFUSAL_MESSAGES = {
@@ -96,32 +106,77 @@ class VoiceSurface:
 
     Les méthodes sont synchrones et non bloquantes, comme ``TourDestination``.
     Une trame terminale (``ended`` ou ``refused``) est envoyée une seule fois et
-    ferme l'échange.
+    ferme l'échange : c'est **elle** qui garde l'unicité, la racine se contente
+    de déposer.
+
+    La file est **bornée** : une page dont l'onglet cesse de lire ne fait pas
+    grossir indéfiniment la mémoire du serveur. Sous pression, l'audio le plus
+    ancien est sacrifié — ``ready``, ``transcript``, ``ended`` et ``refused`` ne
+    sont jamais perdus, car ce sont eux qui racontent la conversation.
     """
 
     TERMINAL = frozenset({"ended", "refused"})
 
     def __init__(self) -> None:
-        self.frames: asyncio.Queue[tuple[str, Mapping[str, object]]] = (
-            asyncio.Queue()
-        )
+        self._frames: deque[tuple[str, Mapping[str, object]]] = deque()
+        self._wake = asyncio.Event()
         self._ended = False
+        self._closed = False
+
+    def alive(self) -> bool:
+        """Vrai tant que l'échange peut encore porter des trames.
+
+        Une surface close ou terminale est **morte** : une nouvelle connexion
+        peut la remplacer sans préempter quoi que ce soit.
+        """
+        return not self._ended and not self._closed
+
+    def close(self) -> None:
+        """L'endpoint s'arrête : plus rien n'est déposé ni attendu."""
+        self._closed = True
+        self._wake.set()
+
+    def pending(self) -> int:
+        return len(self._frames)
 
     def _push(self, kind: str, data: Mapping[str, object]) -> None:
-        self.frames.put_nowait((kind, data))
+        if len(self._frames) >= MAX_FRAMES:
+            if kind == "audio":
+                return
+            self._drop_oldest_audio()
+        self._frames.append((kind, data))
+        self._wake.set()
+
+    def _drop_oldest_audio(self) -> None:
+        if len(self._frames) < MAX_FRAMES:
+            return
+        for index, (queued, _) in enumerate(self._frames):
+            if queued == "audio":
+                del self._frames[index]
+                return
+        # File pleine de trames de contrôle : la plus ancienne cède, sinon la
+        # trame vitale ne rentrerait jamais.
+        self._frames.popleft()
+
+    async def next_frame(self) -> tuple[str, Mapping[str, object]]:
+        """Attend la prochaine trame ; le réveil suit chaque dépôt."""
+        while not self._frames:
+            self._wake.clear()
+            await self._wake.wait()
+        return self._frames.popleft()
 
     def ready(self) -> None:
-        if self._ended:
+        if not self.alive():
             return
         self._push("ready", {})
 
     def transcript(self, role: str, text: str) -> None:
-        if self._ended:
+        if not self.alive():
             return
         self._push("transcript", {"role": role, "text": text})
 
     def audio(self, data: bytes) -> None:
-        if self._ended:
+        if not self.alive():
             return
         self._push(
             "audio",
@@ -132,13 +187,13 @@ class VoiceSurface:
         )
 
     def ended(self, reason: str) -> None:
-        if self._ended:
+        if not self.alive():
             return
         self._ended = True
         self._push("ended", {"reason": reason})
 
     def refused(self, code: str) -> None:
-        if self._ended:
+        if not self.alive():
             return
         self._ended = True
         self._push("refused", {"code": code, "message": refusal_message(code)})
@@ -177,13 +232,14 @@ def voice_handler(
                     request.headers.get("User-Agent", "")
                 ),
                 surface=surface,
+                tab=request.query.get("tab", ""),
             )
 
         if not accepted or session is None:
             # Le refus est déjà dans la file : on l'écrit avant de refermer,
             # sans jamais créer de Client ni toucher la Session en cours.
-            while not surface.frames.empty():
-                kind, data = surface.frames.get_nowait()
+            while surface.pending():
+                kind, data = await surface.next_frame()
                 await websocket.send_json(voice_frame(kind, data))
             await websocket.close(code=1000, message=b"refused")
             return websocket
@@ -212,6 +268,10 @@ def voice_handler(
                 if error is not None and not isinstance(error, ConnectionError):
                     raise error
         finally:
+            # D'abord la surface : une nouvelle connexion du même onglet peut
+            # déjà arriver, et elle doit voir une surface morte, pas une file
+            # qu'on est en train d'abandonner.
+            surface.close()
             for task in tasks:
                 if not task.done():
                     task.cancel()
@@ -233,7 +293,7 @@ async def _send_frames(
     websocket: web.WebSocketResponse, surface: VoiceSurface
 ) -> None:
     while True:
-        kind, data = await surface.frames.get()
+        kind, data = await surface.next_frame()
         await websocket.send_json(voice_frame(kind, data))
         if kind in VoiceSurface.TERMINAL:
             return
