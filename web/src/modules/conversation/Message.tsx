@@ -1,16 +1,19 @@
-import type { ThreadEntry } from "../../api/thread";
 import { cn } from "../../shared/cn";
 import { formatIsoDate } from "../../shared/format";
+import type { LiveTranscriptLine } from "./liveTranscript";
 import { OriginBadge } from "./OriginBadge";
 
 /**
- * Une entrée du fil : message de l'utilisateur à droite, réponse ou Annonce
- * d'Athena en pleine largeur avec un filet d'accent. L'origine est toujours
- * écrite, jamais seulement colorée.
+ * Une ligne du fil : entrée du Journal ou parole encore vivante.
+ *
+ * Message de l'utilisateur à droite, réponse ou Annonce d'Athena en pleine
+ * largeur avec un filet d'accent. L'origine est toujours écrite, jamais
+ * seulement colorée. Une ligne vivante n'a pas encore d'horodatage : elle
+ * porte « en direct » jusqu'à ce que le Journal la reprenne.
  */
-export function Message({ entry }: { entry: ThreadEntry }) {
-  const user = entry.role === "user";
-  const announcement = entry.origin === "event";
+export function Message({ line }: { line: LiveTranscriptLine }) {
+  const user = line.role === "user";
+  const announcement = line.origin === "event";
   const author = user ? "Vous" : announcement ? "Athena · Annonce" : "Athena";
 
   return (
@@ -21,11 +24,15 @@ export function Message({ entry }: { entry: ThreadEntry }) {
           user && "justify-end",
         )}
       >
-        <OriginBadge origin={entry.origin} />
+        <OriginBadge origin={line.origin} />
         <span>{author}</span>
-        <time dateTime={entry.createdAt}>
-          {formatIsoDate(entry.createdAt)}
-        </time>
+        {line.entry !== null ? (
+          <time dateTime={line.entry.createdAt}>
+            {formatIsoDate(line.entry.createdAt)}
+          </time>
+        ) : (
+          <span className="text-accent">en direct</span>
+        )}
       </div>
       <div
         className={cn(
@@ -36,7 +43,7 @@ export function Message({ entry }: { entry: ThreadEntry }) {
           !user && (announcement ? "border-warning-line" : "border-accent-line"),
         )}
       >
-        {entry.text}
+        {line.text}
       </div>
     </article>
   );

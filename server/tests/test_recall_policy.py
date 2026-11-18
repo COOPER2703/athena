@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
+from test_gemini_adapter import FakeLiveConnect, FakeSession
+from server.adapters.gemini import GeminiLiveAdapter
 from server.core import (
     IDLE_TIMEOUT,
     Coordinator,
     LlmAudio,
     LlmClosed,
+    LlmFailed,
     LlmOpened,
     LlmTranscription,
     MemoryHit,
@@ -287,3 +291,50 @@ def test_recall_state_is_reset_on_teardown():
     say(coordinator, "deux")
 
     assert memory.queries[-1] == ("owner", "deux")
+
+
+def test_fragmented_input_yields_one_journal_turn_and_one_recall() -> None:
+    """Un énoncé fragmenté par la transcription d'entrée reste un seul tour.
+
+    Le fil réel de Gemini Live découpe la parole utilisateur en fragments. Le
+    noyau journalise et rappelle **par Événement** ``LlmTranscription(USER)`` :
+    c'est donc à l'adaptateur de n'en émettre qu'un par énoncé, sinon la mémoire
+    accumule des lignes tronquées et chaque Rappel repart sur un demi-énoncé.
+    """
+
+    async def scenario() -> None:
+        memory = FakeMemory()
+        coordinator = Coordinator(memory=memory, user_id="alice")
+        await coordinator.handle(SessionRequested(client_id="c1"))
+
+        fragments = ["bonjour", " comment", " ça va"]
+        responses = [
+            SimpleNamespace(
+                server_content=SimpleNamespace(
+                    input_transcription=SimpleNamespace(text=fragment),
+                    output_transcription=None,
+                )
+            )
+            for fragment in fragments
+        ]
+        # La première réponse du modèle referme l'énoncé utilisateur.
+        responses.append(SimpleNamespace(data=b"\x01"))
+        adapter = GeminiLiveAdapter(
+            api_key="test-key",
+            model="gemini-live",
+            voice="Aoede",
+            live_connect=FakeLiveConnect(session=FakeSession(responses=responses)),
+        )
+
+        await adapter.open("s1")
+        while True:
+            event = await asyncio.wait_for(adapter.recv(), 1.0)
+            await coordinator.handle(event)
+            if isinstance(event, (LlmClosed, LlmFailed)):
+                break
+
+        user_turns = [turn for turn in memory.turns if turn[1] == "user"]
+        assert user_turns == [("alice", "user", "bonjour comment ça va")]
+        assert memory.queries == [("alice", "bonjour comment ça va")]
+
+    asyncio.run(scenario())

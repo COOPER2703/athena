@@ -75,8 +75,14 @@ from server.core.commands import (
 )
 from server.core.coordinator import Coordinator
 from server.core.events import (
+    ClientAudio,
+    ClientDisconnected,
+    ClientRegistered,
     Event,
     EventReceived,
+    LlmOpened,
+    LlmTranscription,
+    SessionRequested,
     ShutdownRequested,
     TourCanceled,
     TourRequested,
@@ -93,6 +99,8 @@ from server.core.ports import (
     MissingSecretError,
     SecretStore,
     SecretValidator,
+    SessionControl,
+    SessionSurface,
     SettingsStore,
     TourControl,
     TourDestination,
@@ -228,7 +236,7 @@ class Clock(Protocol):
 
 
 class ConsoleServer(Protocol):
-    """Couture de la Console web : instantané, Événement et Tours.
+    """Couture de la Console web : instantané, Événement, Tours et Session vocale.
 
     ``snapshot`` est le ``App.snapshot`` injecté à ``start`` : l'adaptateur ne
     connaît ni le Coordinator ni ``SessionState``, et l'instantané est construit
@@ -236,7 +244,8 @@ class ConsoleServer(Protocol):
     est le même ``App.push_event`` que celui du Webhook : l'Événement injecté
     entre dans le Canal d'événements unique, sans file propre à la Console.
     ``tour`` est la couture du **Tour** (ADR-0024) : la Console soumet et annule,
-    elle n'atteint jamais le Coordinator.
+    elle n'atteint jamais le Coordinator. ``session`` est celle de la **Session
+    vocale** (ADR-0027) : elle ouvre et ferme un Client Console éphémère.
     """
 
     async def start(
@@ -244,6 +253,8 @@ class ConsoleServer(Protocol):
         snapshot: Callable[[], Mapping[str, object]],
         push: Callable[[str, str], None] | None = None,
         tour: TourControl | None = None,
+        *,
+        session: SessionControl | None = None,
     ) -> None: ...
 
     async def stop(self) -> None: ...
@@ -447,6 +458,34 @@ class RuntimeFactory:
         )
 
 
+# Plateforme déclarée par le Client Console : le navigateur, jamais un poste.
+CONSOLE_PLATFORM = "web"
+
+# Commandes que la racine route vers le Client Console : testées une seule fois,
+# au point de dispatch, puis transmises telles quelles.
+_ConsoleCommand = (
+    SendAudioToClient | AnnounceSessionStarted | AnnounceSessionEnded
+)
+
+
+@dataclass
+class _ConsoleClient:
+    """Client Console éphémère hébergé par une conversation vocale (ADR-0027).
+
+    Il vit dans la racine de composition, jamais dans le transport : il ne
+    détient aucun Jeton, ne parle pas le Protocole partagé et ne reçoit que
+    l'audio de **sa** Session, routé par ``client_id`` comme pour tout Client.
+    """
+
+    client_id: str
+    client_name: str
+    surface: SessionSurface
+    #: Identifiant de l'onglet qui l'a ouvert : sa reconnexion remplace son
+    #: propre Client abandonné, un second onglet ne le peut pas.
+    tab: str
+    platform: str = CONSOLE_PLATFORM
+
+
 class App:
     """Racine de composition : possède les adaptateurs et la boucle de propriété.
 
@@ -504,6 +543,9 @@ class App:
         # la racine la lui injecte ici. Absente, un Tour se déroule sans être
         # diffusé — jamais une erreur du noyau.
         self._tour_destination = tour_destination
+        # Client Console (ADR-0027) : éphémère, possédé par la racine de
+        # composition le temps d'une conversation vocale. Absent hors Session.
+        self._console_client: _ConsoleClient | None = None
         # Instantané non sensible de la configuration : la racine de
         # composition choisit explicitement les clés exposées, pour qu'aucun
         # secret ne puisse s'inviter dans l'instantané par accident.
@@ -588,6 +630,27 @@ class App:
         les tailles des bases se lisent par ``stat``, sans attendre.
         """
         clients = self._transport.clients if self._transport is not None else {}
+        client_rows = [
+            {
+                "client_id": client.client_id,
+                "client_name": client.client_name,
+                "platform": client.platform,
+            }
+            for client in clients.values()
+        ]
+        # Le Client Console n'appartient pas au transport : l'instantané le
+        # montre comme un Client ordinaire tant que la conversation dure, puis
+        # il disparaît — aucun Client fantôme (ADR-0027).
+        console_client = self._console_client
+        if console_client is not None:
+            client_rows.append(
+                {
+                    "client_id": console_client.client_id,
+                    "client_name": console_client.client_name,
+                    "platform": console_client.platform,
+                }
+            )
+        client_rows.sort(key=lambda row: row["client_name"])
         installation, restart_required = self._installation_block()
         return {
             "session": {
@@ -595,17 +658,12 @@ class App:
                 "session_id": self._coordinator.session_id,
                 "connection_id": self._coordinator.connection_id,
                 "active_client_id": self._coordinator.owner_client_id,
+                # La Session en cours appartient-elle au Client Console ? Le
+                # front s'en sert pour ne pas s'avertir lui-même d'une
+                # « Session vocale en cours » (ADR-0027).
+                "console": console_client is not None,
             },
-            "clients": [
-                {
-                    "client_id": client.client_id,
-                    "client_name": client.client_name,
-                    "platform": client.platform,
-                }
-                for client in sorted(
-                    clients.values(), key=lambda item: item.client_name
-                )
-            ],
+            "clients": client_rows,
             "plugins": self._plugin_summaries(),
             "config": dict(self._snapshot_config),
             "installation": installation,
@@ -685,7 +743,9 @@ class App:
         if self._webhook is not None:
             await self._webhook.start(self.push_event)
         if self._console is not None:
-            await self._console.start(self.snapshot, self.push_event, self)
+            await self._console.start(
+                self.snapshot, self.push_event, tour=self, session=self
+            )
         self._emit("started", payload={"state": self._coordinator.state.value})
 
         # ``append`` et non réaffectation : une activation à chaud peut déjà
@@ -865,6 +925,96 @@ class App:
         """Dépose l'annulation d'un Tour (flux SSE fermé par le navigateur)."""
         self._events.put_nowait(TourCanceled(tour_id=tour_id))
 
+    # --- Client Console (couture ``SessionControl``, ADR-0027) --------------
+
+    def open_session(
+        self,
+        *,
+        client_id: str,
+        client_name: str,
+        surface: SessionSurface,
+        tab: str = "",
+    ) -> bool:
+        """Crée le Client Console et demande une Session, sans jamais préempter.
+
+        Seuls un Client Console **abandonné** — surface morte, ou reconnexion du
+        même onglet après une coupure que le serveur n'a pas encore constatée —
+        est remplacé (``ClientDisconnected`` -> ``CLIENT_GONE``). Un second
+        onglet, lui, est refusé : la Session d'un autre Client n'est jamais
+        volée.
+
+        La pré-vérification est synchrone : le noyau est occupé (Tour ou Session
+        d'un autre Client), ou l'Installation n'a pas encore de clé Gemini. Le
+        refus est déposé sur la surface avec un code stable, aucun Client n'est
+        créé. ``SessionRequested(no_preempt=True)`` ferme ensuite la course avec
+        un occupant arrivé entre-temps.
+        """
+        if self._gemini is None:
+            surface.refused("installation_incomplete")
+            return False
+        existing = self._console_client
+        if existing is None:
+            busy = self._coordinator.busy_reason()
+            if busy:
+                surface.refused(busy)
+                return False
+        elif not self._is_abandoned(existing, tab):
+            surface.refused("session_busy")
+            return False
+        else:
+            # Retiré de l'instantané avant l'Événement : l'ordre du Canal
+            # garantit que la Session fantôme meurt avant la nouvelle demande.
+            self._console_client = None
+            self._events.put_nowait(
+                ClientDisconnected(client_id=existing.client_id)
+            )
+        self._console_client = _ConsoleClient(
+            client_id=client_id,
+            client_name=client_name,
+            surface=surface,
+            tab=tab,
+        )
+        # Naissance au démarrage : le noyau voit un Client ordinaire, puis une
+        # demande de Session qui porte son ``client_id``.
+        self._events.put_nowait(
+            ClientRegistered(
+                client_id=client_id,
+                client_name=client_name,
+                platform=CONSOLE_PLATFORM,
+            )
+        )
+        self._events.put_nowait(
+            SessionRequested(client_id=client_id, no_preempt=True)
+        )
+        return True
+
+    @staticmethod
+    def _is_abandoned(client: _ConsoleClient, tab: str) -> bool:
+        """Vrai quand ce Client Console ne peut plus être celui d'un onglet vivant."""
+        if not client.surface.alive():
+            # Le socket est déjà refermé : seule la purge du noyau manque.
+            return True
+        # Surface encore ouverte : seul le même onglet peut la remplacer, car
+        # une coupure réseau silencieuse ne se voit pas côté serveur.
+        return tab != "" and client.tab == tab
+
+    def send_audio(self, client_id: str, data: bytes) -> None:
+        """Dépose l'audio du Client Console ; le noyau l'ignore avant ``LlmOpened``."""
+        client = self._console_client
+        if client is None or client.client_id != client_id:
+            return
+        self._events.put_nowait(ClientAudio(data=data))
+
+    def close_session(self, client_id: str) -> None:
+        """Le Client Console disparaît : ``ClientDisconnected`` termine la Session."""
+        client = self._console_client
+        if client is None or client.client_id != client_id:
+            return
+        # Retiré de l'instantané avant l'Événement : aucun Client fantôme ne
+        # survit à la fermeture de l'onglet.
+        self._console_client = None
+        self._events.put_nowait(ClientDisconnected(client_id=client_id))
+
     async def _pump(self, recv: Callable[[], Awaitable[Event]]) -> None:
         while True:
             await self._events.put(await recv())
@@ -874,11 +1024,31 @@ class App:
             event = await self._events.get()
             for command in await self._coordinator.handle(event):
                 await self._dispatch(command)
+            self._notify_console(event)
             if isinstance(event, ShutdownRequested):
                 return
 
+    def _notify_console(self, event: Event) -> None:
+        """Pousse ``ready`` et les transcriptions au Client Console (ADR-0027).
+
+        Appelé **après** le traitement de l'Événement : ``ready`` suit
+        ``LlmOpened`` (la Connexion Live est réellement ouverte), et une
+        transcription n'est adressée qu'à la Session que ce Client possède.
+        """
+        client = self._console_client
+        if client is None:
+            return
+        if self._coordinator.session_client_id != client.client_id:
+            return
+        if isinstance(event, LlmOpened):
+            client.surface.ready()
+        elif isinstance(event, LlmTranscription):
+            client.surface.transcript(event.role.value, event.text)
+
     async def _dispatch(self, command: Command) -> None:
         if isinstance(command, Trace):
+            if command.kind == "SessionClosed":
+                self._close_console_session(command)
             emit(
                 self._trace_sink,
                 command.source,
@@ -915,6 +1085,8 @@ class App:
             command,
             (SendAudioToClient, AnnounceSessionStarted, AnnounceSessionEnded),
         ):
+            if self._deliver_to_console(command):
+                return
             if self._transport is not None:
                 await self._transport.execute(command)
             return
@@ -933,7 +1105,13 @@ class App:
             return
         if isinstance(command, RefuseSession):
             # Refus lisible par le Client, sans changer le Protocole : le
-            # transport le traduit en message ``Error`` existant.
+            # transport le traduit en message ``Error`` existant. Pour le Client
+            # Console, le refus part en trame JSON et le Client n'est jamais né.
+            console = self._console_client
+            if console is not None and command.client_id == console.client_id:
+                console.surface.refused(command.reason)
+                self._console_client = None
+                return
             if self._transport is not None:
                 await self._transport.execute(command)
             else:
@@ -957,6 +1135,41 @@ class App:
         level: str = "info",
     ) -> None:
         emit(self._trace_sink, _TRACE_SOURCE, kind, payload=payload, level=level)
+
+    def _deliver_to_console(self, command: _ConsoleCommand) -> bool:
+        """Route l'audio et la fin vers le Client Console, jamais le transport.
+
+        Rend ``True`` quand la Commande appartenait au Client Console. Le
+        ``client_id`` fait foi, comme pour tout Client : une Session d'un autre
+        appareil continue de passer par le transport. Le type est déjà restreint
+        par l'appelant : la famille de Commandes n'est testée qu'une fois.
+        """
+        client = self._console_client
+        if client is None or command.client_id != client.client_id:
+            return False
+        if isinstance(command, SendAudioToClient):
+            client.surface.audio(command.data)
+        elif isinstance(command, AnnounceSessionEnded):
+            client.surface.ended(command.reason.name)
+        # ``AnnounceSessionStarted`` est un message du Protocole partagé : le
+        # navigateur n'en a pas besoin, ``ready`` puis l'audio suffisent.
+        return True
+
+    def _close_console_session(self, command: Trace) -> None:
+        """La Session est close : le Client Console meurt, aucun Client fantôme.
+
+        La fin est déposée sur la surface, qui garantit elle-même l'envoi unique
+        et terminal : ``AnnounceSessionEnded`` et cette trace convergent ici sans
+        second drapeau.
+        """
+        client = self._console_client
+        if client is None:
+            return
+        if command.payload.get("client_id") != client.client_id:
+            return
+        reason = str(command.payload.get("reason", "NORMAL"))
+        client.surface.ended(reason)
+        self._console_client = None
 
     def _deliver_to_tour(self, command: Command) -> None:
         """Route une Commande de Tour vers sa destination (port du noyau).

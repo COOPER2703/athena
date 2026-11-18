@@ -45,6 +45,20 @@ plus de `session`, `clients`, `plugins` et `config` : `installation` (`account_e
 bases mémoire/auth/réglages — `0` si absente, `-wal`/`-shm` compris —, dernière erreur sans son
 payload, taille et capacité du Tampon de traces). Ces champs sont des lectures **sans
 secret** et restent renseignés pendant l'Installation : aucun n'exige un Compte ni une clé.
+Pendant une conversation vocale, `clients` contient en plus le **Client Console** (nom
+`Console (<navigateur>)`, plateforme `web`) et `session.console` vaut `true` : le front sait
+que la Session en cours est celle qu'il héberge.
+
+La **conversation vocale** (ADR-0027) passe par `GET /api/voice`, une WebSocket authentifiée
+par le **Ticket Console** comme `/api/stream` : trames binaires montantes PCM 16 bits mono
+16 kHz, trames JSON descendantes `ready` (la Connexion Live est ouverte), `transcript`
+(`role`, `text`), `audio` (base64, `audio/pcm;rate=24000`), `ended` (`reason` du protocole) et
+`refused` (`code` stable, `message` lisible). La page ajoute `?tab=<identifiant>` : la
+reconnexion automatique du même onglet remplace son propre Client Console abandonné (coupure
+pas encore constatée), un second onglet reste refusé. Le serveur y héberge un **Client Console**
+éphémère : il naît au démarrage, tient une Session ordinaire, meurt à sa fin
+(`CLIENT_GONE`, `COMPLETED`, `TIMEOUT`), et se refuse à préempter la Session d'un autre
+Client (`session_busy`) ou un Tour (`tour_busy`).
 
 Le Webhook reste séparé (`ATHENA_WEBHOOK_ENABLED`, `ATHENA_WEBHOOK_HOST`,
 `ATHENA_WEBHOOK_PORT`, `127.0.0.1:8766` par défaut). Le contrat JSON de la Console
@@ -73,8 +87,8 @@ devient propriétaire ; une fois le Compte créé, la route refuse définitiveme
 Les deux mécanismes de credential (ADR-0017) :
 
 - **Ticket Console** : cookie `athena_ticket` (`HttpOnly; Secure; SameSite=Strict`, `Path=/`),
-  30 jours glissants. Il authentifie toutes les routes d'API hors identité et le WebSocket du
-  flux ; `GET /healthz` reste public.
+  30 jours glissants. Il authentifie toutes les routes d'API hors identité et les WebSockets
+  du flux et de la conversation vocale ; `GET /healthz` reste public.
 - **Jeton d'accès** : `Authorization: Bearer ath_…`, nature `client` (transport) ou `source`
   (Webhook). Le transport (`WS_HOST` / `WS_PORT`) refuse le handshake sans Jeton `client` par
   `401` + `WWW-Authenticate: Bearer`, avant toute trame. Le Webhook
@@ -274,14 +288,20 @@ longueur minimale lue depuis `/api/session` ; les autres navigateurs sont décon
 
 ### Parcours navigateur (E2E)
 
-Trois parcours Playwright ferment le filet de la Console. Ils tournent sur le **build réel**
+Quatre parcours Playwright ferment le filet de la Console. Ils tournent sur le **build réel**
 (`web/dist`) servi par le serveur du seam partagé (`server/tests/server_harness.py`), avec
 un faux modèle injecté : Installation jusqu'à la Conversation, connexion puis un Tour texte
-avec audio et interruption, enfin un réglage appliqué jusqu'au redémarrage. Aucun secret
-réel et aucun réseau externe : le validateur de Secrets et le modèle sont ceux du harnais.
+avec audio et interruption, un réglage appliqué jusqu'au redémarrage, et enfin la
+conversation vocale avec un micro simulé. Aucun secret réel et aucun réseau externe : le
+validateur de Secrets et le modèle sont ceux du harnais.
 
 - `make e2e` construit la SPA, démarre un serveur de test isolé (répertoire temporaire,
   ports éphémères, clé Gemini factice) et lance Playwright depuis `web/`.
+- Le parcours vocal rejoue `client/tests/data/athena.wav` par le micro factice de Chromium :
+  aucune machine n'a besoin d'un périphérique et aucune permission n'est demandée. Le faux
+  modèle y répond par une transcription d'entrée déterministe, une réponse texte et un
+  audio ; le serveur de contrôle peut aussi faire tenir une Session à un Client desktop
+  pour prouver le refus sans préemption.
 - Le superviseur `e2e/server.py` relance le serveur à la même adresse après chaque sortie
   propre (`ATHENA_RESTART_ON_APPLY=1`) : c'est ce qui rend le redémarrage d'un réglage
   observable. Un petit serveur de contrôle, propre au harnais, expose la génération courante

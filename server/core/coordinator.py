@@ -219,6 +219,29 @@ class Coordinator:
         """
         return self._client_id if self._visible else ""
 
+    @property
+    def session_client_id(self) -> str:
+        """Client qui a demandé la Session en cours, **dès** la Connexion Live.
+
+        Contrairement à ``owner_client_id``, la valeur est renseignée avant que
+        la Session ne devienne visible : la Console s'en sert pour adresser
+        ``ready`` et les transcriptions à son Client Console (ADR-0027).
+        """
+        return self._client_id
+
+    def busy_reason(self) -> str:
+        """Code stable de l'occupation du noyau, vide au Repos.
+
+        La Console s'en sert pour **refuser** plutôt que préempter : ``tour_busy``
+        quand un Tour tient la Connexion Live, ``session_busy`` quand une Session
+        (visible ou en cours d'ouverture) appartient déjà à un Client.
+        """
+        if self._tour:
+            return "tour_busy"
+        if self._state is not SessionState.IDLE:
+            return "session_busy"
+        return ""
+
     async def handle(self, event: Event) -> list[Command]:
         commands = await self._dispatch(event)
         # Modèle unifié : dès que le noyau est au Repos avec des Événements en
@@ -760,6 +783,24 @@ class Coordinator:
     ) -> list[Command]:
         commands: list[Command] = []
         original_state = self._state
+
+        # Une demande non préemptante (Console, ADR-0027) est refusée dès que le
+        # noyau est occupé, quel que soit l'occupant : la Console ne vole jamais
+        # la Session d'un autre Client. La course avec la pré-vérification de la
+        # racine de composition se ferme ici, avant tout teardown.
+        if event.no_preempt:
+            reason = self.busy_reason()
+            if reason:
+                return [
+                    RefuseSession(client_id=event.client_id, reason=reason),
+                    self._trace(
+                        "SessionRefused",
+                        from_state=original_state,
+                        to_state=original_state,
+                        client_id=event.client_id,
+                        reason=reason,
+                    ),
+                ]
 
         # Un seul Tour à la fois (ADR-0024) : une Session demandée pendant un
         # Tour est refusée, jamais mise en file ni préemptée. Le refus est rendu

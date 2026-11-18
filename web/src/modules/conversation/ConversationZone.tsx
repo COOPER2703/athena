@@ -16,20 +16,31 @@ import { Button } from "../../shared/ui/Button";
 import { Notice } from "../../shared/ui/Notice";
 import { Composer } from "./Composer";
 import { LiveTurn } from "./LiveTurn";
+import { mergeLiveTranscript } from "./liveTranscript";
 import { Thread } from "./Thread";
 import type { TurnIssue } from "./useTurn";
 import { useAudioPlayer } from "./useAudioPlayer";
 import { useMuted } from "./useMuted";
 import { useTurn } from "./useTurn";
+import { useVoiceConversation } from "./VoiceProvider";
+import { VoiceBar } from "./VoiceBar";
+import {
+  voiceBarVisible,
+  voiceEndCopy,
+  type VoiceState,
+} from "./voice";
 import { voiceSessionActive } from "./voiceSession";
 
 /**
  * Conversation : un fil unique et une barre de saisie.
  *
  * Le fil vient du Journal (`GET /api/thread`, paginé vers le passé) ; le Tour
- * en cours vient du flux SSE de `POST /api/chat`. Dès qu'un Tour se termine, le
- * fil est relu et le Tour local disparaît : le message n'est jamais affiché
- * deux fois. L'audio est coupé par défaut et se joue après un geste.
+ * en cours vient du flux SSE de `POST /api/chat`, les paroles de la
+ * conversation vocale du WebSocket `GET /api/voice`. Dès qu'un Tour se
+ * termine, le fil est relu et le Tour local disparaît : le message n'est jamais
+ * affiché deux fois. Les mots du micro apparaissent en direct, puis le Journal
+ * les reprend à la fin de chaque tour (ADR-0027). L'audio est coupé par défaut
+ * et se joue après un geste.
  */
 export function ConversationZone() {
   const thread = useInfiniteQuery({
@@ -49,6 +60,8 @@ export function ConversationZone() {
 
   const { muted, toggle: toggleMuted } = useMuted();
   const player = useAudioPlayer();
+  const voice = useVoiceConversation();
+  const inVoice = voiceBarVisible(voice.state.phase);
 
   const mutedRef = useRef(muted);
   mutedRef.current = muted;
@@ -61,16 +74,37 @@ export function ConversationZone() {
     [player],
   );
 
-  const refreshThread = useCallback(async () => {
-    try {
-      const result = await thread.refetch();
-      return !result.isError;
-    } catch {
-      return false;
+  const settleVoice = voice.settle;
+  // Lignes encore vivantes au moment où la relecture démarre : une fois le
+  // Journal relu, elles y sont forcément (le serveur écrit avant d'émettre).
+  const voiceLinesRef = useRef(0);
+  voiceLinesRef.current = voice.state.lines.length;
+  const refreshRef = useRef<Promise<boolean> | null>(null);
+  const refreshThread = useCallback((): Promise<boolean> => {
+    if (refreshRef.current !== null) {
+      return refreshRef.current;
     }
-  }, [thread.refetch]);
+    const pending = voiceLinesRef.current;
+    const run = (async () => {
+      try {
+        const result = await thread.refetch();
+        if (result.isError) {
+          return false;
+        }
+        settleVoice(pending);
+        return true;
+      } catch {
+        return false;
+      } finally {
+        refreshRef.current = null;
+      }
+    })();
+    refreshRef.current = run;
+    return run;
+  }, [settleVoice, thread.refetch]);
+  const finishRefresh = useCallback(() => refreshThread(), [refreshThread]);
 
-  const turn = useTurn({ onFinished: refreshThread, onAudio: handleAudio });
+  const turn = useTurn({ onFinished: finishRefresh, onAudio: handleAudio });
 
   const [draft, updateDraft] = useDraft("conversation");
   const restoredIssue = useRef<TurnIssue | null>(null);
@@ -146,72 +180,188 @@ export function ConversationZone() {
 
   const entries = flattenThread(thread.data?.pages);
   const retentionDays = thread.data?.pages[0]?.retentionDays ?? 0;
+
+  const entriesRef = useRef(entries);
+  entriesRef.current = entries;
+  const startVoice = useCallback(() => {
+    // Repère du Journal : une parole antérieure identique ne doit pas
+    // absorber les mots prononcés maintenant.
+    const baseline = entriesRef.current.reduce(
+      (max, entry) => Math.max(max, entry.id),
+      0,
+    );
+    voice.start(baseline);
+  }, [voice]);
+
+  // Une parole vivante n'a de sens que pendant la conversation : à la fin, le
+  // Journal relu les reprend toutes et le fil ne montre que la vérité
+  // persistée.
+  const liveLines = inVoice ? voice.state.lines : [];
+  const lines = mergeLiveTranscript(
+    entries,
+    liveLines,
+    voice.state.journalBaseline,
+  );
+
+  // La transcription d'Athena arrive en fin de tour : c'est le signal pour
+  // relire le Journal, qui contient alors la question et la réponse.
+  const assistantLines = voice.state.lines.filter(
+    (line) => line.role === "assistant",
+  ).length;
+  const previousAssistantLines = useRef(assistantLines);
+  useEffect(() => {
+    const increased = assistantLines > previousAssistantLines.current;
+    previousAssistantLines.current = assistantLines;
+    if (increased) {
+      void refreshThread();
+    }
+  }, [assistantLines, refreshThread]);
+
+  // Une fin de conversation (croix, end_session, timeout) a écrit au Journal :
+  // on le relit pour que la barre de saisie retrouve un fil à jour.
+  const previousVoicePhase = useRef(voice.state.phase);
+  useEffect(() => {
+    const phase = voice.state.phase;
+    if (
+      (phase === "ended" || phase === "refused") &&
+      previousVoicePhase.current !== phase
+    ) {
+      void refreshThread();
+    }
+    previousVoicePhase.current = phase;
+  }, [refreshThread, voice.state.phase]);
+
+  // L'avertissement ignore la Session du Client Console : c'est le serveur qui
+  // le dit (`session.console`), jamais une comparaison de nom affiché.
   const voiceSession = occupancy.data === true;
 
+  // Un changement de phase vocale est le moment où l'occupation réelle change
+  // le plus : on relit l'instantané sans attendre le prochain intervalle.
+  const refetchOccupancy = occupancy.refetch;
+  useEffect(() => {
+    void refetchOccupancy();
+  }, [refetchOccupancy, voice.state.phase]);
+
   return (
-    <div className="flex flex-col gap-5 px-5 py-6 sm:px-8 lg:px-10 lg:py-8">
-      {voiceSession ? (
-        <Notice tone="warning" title="Session vocale en cours">
-          Athena tient une session vocale avec un Client : elle ne peut pas
-          recevoir de message écrit en même temps. Votre envoi risque d'être
-          refusé tant qu'elle dure.
-        </Notice>
-      ) : null}
+    <div className="flex flex-col gap-5 px-5 py-6 sm:px-8 lg:h-full lg:min-h-0 lg:px-10 lg:py-8">
+      <div className="flex flex-col gap-5 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:pr-1">
+        {voiceSession ? (
+          <Notice tone="warning" title="Session vocale en cours">
+            Athena tient une session vocale avec un Client : elle ne peut pas
+            recevoir de message écrit en même temps. Votre envoi risque d'être
+            refusé tant qu'elle dure.
+          </Notice>
+        ) : null}
 
-      <Thread
-        entries={entries}
-        loading={thread.isPending}
-        error={thread.error}
-        hasMore={thread.hasNextPage}
-        loadingMore={thread.isFetchingNextPage}
-        onLoadMore={() => {
-          void thread.fetchNextPage();
-        }}
-        onRetry={() => {
-          void thread.refetch();
-        }}
-        retentionDays={retentionDays}
-      />
+        <Thread
+          lines={lines}
+          loading={thread.isPending}
+          error={thread.error}
+          hasMore={thread.hasNextPage}
+          loadingMore={thread.isFetchingNextPage}
+          onLoadMore={() => {
+            void thread.fetchNextPage();
+          }}
+          onRetry={() => {
+            void thread.refetch();
+          }}
+          retentionDays={retentionDays}
+        />
 
-      <div ref={liveRef}>
-        {turn.turn !== null ? <LiveTurn turn={turn.turn} /> : null}
+        <div ref={liveRef}>
+          {turn.turn !== null ? <LiveTurn turn={turn.turn} /> : null}
+        </div>
+
+        {turn.issue !== null ? (
+          <Notice
+            tone={turn.issue.kind === "busy" ? "warning" : "danger"}
+            title={
+              turn.issue.kind === "busy"
+                ? "Athena est occupée"
+                : "La réponse a échoué"
+            }
+          >
+            <p>{describeCode(turn.issue.code)}</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleRetry}
+                icon={<RefreshIcon />}
+              >
+                Réessayer
+              </Button>
+              <Button variant="ghost" size="sm" onClick={turn.dismissIssue}>
+                Fermer
+              </Button>
+            </div>
+          </Notice>
+        ) : null}
+
+        {voice.state.phase === "ended" ? (
+          <EndedNotice state={voice.state} onDismiss={voice.dismiss} />
+        ) : null}
+
+        {voice.state.phase === "refused" ? (
+          <Notice tone="warning" title="Conversation vocale indisponible">
+            <p>
+              {voice.state.problem?.message ||
+                "La conversation vocale n'a pas pu démarrer."}
+            </p>
+            <div className="mt-3">
+              <Button variant="ghost" size="sm" onClick={voice.dismiss}>
+                Fermer
+              </Button>
+            </div>
+          </Notice>
+        ) : null}
       </div>
 
-      {turn.issue !== null ? (
-        <Notice
-          tone={turn.issue.kind === "busy" ? "warning" : "danger"}
-          title={
-            turn.issue.kind === "busy"
-              ? "Athena est occupée"
-              : "La réponse a échoué"
-          }
-        >
-          <p>{describeCode(turn.issue.code)}</p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={handleRetry}
-              icon={<RefreshIcon />}
-            >
-              Réessayer
-            </Button>
-            <Button variant="ghost" size="sm" onClick={turn.dismissIssue}>
-              Fermer
-            </Button>
-          </div>
-        </Notice>
-      ) : null}
-
-      <Composer
-        value={draft}
-        onChange={updateDraft}
-        onSend={handleSend}
-        onCancel={handleCancel}
-        streaming={turn.streaming}
-        muted={muted}
-        onToggleMute={handleToggleMute}
-      />
+      <div className="sticky bottom-0 z-20 -mx-5 -mb-6 shrink-0 border-t border-border bg-canvas/95 px-5 py-3 backdrop-blur sm:-mx-8 sm:px-8 lg:static lg:z-auto lg:mx-0 lg:mb-0 lg:border-0 lg:bg-transparent lg:p-0 lg:backdrop-blur-none">
+        {inVoice ? (
+          <VoiceBar
+            state={voice.state}
+            getLevel={voice.getLevel}
+            onStop={voice.stop}
+            onResume={voice.resume}
+          />
+        ) : (
+          <Composer
+            value={draft}
+            onChange={updateDraft}
+            onSend={handleSend}
+            onCancel={handleCancel}
+            onStartVoice={startVoice}
+            streaming={turn.streaming}
+            muted={muted}
+            onToggleMute={handleToggleMute}
+          />
+        )}
+      </div>
     </div>
+  );
+}
+
+/** Bandeau d'une conversation close : titre et phrase viennent de la même table. */
+function EndedNotice({
+  state,
+  onDismiss,
+}: {
+  state: VoiceState;
+  onDismiss: () => void;
+}) {
+  const copy = voiceEndCopy(state.endReason ?? "normal");
+  return (
+    <Notice
+      tone={state.endReason === "error" ? "danger" : "info"}
+      title={copy.title}
+    >
+      <p>{state.problem?.message || copy.message}</p>
+      <div className="mt-3">
+        <Button variant="ghost" size="sm" onClick={onDismiss}>
+          Fermer
+        </Button>
+      </div>
+    </Notice>
   );
 }
