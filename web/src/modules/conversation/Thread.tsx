@@ -1,4 +1,5 @@
-import type { ThreadEntry } from "../../api/thread";
+import { useEffect, useRef, useState } from "react";
+
 import { describeError } from "../../api/errors";
 import { zoneById } from "../../app/routing";
 import { ConversationIcon, RefreshIcon } from "../../shared/icons";
@@ -6,10 +7,11 @@ import { pluralize } from "../../shared/format";
 import { Button } from "../../shared/ui/Button";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { Notice } from "../../shared/ui/Notice";
+import type { LiveTranscriptLine } from "./liveTranscript";
 import { Message } from "./Message";
 
 export interface ThreadProps {
-  entries: readonly ThreadEntry[];
+  lines: readonly LiveTranscriptLine[];
   loading: boolean;
   error: unknown;
   hasMore: boolean;
@@ -20,14 +22,18 @@ export interface ThreadProps {
 }
 
 /**
- * Fil unifié : texte, tours vocaux et Annonces, du plus ancien au plus récent.
+ * Fil unifié : texte, Tours vocaux, paroles vivantes et Annonces, du plus
+ * ancien au plus récent.
  *
  * La pagination remonte vers le passé avec le curseur du serveur ; la fenêtre
  * de rétention est rappelée en permanence pour ne pas faire croire à un
- * historique complet.
+ * historique complet. Les lignes encore vivantes (transcriptions reçues avant
+ * leur entrée au Journal) sont annoncées poliment, une fois, sans déplacer le
+ * focus ; le fil lui-même n'est pas une zone live, sinon la relecture
+ * répéterait chaque tour.
  */
 export function Thread({
-  entries,
+  lines,
   loading,
   error,
   hasMore,
@@ -42,11 +48,51 @@ export function Thread({
       ? `Fenêtre de rétention : ${pluralize(retentionDays, "jour")}.`
       : "Fenêtre de rétention inconnue.";
 
+  const liveLines = lines.filter((line) => line.entry === null);
+  const lastLive = liveLines[liveLines.length - 1];
+  const [announcement, setAnnouncement] = useState("");
+  const announcedRef = useRef("");
+  const endRef = useRef<HTMLDivElement>(null);
+
+  // Une nouvelle parole vivante est annoncée une seule fois, et le fil suit :
+  // la personne voit ses mots arriver sans quitter la barre vocale. Quand une
+  // ligne rejoint le Journal, la dernière ligne vivante peut redevenir une
+  // parole déjà annoncée : on ne la répète pas.
+  useEffect(() => {
+    if (lastLive === undefined) {
+      return;
+    }
+    const marker = `${lastLive.key}\u0000${lastLive.text}`;
+    if (announcedRef.current === marker) {
+      return;
+    }
+    announcedRef.current = marker;
+    setAnnouncement(
+      `${lastLive.role === "user" ? "Vous" : "Athena"} : ${lastLive.text}`,
+    );
+    const reduced =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    endRef.current?.scrollIntoView({
+      block: "nearest",
+      behavior: reduced ? "auto" : "smooth",
+    });
+  }, [lastLive?.key, lastLive?.text]);
+
   return (
     <section
       aria-label="Fil de la conversation"
       className="flex flex-col gap-4"
     >
+      <p
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className="sr-only"
+      >
+        {announcement}
+      </p>
+
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-2">
         <p className="font-mono text-[0.625rem] uppercase tracking-[0.12em] text-subtle">
           {retention}
@@ -64,7 +110,7 @@ export function Thread({
         ) : null}
       </div>
 
-      {error !== null && entries.length > 0 ? (
+      {error !== null && lines.length > 0 ? (
         <Notice tone="warning" title="Fil non actualisé">
           {describeError(error)}{" "}
           <button
@@ -77,13 +123,13 @@ export function Thread({
         </Notice>
       ) : null}
 
-      {loading && entries.length === 0 ? (
+      {loading && lines.length === 0 ? (
         <p role="status" className="text-sm text-muted">
           Lecture du fil…
         </p>
       ) : null}
 
-      {error !== null && entries.length === 0 && !loading ? (
+      {error !== null && lines.length === 0 && !loading ? (
         <Notice tone="danger" title="Fil indisponible">
           <p>{describeError(error)}</p>
           <div className="mt-3">
@@ -99,7 +145,7 @@ export function Thread({
         </Notice>
       ) : null}
 
-      {!loading && error === null && entries.length === 0 && zone !== null ? (
+      {!loading && error === null && lines.length === 0 && zone !== null ? (
         <EmptyState
           icon={<ConversationIcon className="h-5 w-5" />}
           title={zone.emptyTitle}
@@ -108,15 +154,17 @@ export function Thread({
         />
       ) : null}
 
-      {entries.length > 0 ? (
+      {lines.length > 0 ? (
         <ol className="flex flex-col gap-5">
-          {entries.map((entry) => (
-            <li key={entry.id}>
-              <Message entry={entry} />
+          {lines.map((line) => (
+            <li key={line.key}>
+              <Message line={line} />
             </li>
           ))}
         </ol>
       ) : null}
+
+      <div ref={endRef} />
     </section>
   );
 }

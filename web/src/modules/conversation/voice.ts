@@ -51,8 +51,15 @@ export interface VoiceProblem {
 /** Tout ce que l'écran a besoin de savoir d'une conversation. */
 export interface VoiceState {
   phase: VoicePhase;
-  /** Mots de l'utilisateur et réponses d'Athena, dans l'ordre. */
+  /** Transcriptions encore vivantes, dans l'ordre d'arrivée, avant le Journal. */
   lines: readonly VoiceLine[];
+  /**
+   * Identifiant maximal du Journal au démarrage de la conversation.
+   *
+   * Sert au fil en direct : seules les entrées postérieures peuvent reprendre
+   * une ligne vivante, une parole d'avant la conversation ne l'absorbe pas.
+   */
+  journalBaseline: number;
   /** Vrai dès qu'une reconnexion automatique a été consommée. */
   automaticReconnectUsed: boolean;
   /** Motif de fin, quand `phase` vaut `ended`. */
@@ -81,13 +88,14 @@ export type VoiceEvent =
   | { type: "audio" }
   | { type: "ended"; reason: string }
   | { type: "refused"; code: string; message: string }
-  | { type: "start" }
+  | { type: "start"; baselineId?: number }
   | { type: "resume" }
   | { type: "cut" }
   | { type: "failed"; code: string; message: string }
   | { type: "stop" }
   | { type: "background" }
-  | { type: "dismiss" };
+  | { type: "dismiss" }
+  | { type: "settle"; drop: number };
 
 /** États où la barre vocale remplace la barre de saisie. */
 const BAR_PHASES: ReadonlySet<VoicePhase> = new Set([
@@ -135,6 +143,7 @@ export function idleVoice(): VoiceState {
   return {
     phase: "idle",
     lines: [],
+    journalBaseline: 0,
     automaticReconnectUsed: false,
     endReason: null,
     problem: null,
@@ -243,7 +252,7 @@ export function applyVoiceEvent(
       if (voiceBarVisible(state.phase)) {
         return state;
       }
-      return beginConversation();
+      return beginConversation(event.baselineId ?? 0);
 
     case "resume":
       if (state.phase !== "interrupted") {
@@ -276,6 +285,17 @@ export function applyVoiceEvent(
         lines: [...state.lines, { role: event.role, text: event.text }],
         phase: event.role === "user" ? "listening" : "replying",
       };
+
+    case "settle": {
+      // Le fil vient d'être relu : les premières lignes sont désormais au
+      // Journal, elles n'ont plus à rester transitoires (et ne peuvent plus
+      // doubler une entrée tombée hors de la page chargée).
+      const drop = Math.min(Math.max(event.drop, 0), state.lines.length);
+      if (drop === 0) {
+        return state;
+      }
+      return { ...state, lines: state.lines.slice(drop) };
+    }
 
     case "audio":
       if (state.phase === "replying") {
@@ -413,10 +433,11 @@ export function decodeVoiceFrame(payload: unknown): VoiceFrame | null {
   }
 }
 
-function beginConversation(): VoiceState {
+function beginConversation(baselineId: number): VoiceState {
   return {
     phase: "connecting",
     lines: [],
+    journalBaseline: baselineId,
     automaticReconnectUsed: false,
     endReason: null,
     problem: null,
