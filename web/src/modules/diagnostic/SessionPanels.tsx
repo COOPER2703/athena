@@ -37,13 +37,6 @@ export function SessionPanel({ snapshot }: { snapshot: DiagnosticSnapshot }) {
         ]}
       />
 
-      {snapshot.session.console && snapshot.session.sessionId ? (
-        <p className="mt-3 text-xs leading-relaxed text-subtle">
-          Session portée par le Client Console : le navigateur héberge le Client
-          le temps de sa conversation vocale (ADR-0027).
-        </p>
-      ) : null}
-
       <div className="mt-4 border-t border-border pt-4">
         <p className="mb-2 font-mono text-[0.625rem] uppercase tracking-[0.12em] text-subtle">
           Instance
