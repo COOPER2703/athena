@@ -45,6 +45,18 @@ plus de `session`, `clients`, `plugins` et `config` : `installation` (`account_e
 bases mémoire/auth/réglages — `0` si absente, `-wal`/`-shm` compris —, dernière erreur sans son
 payload, taille et capacité du Tampon de traces). Ces champs sont des lectures **sans
 secret** et restent renseignés pendant l'Installation : aucun n'exige un Compte ni une clé.
+Pendant une conversation vocale, `clients` contient en plus le **Client Console** (nom
+`Console (<navigateur>)`, plateforme `web`) et `session.console` vaut `true` : le front sait
+que la Session en cours est celle qu'il héberge.
+
+La **conversation vocale** (ADR-0027) passe par `GET /api/voice`, une WebSocket authentifiée
+par le **Ticket Console** comme `/api/stream` : trames binaires montantes PCM 16 bits mono
+16 kHz, trames JSON descendantes `ready` (la Connexion Live est ouverte), `transcript`
+(`role`, `text`), `audio` (base64, `audio/pcm;rate=24000`), `ended` (`reason` du protocole) et
+`refused` (`code` stable, `message` lisible). Le serveur y héberge un **Client Console**
+éphémère : il naît au démarrage, tient une Session ordinaire, meurt à sa fin
+(`CLIENT_GONE`, `COMPLETED`, `TIMEOUT`), et se refuse à préempter la Session d'un autre
+Client (`session_busy`) ou un Tour (`tour_busy`).
 
 Le Webhook reste séparé (`ATHENA_WEBHOOK_ENABLED`, `ATHENA_WEBHOOK_HOST`,
 `ATHENA_WEBHOOK_PORT`, `127.0.0.1:8766` par défaut). Le contrat JSON de la Console
@@ -73,8 +85,8 @@ devient propriétaire ; une fois le Compte créé, la route refuse définitiveme
 Les deux mécanismes de credential (ADR-0017) :
 
 - **Ticket Console** : cookie `athena_ticket` (`HttpOnly; Secure; SameSite=Strict`, `Path=/`),
-  30 jours glissants. Il authentifie toutes les routes d'API hors identité et le WebSocket du
-  flux ; `GET /healthz` reste public.
+  30 jours glissants. Il authentifie toutes les routes d'API hors identité et les WebSockets
+  du flux et de la conversation vocale ; `GET /healthz` reste public.
 - **Jeton d'accès** : `Authorization: Bearer ath_…`, nature `client` (transport) ou `source`
   (Webhook). Le transport (`WS_HOST` / `WS_PORT`) refuse le handshake sans Jeton `client` par
   `401` + `WWW-Authenticate: Bearer`, avant toute trame. Le Webhook

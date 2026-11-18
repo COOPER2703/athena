@@ -37,6 +37,10 @@ SETTINGS_PATH = "/api/settings"
 SECRETS_PATH = "/api/secrets"
 PLUGINS_PATH = "/api/plugins"
 CHAT_PATH = "/api/chat"
+# Conversation vocale (ADR-0027) : WebSocket binaire montant (PCM 16 kHz) et
+# JSON descendant, authentifiée par le seul Ticket Console. Elle héberge un
+# Client Console éphémère, distinct du transport des Clients.
+VOICE_PATH = "/api/voice"
 # Fil de la Conversation (ADR-0024) : lecture paginée du Journal, marquée par
 # l'origine de chaque tour. Aucune écriture, aucun état du noyau.
 THREAD_PATH = "/api/thread"

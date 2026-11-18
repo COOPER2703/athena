@@ -898,6 +898,7 @@ def test_console_snapshot_tracks_clients_and_the_session_owner(
                 "session_id": "",
                 "connection_id": "",
                 "active_client_id": "",
+                "console": False,
             }
             assert idle["clients"] == []
 

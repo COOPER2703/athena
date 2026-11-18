@@ -26,6 +26,11 @@ class ClientRegistered:
 class SessionRequested:
     client_id: str
     auto: bool = False
+    # Une demande **non préemptante** (Console, ADR-0027) est refusée quand un
+    # Tour ou une autre Session tient le noyau : la racine de composition
+    # pré-vérifie, et ce drapeau ferme la course entre la vérification et
+    # l'arrivée de l'événement.
+    no_preempt: bool = False
 
 
 @dataclass(frozen=True, slots=True)

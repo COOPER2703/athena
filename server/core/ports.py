@@ -301,6 +301,51 @@ class TourControl(Protocol):
     def cancel_tour(self, tour_id: str) -> None: ...
 
 
+class SessionSurface(Protocol):
+    """Surface qui héberge une Session vocale (Console web, ADR-0027).
+
+    Toutes les méthodes sont **synchrones et non bloquantes** : la racine de
+    composition dépose et rend la main, jamais elle n'attend un navigateur. Une
+    surface disparue (onglet fermé) ignore simplement ce qui lui est adressé.
+    """
+
+    def ready(self) -> None:
+        """La Connexion Live est ouverte : le navigateur peut ouvrir le micro."""
+
+    def transcript(self, role: str, text: str) -> None: ...
+
+    def audio(self, data: bytes) -> None: ...
+
+    def ended(self, reason: str) -> None: ...
+
+    def refused(self, code: str) -> None: ...
+
+
+class SessionControl(Protocol):
+    """Ce que la Console peut demander au noyau pour une **Session vocale**.
+
+    Comme ``TourControl``, cette couture est fournie par la racine de
+    composition : l'adaptateur Console ouvre un Client Console éphémère, dépose
+    son audio et le libère, sans jamais atteindre le Coordinator ni l'état de
+    Session (ADR-0027).
+    """
+
+    def open_session(
+        self, *, client_id: str, client_name: str, surface: SessionSurface
+    ) -> bool:
+        """Crée le Client Console et demande la Session.
+
+        Rend ``False`` quand la demande est refusée (contention, Installation
+        incomplète) : la surface a déjà reçu son motif et aucun Client n'existe.
+        """
+
+    def send_audio(self, client_id: str, data: bytes) -> None:
+        """Dépose l'audio PCM 16 bits mono 16 kHz du navigateur."""
+
+    def close_session(self, client_id: str) -> None:
+        """Le navigateur a fermé : le Client Console disparaît et la Session s'arrête."""
+
+
 class MemoryStore(Protocol):
     """Async memory port injected into the pure kernel (D2).
 

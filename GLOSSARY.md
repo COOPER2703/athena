@@ -238,7 +238,8 @@ _Avoid_: user, compte utilisateur, profil, login
 **Ticket Console**:
 L'état authentifié d'un navigateur sur la Console, matérialisé par le cookie `athena_ticket`
 (`HttpOnly; Secure; SameSite=Strict`, `Path=/`), valable 30 jours glissants et révocable
-(déconnexion, « déconnecter partout »). Il authentifie aussi le WebSocket du flux de Traces.
+(déconnexion, « déconnecter partout »). Il authentifie aussi les WebSockets du flux de
+Traces et de la conversation vocale (ADR-0027).
 Se distingue de la **Session** (conversation Live), de la **Connexion Live** (lien Gemini) et
 du **Jeton d'accès** (machine).
 _Avoid_: session, session web, cookie de session, login

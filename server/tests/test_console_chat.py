@@ -74,6 +74,7 @@ def test_a_text_turn_streams_tools_text_and_audio_then_returns_to_rest(
                 "session_id": "",
                 "connection_id": "",
                 "active_client_id": "",
+                "console": False,
             }
 
     asyncio.run(scenario())

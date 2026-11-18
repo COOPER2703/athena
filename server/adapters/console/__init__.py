@@ -18,8 +18,10 @@ from server.adapters.console.contract import (
     SETUP_PATH,
     STATUS_PATH,
     STREAM_PATH,
+    THREAD_PATH,
     TICKET_COOKIE,
     TOKENS_PATH,
+    VOICE_PATH,
 )
 
 __all__ = [
@@ -41,5 +43,6 @@ __all__ = [
     "STREAM_PATH",
     "TICKET_COOKIE",
     "TOKENS_PATH",
+    "VOICE_PATH",
     "ConsoleAdapter",
 ]
