@@ -30,6 +30,9 @@ from server.core.ports import ToolSpec, TraceSink
 
 _TRACE_SOURCE = "gemini"
 _UPSTREAM_MIME_TYPE = "audio/pcm;rate=16000"
+# Le modèle Live n'est exposé que sur ``v1alpha``. La version par défaut du SDK
+# (``v1``) refuse le handshake WebSocket par un 404, pas par une erreur d'auth.
+_LIVE_API_VERSION = "v1alpha"
 
 LiveConnect = Callable[[str, Any], Any]
 
@@ -37,8 +40,12 @@ LiveConnect = Callable[[str, Any], Any]
 def _default_live_connect(api_key: str) -> LiveConnect:
     def connect(model: str, config: Any) -> Any:
         from google import genai
+        from google.genai import types
 
-        client = genai.Client(api_key=api_key)
+        client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(api_version=_LIVE_API_VERSION),
+        )
         return client.aio.live.connect(model=model, config=config)
 
     return connect

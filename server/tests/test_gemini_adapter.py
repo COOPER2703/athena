@@ -956,3 +956,42 @@ def test_reopening_stamps_each_terminal_with_its_own_connection_id() -> None:
         )
 
     asyncio.run(scenario())
+
+
+def test_default_live_connect_dials_the_alpha_api_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Le modèle Live n'est servi qu'en ``v1alpha`` ; ``v1`` répond 404.
+
+    Régression : le client était construit sans ``http_options``, donc sur la
+    version d'API par défaut du SDK, et chaque Connexion Live échouait en
+    ``server rejected WebSocket connection: HTTP 404``.
+    """
+    from google import genai
+
+    from server.adapters.gemini.adapter import _default_live_connect
+
+    captured: dict[str, Any] = {}
+    sentinel = object()
+
+    class FakeLiveClient:
+        def connect(self, **kwargs: Any) -> object:
+            captured["connect"] = kwargs
+            return sentinel
+
+    class FakeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["client"] = kwargs
+            self.aio = SimpleNamespace(live=FakeLiveClient())
+
+    monkeypatch.setattr(genai, "Client", FakeClient)
+
+    session = _default_live_connect("ath-key")("gemini-3.1-flash-live-preview", "cfg")
+
+    assert session is sentinel
+    assert captured["client"]["api_key"] == "ath-key"
+    assert captured["client"]["http_options"].api_version == "v1alpha"
+    assert captured["connect"] == {
+        "model": "gemini-3.1-flash-live-preview",
+        "config": "cfg",
+    }
