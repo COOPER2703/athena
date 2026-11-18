@@ -29,6 +29,29 @@ class SessionRequested:
 
 
 @dataclass(frozen=True, slots=True)
+class TourRequested:
+    """Une entrée de **Tour** soumise par la Console (ADR-0024).
+
+    Le Tour est l'unité de conversation écrite : une entrée, une Connexion Live
+    ouverte pour sa durée, puis retour au Repos. Aucune Session n'est créée.
+    """
+
+    tour_id: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class TourCanceled:
+    """La surface a fermé le flux du Tour : le noyau l'interrompt.
+
+    L'adaptateur Console ne touche jamais le Coordinator : il dépose cet
+    Événement dans le Canal, exactement comme ``push_event``.
+    """
+
+    tour_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class ClientAudio:
     data: bytes
 
@@ -109,6 +132,8 @@ class EventReceived:
 Event = Union[
     ClientRegistered,
     SessionRequested,
+    TourRequested,
+    TourCanceled,
     ClientAudio,
     ClientInterrupt,
     ClientToolResult,

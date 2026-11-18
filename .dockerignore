@@ -16,6 +16,7 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+master.key
 logs/
 plugins.json
 legacy/

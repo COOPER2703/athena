@@ -37,6 +37,41 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  # Parcours navigateur (#179) : build réel servi par le serveur du seam
+  # partagé, faux modèle, aucun secret réel. Job séparé pour qu'un parcours
+  # cassé ne masque ni les tests Python ni le build du front.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: sudo apt-get update && sudo apt-get install -y portaudio19-dev
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: make generate
+      # `make web` installe les dépendances (`npm ci`) et construit la SPA : le
+      # job n'appelle `npm ci` qu'ici, `make e2e` le voit déjà satisfait.
+      - run: make web
+      - run: cd web && npx playwright install --with-deps chromium
+      - run: make e2e
+      - name: Conserver le rapport en cas d'échec
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            web/playwright-report
+            web/test-results
+          retention-days: 7
+
   # L'Image est un livrable : une image qui ne démarre pas ne doit pas être
   # taguée. Ce job tourne sur le runner attaché à l'hôte de déploiement, donc
   # le `docker build` écrit dans le démon de l'hôte et Ansible n'a plus qu'à

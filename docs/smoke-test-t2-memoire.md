@@ -16,7 +16,8 @@ Toutes les commandes de ce document se lancent **depuis la racine du dépôt**
 - Les dépendances mémoire pré-installées : `sentence-transformers`, `sqlite-vec`,
   `numpy` (modèle local `all-MiniLM-L6-v2` en cache).
 - Un **Compte** et un **Jeton d'accès** de nature `client` (ADR-0017), créés comme au smoke
-  test T1 : le Client exige `ATHENA_ACCESS_TOKEN`.
+  test T1 : le Client l'accepte depuis sa page locale de couplage ou via
+  `ATHENA_ACCESS_TOKEN`.
 
 Créez un fichier `.env` à la racine du dépôt (lu par le serveur) :
 
@@ -31,8 +32,10 @@ ATHENA_USER_ID=owner
 # ATHENA_CONSOLIDATION_HOURS=0,12
 ```
 
-Le serveur refuse de démarrer si `GEMINI_API_KEY` manque : il affiche
-`Erreur de configuration` et sort avec le code 2.
+Le serveur démarre aussi sans clé Gemini : il reste alors en **Installation** (ADR-0026). La
+mémoire reste lisible et les Tools du noyau répondent, mais Gemini Live, le jugement des
+Événements et la Consolidation ne s'ouvrent qu'une fois la clé enregistrée puis le processus
+redémarré.
 
 ## 1. Démarrer le serveur
 

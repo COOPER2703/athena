@@ -5,7 +5,15 @@ from typing import Mapping
 
 import pytest
 
-from server.core.plugins import PluginBinding, PluginRegistry, ToolBinding
+from server.core.plugins import (
+    ConfigField,
+    PluginBinding,
+    PluginDescription,
+    PluginManifest,
+    PluginRegistry,
+    SecretField,
+    ToolBinding,
+)
 from server.core.ports import ToolSpec
 from server.core.session_tools import END_SESSION, register_session_tools
 from server.core.tools import ToolNameConflict
@@ -155,3 +163,45 @@ def test_registry_refuses_an_unknown_plugin_state() -> None:
         registry.mark_state("alpha", "activatd")
 
     assert "activatd" in str(excinfo.value)
+
+
+def test_registry_describes_the_manifest_tools_and_instruction_of_a_plugin() -> None:
+    """Le registre porte de quoi remplir la Console, sans relire le manifeste."""
+    manifest = PluginManifest(
+        api_version=1,
+        name="alpha",
+        version="1.2.3",
+        description="Alpha sait répondre.",
+        platform="server",
+        entrypoint="plugin.py",
+        config=(ConfigField(key="url", type="url", required=True),),
+        secrets=(SecretField(key="token", required=True),),
+    )
+    registry = PluginRegistry()
+    registry.mark_state("alpha", "activated", manifest=manifest)
+    registry.add(_binding("alpha", "alpha__echo", instruction="Répète."))
+
+    description = registry.description_of("alpha")
+    assert description is not None
+    assert description.version == "1.2.3"
+    assert description.platform == "server"
+    assert description.description == "Alpha sait répondre."
+    assert description.config == (ConfigField(key="url", type="url", required=True),)
+    assert description.secrets == (SecretField(key="token", required=True),)
+    assert description.error == ""
+    assert registry.tools_of("alpha") == ("alpha__echo",)
+    assert registry.instruction_of("alpha") == "Répète."
+    assert registry.instruction_of("beta") == ""
+    assert registry.tools_of("beta") == ()
+
+
+def test_registry_accepts_a_description_without_a_loaded_plugin() -> None:
+    """Un dossier cassé ou non listé entre au catalogue sans état de chargement."""
+    registry = PluginRegistry()
+    registry.describe(
+        PluginDescription(name="casse", error="manifest is not valid JSON")
+    )
+
+    assert registry.state_of("casse") is None
+    assert registry.description_of("casse") is not None
+    assert "not valid JSON" in registry.description_of("casse").error

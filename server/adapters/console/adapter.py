@@ -18,13 +18,15 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Awaitable, Callable, Mapping
 
 from aiohttp import web
 
 from server.adapters.console.auth import ConsoleAuth
+from server.adapters.console.chat import ChatEndpoint, TourDestinations
 from server.adapters.console.contract import (
     API_PREFIX,
+    CHAT_PATH,
     ENVELOPE_VERSION,
     EVENTS_PATH,
     HEALTH_PATH,
@@ -32,22 +34,39 @@ from server.adapters.console.contract import (
     LOGOUT_ALL_PATH,
     LOGOUT_PATH,
     PASSWORD_PATH,
+    PLUGINS_PATH,
+    SECRETS_PATH,
     SESSION_PATH,
+    SETTINGS_PATH,
     SETUP_PATH,
     STATUS_PATH,
     STREAM_PATH,
+    THREAD_PATH,
     TOKENS_PATH,
 )
 from server.adapters.console.events import EventInjection
+from server.adapters.console.plugins import PluginsRoutes
+from server.adapters.console.secrets import SecretsRoutes
+from server.adapters.console.settings import SettingsRoutes
 from server.adapters.console.status import (
     DEFAULT_STATUS_INTERVAL,
     StatusBroadcaster,
 )
 from server.adapters.console.stream import stream_handler
+from server.adapters.console.thread import ThreadRoutes
 from server.adapters.console.trace_buffer import TraceBuffer
 from server.adapters.event_body import MAX_BODY_BYTES
+from server.adapters.plugins.admin import PluginAdmin
 from server.adapters.trace import NullTraceSink
-from server.core.ports import AuthService, TraceSink
+from server.core.ports import (
+    AuthService,
+    InstallationStatus,
+    SecretStore,
+    SecretValidator,
+    ThreadReader,
+    TraceSink,
+    TourControl,
+)
 
 # Build de la SPA, produit par `make web`. Le répertoire n'existe pas
 # nécessairement : l'API ne dépend pas du front (ADR-0003).
@@ -95,11 +114,24 @@ _EXPLANATION_PAGE = """<!doctype html>
 """
 
 
+def _installed() -> InstallationStatus:
+    """État d'Installation par défaut de l'adaptateur sans racine de composition."""
+    return InstallationStatus(
+        gemini_configured=True,
+        installation_complete=True,
+        restart_required=False,
+        secrets_unreadable=False,
+    )
+
+
 class ConsoleAdapter:
-    """Surface d'observation en lecture seule, alimentée par ``snapshot``.
+    """Surface d'observation et d'administration de la Console web.
 
     ``snapshot`` est la couture de la racine de composition : l'adaptateur
-    l'appelle à chaque requête, sans retenir ni interpréter l'état du noyau.
+    l'appelle à chaque requête, sans retenir ni interpréter l'état du noyau. La
+    Console écrit aussi — Réglages, Secrets, Jetons d'accès, Plugins — mais
+    toujours par des services et des callables injectés : elle ne voit ni le
+    Coordinator ni l'état de Session (ADR-0016).
     """
 
     def __init__(
@@ -112,14 +144,47 @@ class ConsoleAdapter:
         trace_sink: TraceSink | None = None,
         status_interval: float = DEFAULT_STATUS_INTERVAL,
         auth: AuthService | None = None,
+        secrets: SecretStore | None = None,
+        secret_validator: SecretValidator | None = None,
+        settings: SettingsRoutes | None = None,
+        installation: Callable[[], InstallationStatus] | None = None,
+        master_key: Callable[[], str | None] | None = None,
+        thread: ThreadReader | None = None,
+        plugin_admin: PluginAdmin | None = None,
+        installed: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._host = host
         self._port = port
         self._static_dir = Path(static_dir)
-        # La couture d'authentification est injectée par la racine de
-        # composition. Sans elle, la surface reste ouverte : c'est le mode des
-        # tests unitaires de l'adaptateur, jamais celui de ``build_app``.
-        self._console_auth = ConsoleAuth(auth)
+        # La couture d'identité et d'Installation est injectée par la racine de
+        # composition. Sans elle, la surface reste ouverte et se comporte comme
+        # une instance installée : c'est le mode des tests unitaires de
+        # l'adaptateur, jamais celui de ``build_app``.
+        self._installation = installation or _installed
+        self._console_auth = ConsoleAuth(
+            auth,
+            installation=self._installation,
+            master_key=master_key,
+        )
+        # Les Secrets sont en écriture seule ; leur validation distante est
+        # injectée (faux validateur dans les tests, Gemini en production).
+        self._secrets_routes = SecretsRoutes(
+            secrets=secrets,
+            validator=secret_validator,
+            installed=installed,
+        )
+        # Zone Plugins : activation, configuration et Secrets. Le service est
+        # construit par la racine de composition, qui seule connaît le
+        # répertoire et le fichier d'état des Plugins.
+        self._plugins_routes = PluginsRoutes(plugin_admin)
+        # Les Réglages (ticket #174) reçoivent leurs couches figées au démarrage
+        # et le magasin : l'adaptateur ne relit ni l'environnement ni la
+        # configuration, il rend l'état que la racine lui a décrit.
+        self._settings_routes = settings
+        self._chat = ChatEndpoint(installation=self._installation)
+        # Fil de la Conversation : lecture paginée du Journal, sans état du
+        # noyau. Absent, la route explique que le fil n'est pas disponible.
+        self._thread_routes = ThreadRoutes(reader=thread)
         # Cadence du tick qui pousse les changements d'instantané. Le tick est
         # une tâche de fond possédée par l'adaptateur : jamais sur le chemin
         # d'une requête (ADR-0005, ADR-0016).
@@ -143,6 +208,11 @@ class ConsoleAdapter:
         return self._trace_buffer
 
     @property
+    def tour_destination(self) -> TourDestinations:
+        """Destination des Tours, injectée dans la racine de composition (ADR-0024)."""
+        return self._chat.destination
+
+    @property
     def port(self) -> int:
         """Port réellement lié (utile quand ``port=0`` en test)."""
         server = self._site._server if self._site is not None else None
@@ -155,14 +225,18 @@ class ConsoleAdapter:
         self,
         snapshot: Callable[[], Mapping[str, object]],
         push: Callable[[str, str], None] | None = None,
+        tour: TourControl | None = None,
     ) -> None:
-        """Lie la surface HTTP, l'instantané et la couture ``push``.
+        """Lie la surface HTTP, l'instantané et les coutures du noyau.
 
         ``push`` est le ``App.push_event`` injecté : comme le Webhook, la Console
         ne possède aucune file propre, elle dépose dans le Canal d'événements
-        unique (ADR-0007). Sans couture, l'injection répond 503.
+        unique (ADR-0007). Sans couture, l'injection répond 503. ``tour`` est la
+        couture du **Tour** (ADR-0024) : soumettre et annuler, jamais atteindre
+        le Coordinator. Sans elle, la Conversation répond 501.
         """
         self._snapshot = snapshot
+        self._chat.bind(tour)
         self._event_injection = EventInjection(
             push=push, trace_sink=self._trace_sink
         )
@@ -251,6 +325,39 @@ class ConsoleAdapter:
             ),
         )
         app.router.add_post(EVENTS_PATH, self._handle_event)
+        # Réglages et Secrets (ADR-0025) : lecture des noms seulement, écriture
+        # et effacement par nom. Enregistrés avant le repli ``/api/*``.
+        app.router.add_get(SECRETS_PATH, self._secrets_routes.handle_list)
+        app.router.add_put(
+            f"{SECRETS_PATH}/{{name}}", self._secrets_routes.handle_set
+        )
+        app.router.add_delete(
+            f"{SECRETS_PATH}/{{name}}", self._secrets_routes.handle_delete
+        )
+        # Zone Plugins : liste, activation/config et Secrets d'un Plugin.
+        # Enregistrées avant le repli ``/api/*`` (ticket #176).
+        app.router.add_get(PLUGINS_PATH, self._plugins_routes.handle_list)
+        app.router.add_put(
+            f"{PLUGINS_PATH}/{{name}}", self._plugins_routes.handle_update
+        )
+        app.router.add_put(
+            f"{PLUGINS_PATH}/{{name}}/secrets/{{key}}",
+            self._plugins_routes.handle_secret_set,
+        )
+        app.router.add_delete(
+            f"{PLUGINS_PATH}/{{name}}/secrets/{{key}}",
+            self._plugins_routes.handle_secret_delete,
+        )
+        # Réglages : la lecture rend la valeur effective et sa source, l'écriture
+        # remplace l'objet complet puis annonce ce qui attend un redémarrage.
+        if self._settings_routes is not None:
+            app.router.add_get(SETTINGS_PATH, self._settings_routes.handle_get)
+            app.router.add_put(SETTINGS_PATH, self._settings_routes.handle_put)
+        # Conversation : refusée côté serveur tant que l'Installation n'est pas
+        # terminée, puis Tour complet en ``text/event-stream`` (ADR-0024).
+        app.router.add_post(CHAT_PATH, self._chat.handle)
+        # Fil de la Conversation : lecture paginée du Journal, en lecture seule.
+        app.router.add_get(THREAD_PATH, self._thread_routes.handle)
         # Tout chemin inconnu **sous /api** reste du JSON : un client de l'API
         # ne reçoit jamais une page HTML ou du texte. Le repli est enregistré
         # après les routes exactes, qui gardent la priorité.

@@ -3,6 +3,7 @@ from __future__ import annotations
 from server.adapters.console.adapter import ConsoleAdapter
 from server.adapters.console.contract import (
     API_PREFIX,
+    CHAT_PATH,
     ENVELOPE_VERSION,
     EVENTS_PATH,
     HEALTH_PATH,
@@ -10,7 +11,10 @@ from server.adapters.console.contract import (
     LOGOUT_ALL_PATH,
     LOGOUT_PATH,
     PASSWORD_PATH,
+    PLUGINS_PATH,
+    SECRETS_PATH,
     SESSION_PATH,
+    SETTINGS_PATH,
     SETUP_PATH,
     STATUS_PATH,
     STREAM_PATH,
@@ -20,6 +24,7 @@ from server.adapters.console.contract import (
 
 __all__ = [
     "API_PREFIX",
+    "CHAT_PATH",
     "ENVELOPE_VERSION",
     "EVENTS_PATH",
     "HEALTH_PATH",
@@ -27,7 +32,10 @@ __all__ = [
     "LOGOUT_ALL_PATH",
     "LOGOUT_PATH",
     "PASSWORD_PATH",
+    "PLUGINS_PATH",
+    "SECRETS_PATH",
     "SESSION_PATH",
+    "SETTINGS_PATH",
     "SETUP_PATH",
     "STATUS_PATH",
     "STREAM_PATH",

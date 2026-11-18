@@ -14,6 +14,7 @@ from server.core.commands import (
     SendAnnouncementToLlm,
     SendMemoryToLlm,
     SendToolResultToLlm,
+    SendUserTextToLlm,
     Trace,
 )
 from server.core.events import (
@@ -103,6 +104,9 @@ class GeminiLiveAdapter:
             return
         if isinstance(command, SendMemoryToLlm):
             await self.send_memory(command.connection_id, command.text)
+            return
+        if isinstance(command, SendUserTextToLlm):
+            await self.send_user_text(command.connection_id, command.text)
             return
         if isinstance(command, SendAnnouncementToLlm):
             await self.send_announcement(
@@ -366,6 +370,23 @@ class GeminiLiveAdapter:
         self._emit(
             sent_kind,
             payload={"connection_id": connection_id, "chars": len(text)},
+        )
+
+    async def send_user_text(self, connection_id: str, text: str) -> None:
+        """Envoie l'entrée d'un **Tour texte** comme un tour utilisateur complet.
+
+        Distincte de l'injection de mémoire (``turn_complete=False``) : ce
+        contenu déclenche la réponse du modèle, une seule fois par Tour. Le
+        modèle Live reste celui de la voix — même prompt, même mémoire, mêmes
+        Tools (ADR-0024) — et sa réponse revient par l'audio et la transcription
+        de sortie, que le noyau route vers la destination du Tour.
+        """
+        await self._send_client_content(
+            connection_id,
+            text,
+            turn_complete=True,
+            kind="user_text",
+            sent_kind="user_text_sent",
         )
 
     async def send_tool_result(

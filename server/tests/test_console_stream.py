@@ -9,13 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import io
-import logging
-import socket
+from pathlib import Path
 from typing import Mapping
 
 import aiohttp
 
-from conftest import console_session, install_console
 from testkit import wait_until
 from server.adapters.console import ConsoleAdapter
 from server.adapters.console.stream import trace_frame
@@ -24,18 +22,9 @@ from server.adapters.console.trace_buffer import (
     TraceBuffer,
     truncation_entry,
 )
-from server.app.config import (
-    AppConfig,
-    AuthConfig,
-    ConsoleConfig,
-    GeminiConfig,
-    PluginsConfig,
-    ServerConfig,
-    WebhookConfig,
-)
-from server.app.root import build_app
 from server.app.trace import build_trace_sink
 from server.core.ports import TraceEntry
+from server_harness import running_server
 
 STREAM_PATH = "/api/stream"
 
@@ -349,93 +338,24 @@ def test_the_fan_out_feeds_the_console_buffer_with_every_level() -> None:
     buffer.unsubscribe(subscription)
 
 
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-class _FakeMemory:
-    """Mémoire factice : ``build_app`` ne charge ni modèle ni base réelle."""
-
-
-async def _connect_stream_when_ready(
-    http: aiohttp.ClientSession, url: str
-) -> aiohttp.ClientWebSocketResponse:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + 2.0
-    while True:
-        try:
-            return await http.ws_connect(url)
-        except aiohttp.ClientConnectorError:
-            if loop.time() > deadline:
-                raise
-            await asyncio.sleep(0.01)
-
-
-async def _assert_started_and_live(
-    ws: aiohttp.ClientWebSocketResponse,
-) -> None:
-    hello = await asyncio.wait_for(ws.receive_json(), 1.0)
-    assert hello["type"] == "hello"
-    assert "started" in [entry["kind"] for entry in hello["data"]["backlog"]]
-
-    logging.getLogger("fixture").warning("live")
-
-    live = None
-    while live is None:
-        frame = await asyncio.wait_for(ws.receive_json(), 1.0)
-        if frame["data"]["kind"] == "fixture":
-            live = frame
-    assert live["type"] == "trace"
-    assert live["data"]["source"] == "logging"
-    assert live["data"]["level"] == "warning"
-    assert live["data"]["payload"] == {"message": "live"}
-
-
 def test_build_app_feeds_the_stream_from_the_single_trace_flow(
-    tmp_path, monkeypatch
+    tmp_path: Path,
 ) -> None:
     """Câblage réel : le flux ``/api/stream`` reçoit le fan-out de l'App."""
 
     async def scenario() -> None:
-        monkeypatch.setattr(
-            "server.app.root.SentenceTransformerEmbedder", lambda *a, **k: None
-        )
-        monkeypatch.setattr(
-            "server.app.root.SqliteMemoryStore", lambda *a, **k: _FakeMemory()
-        )
-        console_port = _free_port()
-        config = AppConfig(
-            gemini=GeminiConfig(api_key="test-key"),
-            server=ServerConfig(host="127.0.0.1", port=_free_port()),
-            console=ConsoleConfig(port=console_port),
-            webhook=WebhookConfig(enabled=False),
-            plugins=PluginsConfig(
-                directory=str(tmp_path / "plugins"),
-                state_path=str(tmp_path / "plugins.json"),
-            ),
-            log_dir=str(tmp_path),
-            auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
-        )
-        root_logger = logging.getLogger()
-        original_handlers = root_logger.handlers[:]
-        original_level = root_logger.level
-        app = build_app(config, secrets=None, env={}, env_file=None)
-        runner = asyncio.create_task(app.run())
-        try:
-            base_url = f"http://127.0.0.1:{console_port}"
-            async with console_session(base_url) as http:
-                await install_console(http, base_url, tmp_path / "server.log")
-                ws = await _connect_stream_when_ready(
-                    http, f"{base_url}{STREAM_PATH}"
-                )
-                await _assert_started_and_live(ws)
-        finally:
-            app.request_shutdown()
-            await asyncio.wait_for(runner, 1.0)
-            root_logger.handlers[:] = original_handlers
-            root_logger.setLevel(original_level)
+        async with running_server(tmp_path) as server:
+            await server.install()
+
+            async with server.trace_stream() as stream:
+                assert "started" in [trace["kind"] for trace in stream.backlog]
+
+                # Un log tiers traverse le pont de logging puis le flux unique.
+                server.emit_log("fixture", "live")
+                trace = await stream.next_trace("fixture")
+                assert trace["source"] == "logging"
+                assert trace["level"] == "info"
+                assert trace["payload"] == {"message": "live"}
 
     asyncio.run(scenario())
 

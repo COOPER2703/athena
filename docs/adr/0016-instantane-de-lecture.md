@@ -9,6 +9,11 @@ d'authentification et d'installation), pas un instantané de lecture du noyau. C
 l'exception explicite à la règle de route de lecture unique ; toute lecture d'état continue de
 passer par `App.snapshot()`.
 
+Amendé par l'ADR-0025 : la Console n'est plus un simple lecteur. Elle écrit les Réglages et les
+Secrets dans un magasin injecté à la racine, et le fil de conversation est une lecture paginée
+du **Journal** — pas un nouvel état du noyau. L'instantané reste la seule lecture de l'état du
+noyau.
+
 ## Contexte
 
 La Console web doit montrer l'état vivant du serveur : Session en cours, Client actif,

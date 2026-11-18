@@ -8,7 +8,7 @@ travers un vrai ``ToolRegistry``.
 
 from __future__ import annotations
 
-from conftest import (
+from harness import (
     announcement,
     close_window,
     drive,
@@ -67,7 +67,9 @@ class FakeMemory:
     async def pinned_facts(self, user_id: str) -> list[str]:
         return []
 
-    async def append_turn(self, user_id: str, role: str, text: str) -> None:
+    async def append_turn(
+        self, user_id: str, role: str, text: str, origin: str = ""
+    ) -> None:
         self.turns.append((user_id, role, text))
 
     async def recall(self, user_id: str, query: str) -> list[MemoryHit]:

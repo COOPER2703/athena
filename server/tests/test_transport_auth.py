@@ -18,7 +18,7 @@ import websockets
 from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response
 
-from conftest import FakeClock, console_session, install_console, running_transport
+from harness import FakeClock, console_session, install_console, running_transport
 from testkit import RecordingTraceSink, register, url
 from protocol import Ping, Pong, Register, Registered, decode, encode
 from server.adapters.auth import SqliteAuthStore
@@ -29,6 +29,7 @@ from server.app.config import (
     GeminiConfig,
     PluginsConfig,
     ServerConfig,
+    SettingsConfig,
     WebhookConfig,
 )
 from server.app.root import build_app
@@ -196,6 +197,10 @@ def test_build_app_shares_one_auth_store_between_console_and_transport(
                 directory=str(tmp_path / "plugins"),
                 state_path=str(tmp_path / "plugins.json"),
             ),
+            settings=SettingsConfig(
+                db_path=str(tmp_path / "settings.db"),
+                master_key_file=str(tmp_path / "master.key"),
+            ),
             log_dir=str(tmp_path),
             auth=AuthConfig(db_path=str(tmp_path / "auth.db")),
         )
@@ -205,7 +210,7 @@ def test_build_app_shares_one_auth_store_between_console_and_transport(
         ws_url = f"ws://127.0.0.1:{transport_port}"
         try:
             async with console_session(base_url) as http:
-                await install_console(http, base_url, tmp_path / "server.log")
+                await install_console(http, base_url)
                 async with http.post(
                     f"{base_url}/api/tokens",
                     json={"name": "desktop", "kind": "client"},

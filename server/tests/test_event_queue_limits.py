@@ -10,7 +10,7 @@ transmis au juge**, pas un lot envoyé à la Connexion Live.
 
 from __future__ import annotations
 
-from conftest import close_window, drive, handle, traces, visible_session, window_timer
+from harness import close_window, drive, handle, traces, visible_session, window_timer
 from testkit import FakeJudge
 from server.core import (
     EVENT_MAX_CHARS,

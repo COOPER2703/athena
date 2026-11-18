@@ -47,7 +47,9 @@ class FakeStore:
     async def pinned_facts(self, user_id: str) -> list[str]:
         return []
 
-    async def append_turn(self, user_id: str, role: str, text: str) -> None:
+    async def append_turn(
+        self, user_id: str, role: str, text: str, origin: str = ""
+    ) -> None:
         pass
 
     async def recall(self, user_id: str, query: str) -> list[MemoryHit]:

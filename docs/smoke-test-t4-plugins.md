@@ -139,18 +139,15 @@ INFO [app] started {"state": "Idle"}
 - Si ni le fichier d'état ni le dossier de plugins n'existent, aucune ligne `PluginState`
   n'est émise : l'instantané porte `"plugins": []`.
 
-Au **premier** démarrage, le serveur tourne sans Compte : le journal porte le Code
-d'installation à usage unique. Laissez ce serveur tourner et installez le Compte ; le détail
-des écrans et des refus est dans `docs/smoke-test-t5-console.md`.
+Au **premier** démarrage, le serveur tourne sans Compte : le premier visiteur devient
+propriétaire, aucun code n'est demandé (ADR-0026). Laissez ce serveur tourner et installez le
+Compte ; le détail des écrans et des refus est dans `docs/smoke-test-t5-console.md`.
 
 ```sh
-CODE=$(sed -n 's/.*InstallationCode.*"code": "\([^"]*\)".*/\1/p' \
-  "$ATHENA_LOG_DIR/server.log" | tail -n 1)
-
 curl -i -c /tmp/athena-cookies.txt -X POST http://127.0.0.1:8767/api/setup \
   -H 'Origin: http://127.0.0.1:8767' \
   -H 'Content-Type: application/json' \
-  -d "{\"code\":\"$CODE\",\"username\":\"admin\",\"password\":\"un-mot-de-passe-de-12-caracteres\"}"
+  -d '{"username":"admin","password":"un-mot-de-passe-de-12-caracteres"}'  # gitleaks:allow
 ```
 
 Attendu : `200`, `authenticated: true`, et un cookie `athena_ticket` dans la jar. Aux

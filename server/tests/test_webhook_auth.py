@@ -14,7 +14,7 @@ from pathlib import Path
 
 import aiohttp
 
-from conftest import FakeClock, console_session, install_console
+from harness import FakeClock, console_session, install_console
 from testkit import RecordingTraceSink
 from server.adapters.auth import SqliteAuthStore
 from server.adapters.webhook import (
@@ -29,6 +29,7 @@ from server.app.config import (
     GeminiConfig,
     PluginsConfig,
     ServerConfig,
+    SettingsConfig,
     WebhookConfig,
 )
 from server.app.root import build_app
@@ -397,6 +398,10 @@ def test_build_app_shares_one_auth_store_between_console_and_webhook(
                 directory=str(tmp_path / "plugins"),
                 state_path=str(tmp_path / "plugins.json"),
             ),
+            settings=SettingsConfig(
+                db_path=str(tmp_path / "settings.db"),
+                master_key_file=str(tmp_path / "master.key"),
+            ),
             log_dir=str(tmp_path / "logs"),
         )
         root_logger = logging.getLogger()
@@ -408,9 +413,7 @@ def test_build_app_shares_one_auth_store_between_console_and_webhook(
         webhook_url = f"http://127.0.0.1:{webhook_port}{EVENTS_PATH}"
         try:
             async with console_session(console_url) as http:
-                await install_console(
-                    http, console_url, tmp_path / "logs" / "server.log"
-                )
+                await install_console(http, console_url)
                 async with http.post(
                     f"{console_url}/api/tokens",
                     json={

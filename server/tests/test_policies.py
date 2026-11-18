@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import drive, effects, handle, traces
+from harness import drive, effects, handle, traces
 from protocol import SessionEndReason
 
 from server.core import (

@@ -10,6 +10,7 @@ from client.config import (
     AudioConfig,
     BackoffConfig,
     ClientConfig,
+    PageConfig,
     WakeWordConfig,
 )
 
@@ -115,11 +116,48 @@ def test_wake_word_config_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.pre_roll_ms == 500
 
 
+PAGE_ENV = (
+    "ATHENA_CLIENT_HOST",
+    "ATHENA_CLIENT_PORT",
+    "ATHENA_CLIENT_CONFIG",
+    "XDG_CONFIG_HOME",
+)
+
+
+def test_page_config_defaults_to_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in PAGE_ENV:
+        monkeypatch.delenv(key, raising=False)
+    cfg = PageConfig()
+    assert cfg.host == "127.0.0.1"
+    assert cfg.port == 8768
+    assert cfg.config_path.parts[-3:] == (".config", "athena", "client.json")
+
+
+def test_page_config_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ATHENA_CLIENT_HOST", "localhost")
+    monkeypatch.setenv("ATHENA_CLIENT_PORT", "9100")
+    monkeypatch.setenv("ATHENA_CLIENT_CONFIG", "/tmp/custom/client.json")
+    cfg = PageConfig()
+    assert cfg.host == "localhost"
+    assert cfg.port == 9100
+    assert cfg.config_path == Path("/tmp/custom/client.json")
+
+
+def test_page_config_honours_xdg_config_home(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key in PAGE_ENV:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/tmp/xdg")
+    assert PageConfig().config_path == Path("/tmp/xdg/athena/client.json")
+
+
 def test_app_config_composes_audio_and_client() -> None:
     cfg = AppConfig()
     assert isinstance(cfg.audio, AudioConfig)
     assert isinstance(cfg.client, ClientConfig)
     assert isinstance(cfg.wake_word, WakeWordConfig)
+    assert isinstance(cfg.page, PageConfig)
 
 
 def test_config_value_objects_are_frozen() -> None:

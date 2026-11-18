@@ -1,0 +1,88 @@
+/* Tokens de design de la Console. Un seul accent, vert pastel. */
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces et texte */
+  --canvas: #0a0d10;
+  --surface: #10151a;
+  --surface-2: #161d24;
+  --border: #26313b;
+  --border-strong: #3a4a57;
+  --text: #e2e9f0;
+  --muted: #9aa9b8;
+  --subtle: #748595;
+
+  /* Accent unique : le vert pastel. Le thème clair assombrit le texte,
+     jamais la teinte. */
+  --accent: #9fe8c0;
+  --accent-fill: #a8edc6;
+  --accent-fill-hover: #b8f3d2;
+  --accent-ink: #052015;
+  --accent-soft: #14211b;
+  --accent-line: #2f4a3d;
+  --focus: #b9f4d5;
+  --halo: 0 0 20px -7px rgb(159 232 192 / 45%);
+
+  /* Sémantique : réservée aux erreurs et avertissements, jamais décorative. */
+  --danger: #ffb4b4;
+  --danger-soft: #2a1719;
+  --danger-line: #5a2c30;
+  --warning: #f2d79b;
+  --warning-soft: #2a2316;
+  --warning-line: #5a4a2a;
+
+  --grid-line: #151b21;
+
+  /* Mouvement : court, jamais décoratif au-delà de l'état. */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --ease-quiet: cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  --canvas: #f5f7f5;
+  --surface: #ffffff;
+  --surface-2: #edf1ee;
+  --border: #d7dfd9;
+  --border-strong: #b5c4ba;
+  --text: #14201a;
+  --muted: #4a5c52;
+  --subtle: #5e7266;
+
+  --accent: #1c6f4a;
+  --accent-fill: #a9ebc5;
+  --accent-fill-hover: #98e0b7;
+  --accent-ink: #062016;
+  --accent-soft: #e6f6ec;
+  --accent-line: #a8cbb6;
+  --focus: #1c6f4a;
+  --halo: 0 0 0 0 transparent;
+
+  --danger: #a52a35;
+  --danger-soft: #fdecee;
+  --danger-line: #e3b6bb;
+  --warning: #7a5a12;
+  --warning-soft: #fbf3dc;
+  --warning-line: #dfc98f;
+
+  --grid-line: #e4e9e5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-base: 0ms;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

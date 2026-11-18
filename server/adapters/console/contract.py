@@ -30,6 +30,16 @@ TOKENS_PATH = "/api/tokens"
 LOGOUT_PATH = "/api/logout"
 LOGOUT_ALL_PATH = "/api/logout-all"
 PASSWORD_PATH = "/api/password"
+# Réglages et Secrets (ADR-0025) : lecture des noms seulement, écriture et
+# effacement par nom. La Conversation est refusée côté serveur tant que
+# l'Installation n'est pas terminée (ADR-0026).
+SETTINGS_PATH = "/api/settings"
+SECRETS_PATH = "/api/secrets"
+PLUGINS_PATH = "/api/plugins"
+CHAT_PATH = "/api/chat"
+# Fil de la Conversation (ADR-0024) : lecture paginée du Journal, marquée par
+# l'origine de chaque tour. Aucune écriture, aucun état du noyau.
+THREAD_PATH = "/api/thread"
 # Sonde de supervision : publique, réponse fixe, aucun état applicatif.
 HEALTH_PATH = "/healthz"
 # Nom stable et explicite du cookie qui porte le Ticket Console. Le préfixe

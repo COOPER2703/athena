@@ -25,3 +25,13 @@ remplit à chaque déménagement (spec #147, tickets #149 à #154).
 | `0019` | `plugins/notion/docs/adr/0001-notion-en-rest-plutot-que-mcp.md` | #151 |
 | `0021` | `plugins/google-workspace/docs/adr/0001-google-workspace-par-refresh-tokens.md` | #152 |
 | `0022` | `plugins/google-workspace/docs/adr/0002-contacts-google-via-people-api.md` | #152 |
+
+## ADR du centre
+
+Les décisions du noyau et du système restent listées ici par leur fichier :
+
+- `0023-dossier-de-plugin-unite-amovible.md` — la forme d'un dossier de plugin.
+- `0024-tour-unite-de-conversation.md` — le Tour comme unité de conversation.
+- `0025-reglages-et-secrets.md` — réglages applicatifs et Secrets chiffrés.
+- `0026-installation-sans-code.md` — l'Installation au premier démarrage.
+

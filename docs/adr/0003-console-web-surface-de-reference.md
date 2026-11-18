@@ -13,6 +13,11 @@ Amendé par l'ADR-0017 : la Console n'est plus ouverte « sans authentification 
 route d'API hors identité exige un **Ticket Console** ; seules la SPA, `/healthz`,
 `/api/session`, `/api/setup` et `/api/login` restent publiques.
 
+Amendé par l'ADR-0024, l'ADR-0025 et l'ADR-0026 : la Console devient la surface unique —
+**Conversation** écrite, **Réglages**, **Plugins**, **Diagnostic** —, elle écrit les Réglages et
+les Secrets chiffrés, et l'**Installation** remplace le Code d'installation. Elle **n'est
+toujours pas un Client**.
+
 ## Considérations
 
 - Raison : plus simple à maintenir et à faire évoluer que Textual, et l'API qu'elle

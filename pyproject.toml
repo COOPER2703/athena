@@ -14,6 +14,9 @@ dependencies = [
     "numpy>=2.0",
     "aiohttp>=3.14",
     "argon2-cffi>=25.1.0",
+    # Chiffrement au repos des Secrets (AES-GCM, ADR-0025). Dépendance directe
+    # depuis #170 : elle n'arrivait auparavant que par ``google-auth``.
+    "cryptography>=50.0",
     "mcp>=2.3.0,<3",
     "httpx2>=2.16.0",
     # openWakeWord 0.6.0 (PyPI) tire tflite-runtime, sans wheel cp312. La

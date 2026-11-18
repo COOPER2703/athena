@@ -5,7 +5,7 @@ import asyncio
 import pytest
 import websockets
 
-from conftest import running_transport
+from harness import running_transport
 from testkit import RecordingTraceSink, register, url, wait_until
 from protocol import (
     Audio,

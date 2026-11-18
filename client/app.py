@@ -45,11 +45,13 @@ class ClientApp:
         transport: Transport,
         detector: WakeWordDetector | None = None,
         clock: Callable[[], float] | None = None,
+        on_ready: Callable[[], None] | None = None,
     ) -> None:
         self._cfg = cfg
         self._audio = audio
         self._transport = transport
         self._detector = detector
+        self._on_ready = on_ready
         # Une erreur d'inférence condamne la Veille pour le reste du processus :
         # le push-to-talk, lui, ne dépend pas du détecteur.
         self._detector_failed = False
@@ -74,6 +76,15 @@ class ClientApp:
     @property
     def state(self) -> ClientState:
         return self._state
+
+    @property
+    def client_id(self) -> str | None:
+        return self._transport.client_id
+
+    @property
+    def detector_failed(self) -> bool:
+        """Vrai quand une erreur d'inférence a condamné la Veille."""
+        return self._detector_failed
 
     async def tap(self) -> None:
         """Tap/Entrée : démarre une Session, ou interrompt en cours de Session."""
@@ -189,6 +200,7 @@ class ClientApp:
             tasks.append(asyncio.create_task(self._capture_loop()))
             tasks.append(asyncio.create_task(self._playback_loop()))
             tasks.append(asyncio.create_task(self._stopped.wait()))
+            self._notify_ready()
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
             for task in tasks:
@@ -208,6 +220,20 @@ class ClientApp:
 
     def stop(self) -> None:
         self._stopped.set()
+
+    def _notify_ready(self) -> None:
+        """Signale que micro et sortie audio sont ouverts.
+
+        Le daemon s'en sert pour la page de couplage ; une erreur du callback ne
+        doit jamais interrompre le flux audio.
+        """
+        callback = self._on_ready
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:
+            log.exception("Échec du callback de démarrage ignoré")
 
     def _close_detector(self) -> None:
         detector = self._detector

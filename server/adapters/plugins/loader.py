@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 
+from server.adapters.plugins.state import PluginState
 from server.adapters.trace import emit
 from server.core.plugins import (
     KNOWN_PLATFORMS,
@@ -62,13 +63,16 @@ class _PendingPlugin:
 
     Le callable d'entrée est conservé pour ne pas réimporter le module à chaque
     tentative : ``create`` est rappelé sur le module déjà chargé, ce qui garde
-    l'état interne du plugin (son compteur de tentatives, son cache).
+    l'état interne du plugin (son compteur de tentatives, son cache). Le
+    manifeste est gardé pour que le catalogue de la Console continue de décrire
+    le plugin pendant l'échec.
     """
 
     name: str
     create: Callable[[PluginContext], object]
     config: Mapping[str, str]
     secrets: Mapping[str, str]
+    manifest: PluginManifest
 
 
 class PluginLoader:
@@ -103,11 +107,19 @@ class PluginLoader:
         self._secrets = secrets
         self._trace_sink = trace_sink
         self._pending: dict[str, _PendingPlugin] = {}
+        #: Liste d'activation et configuration lues au démarrage : la référence
+        #: des « changements en attente » (une écriture n'agit qu'au redémarrage).
+        self._state_at_load: PluginState | None = None
 
     @property
     def pending(self) -> tuple[str, ...]:
         """Plugins dont ``create`` a échoué et qui attendent une retente."""
         return tuple(self._pending)
+
+    @property
+    def state_at_load(self) -> PluginState | None:
+        """État du fichier lu au dernier chargement, ou ``None`` avant."""
+        return self._state_at_load
 
     async def load(
         self,
@@ -124,6 +136,7 @@ class PluginLoader:
         chargement continuer, le plugin restant en attente de retente.
         """
         enabled, configs = self._read_state()
+        self._state_at_load = PluginState(enabled=enabled, config=configs)
         for name in enabled:
             await self._load_enabled(name, registry, configs.get(name, {}), push_event)
         for name in sorted(self._on_disk() - set(enabled)):
@@ -168,10 +181,17 @@ class PluginLoader:
         configs: dict[str, Mapping[str, object]] = {}
         for name, values in raw_config.items():
             if not isinstance(values, dict):
-                raise PluginLoadError(
-                    f"invalid plugins state file {self._state_path}: "
-                    f"config for plugin {name!r} must be an object"
+                # Une valeur inconnue (édition manuelle fautive) ne doit pas
+                # tuer le serveur : elle est ignorée et tracée, et seule la
+                # configuration d'un plugin **activé** peut encore être fatale.
+                emit(
+                    self._trace_sink,
+                    _TRACE_SOURCE,
+                    "PluginStateIgnored",
+                    payload={"plugin": str(name), "reason": "config is not an object"},
+                    level="warning",
                 )
+                continue
             configs[str(name)] = values
         return enabled, configs
 
@@ -198,7 +218,11 @@ class PluginLoader:
             # Une plateforme cliente n'est jamais chargée par le serveur : le
             # plugin reste inerte ici, sans faire échouer le démarrage.
             self._record_state(
-                registry, name, "disabled", platform=manifest.platform
+                registry,
+                name,
+                "disabled",
+                manifest=manifest,
+                platform=manifest.platform,
             )
             return
         config = self._resolve_config(manifest, raw_config)
@@ -210,12 +234,29 @@ class PluginLoader:
             # Une panne de plateforme est réparable : le serveur démarre
             # dégradé et la retente prend le relais (ticket #57).
             self._pending[name] = _PendingPlugin(
-                name=name, create=create, config=config, secrets=secrets
+                name=name,
+                create=create,
+                config=config,
+                secrets=secrets,
+                manifest=manifest,
             )
-            self._record_state(registry, name, "failed", reason=failure.reason)
+            self._record_state(
+                registry,
+                name,
+                "failed",
+                manifest=manifest,
+                error=failure.reason,
+                reason=failure.reason,
+            )
             return
         self._register(name, binding, registry)
-        self._record_state(registry, name, "activated", tools=len(binding.tools))
+        self._record_state(
+            registry,
+            name,
+            "activated",
+            manifest=manifest,
+            tools=len(binding.tools),
+        )
 
     async def retry_pending(
         self,
@@ -245,18 +286,27 @@ class PluginLoader:
                 )
             except _CreateFailure as failure:
                 self._record_state(
-                    registry, name, "failed", reason=failure.reason, retry=True
+                    registry,
+                    name,
+                    "failed",
+                    manifest=pending.manifest,
+                    error=failure.reason,
+                    reason=failure.reason,
+                    retry=True,
                 )
                 continue
             except PluginLoadError as exc:
                 # Défaut du plugin découvert à la retente : le serveur tourne
                 # déjà, donc il est tracé puis oublié au lieu de tuer le process.
                 del self._pending[name]
+                reason = _redact(str(exc), pending.secrets.values())
                 self._record_state(
                     registry,
                     name,
                     "failed",
-                    reason=_redact(str(exc), pending.secrets.values()),
+                    manifest=pending.manifest,
+                    error=reason,
+                    reason=reason,
                     retry=True,
                     level="error",
                 )
@@ -265,17 +315,25 @@ class PluginLoader:
             try:
                 self._register(name, binding, registry)
             except PluginLoadError as exc:
+                reason = _redact(str(exc), pending.secrets.values())
                 self._record_state(
                     registry,
                     name,
                     "failed",
-                    reason=_redact(str(exc), pending.secrets.values()),
+                    manifest=pending.manifest,
+                    error=reason,
+                    reason=reason,
                     retry=True,
                     level="error",
                 )
                 continue
             self._record_state(
-                registry, name, "activated", tools=len(binding.tools), retry=True
+                registry,
+                name,
+                "activated",
+                manifest=pending.manifest,
+                tools=len(binding.tools),
+                retry=True,
             )
         return self.pending
 
@@ -310,121 +368,22 @@ class PluginLoader:
 
     def _read_manifest(self, name: str, plugin_dir: Path) -> PluginManifest:
         """Lit et valide strictement le manifeste d'un plugin activé."""
-        path = plugin_dir / _MANIFEST_FILE
-        if not path.is_file():
-            raise PluginLoadError(f"plugin {name!r}: missing manifest {path}")
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise PluginLoadError(
-                f"plugin {name!r}: manifest is not valid JSON ({exc})"
-            ) from exc
-        if not isinstance(data, dict):
-            raise PluginLoadError(
-                f"plugin {name!r}: manifest must be a JSON object"
-            )
-        api_version = data.get("api_version")
-        if api_version != _API_VERSION:
-            raise PluginLoadError(
-                f"plugin {name!r}: unsupported api_version {api_version!r} "
-                f"(expected {_API_VERSION})"
-            )
-        fields: dict[str, str] = {}
-        for field in _REQUIRED_TEXT_FIELDS:
-            value = data.get(field)
-            if not isinstance(value, str) or not value.strip():
-                raise PluginLoadError(
-                    f"plugin {name!r}: manifest field {field!r} is missing or empty"
-                )
-            fields[field] = value.strip()
-        manifest_name = fields["name"]
-        if manifest_name != name:
-            raise PluginLoadError(
-                f"plugin {name!r}: manifest name {manifest_name!r} does not match "
-                "its directory"
-            )
-        entrypoint = fields["entrypoint"]
-        if not (plugin_dir / entrypoint).is_file():
-            raise PluginLoadError(
-                f"plugin {name!r}: entrypoint {entrypoint!r} does not exist"
-            )
-        platform = fields["platform"]
-        if platform not in KNOWN_PLATFORMS:
-            # Une valeur inconnue est une faute de frappe, pas une plateforme
-            # future : la refuser évite de croire un plugin chargé.
-            raise PluginLoadError(
-                f"plugin {name!r}: unknown platform {platform!r} "
-                f"(known: {', '.join(KNOWN_PLATFORMS)})"
-            )
-        return PluginManifest(
-            api_version=api_version,
-            name=manifest_name,
-            version=fields["version"],
-            description=fields["description"],
-            platform=platform,
-            entrypoint=entrypoint,
-            config=self._read_config_fields(name, data.get("config", [])),
-            secrets=self._read_secret_fields(name, data.get("secrets", [])),
-        )
+        return read_manifest(name, plugin_dir)
 
     @staticmethod
     def _read_entries(
         name: str, field: str, raw: object
     ) -> list[tuple[str, bool, Mapping[str, object]]]:
-        """Valide la forme commune des listes ``config`` et ``secrets``.
-
-        Chaque entrée est un objet avec une ``key`` non vide et un ``required``
-        booléen optionnel (faux par défaut).
-        """
-        if raw is None:
-            return []
-        if not isinstance(raw, list):
-            raise PluginLoadError(
-                f"plugin {name!r}: manifest field {field!r} must be a list"
-            )
-        entries: list[tuple[str, bool, Mapping[str, object]]] = []
-        for entry in raw:
-            if not isinstance(entry, dict):
-                raise PluginLoadError(
-                    f"plugin {name!r}: manifest field {field!r} entries must be objects"
-                )
-            key = entry.get("key")
-            if not isinstance(key, str) or not key.strip():
-                raise PluginLoadError(
-                    f"plugin {name!r}: manifest field {field!r} entry without a 'key'"
-                )
-            required = entry.get("required", False)
-            if not isinstance(required, bool):
-                raise PluginLoadError(
-                    f"plugin {name!r}: 'required' for {key!r} must be a boolean"
-                )
-            entries.append((key.strip(), required, entry))
-        return entries
+        """Valide la forme commune des listes ``config`` et ``secrets``."""
+        return _read_entries(name, field, raw)
 
     @classmethod
     def _read_config_fields(cls, name: str, raw: object) -> tuple[ConfigField, ...]:
-        fields: list[ConfigField] = []
-        for key, required, entry in cls._read_entries(name, "config", raw):
-            value_type = entry.get("type", "string")
-            if not isinstance(value_type, str) or not value_type.strip():
-                raise PluginLoadError(
-                    f"plugin {name!r}: 'type' for {key!r} must be a string"
-                )
-            value_type = value_type.strip()
-            if value_type not in _CONFIG_FIELD_TYPES:
-                raise PluginLoadError(
-                    f"plugin {name!r}: unknown type {value_type!r} for config key "
-                    f"{key!r} (supported: {', '.join(_CONFIG_FIELD_TYPES)})"
-                )
-            fields.append(ConfigField(key=key, type=value_type, required=required))
-        return tuple(fields)
+        return _read_config_fields(name, raw)
 
     @classmethod
     def _read_secret_fields(cls, name: str, raw: object) -> tuple[SecretField, ...]:
-        return tuple(
-            SecretField(key=key, required=required)
-            for key, required, _ in cls._read_entries(name, "secrets", raw)
-        )
+        return _read_secret_fields(name, raw)
 
     def _resolve_config(
         self, manifest: PluginManifest, raw_config: Mapping[str, object]
@@ -567,15 +526,18 @@ class PluginLoader:
         plugin: str,
         state: str,
         *,
+        manifest: PluginManifest | None = None,
+        error: str = "",
         level: str = "info",
         **extra: object,
     ) -> None:
         """Met à jour l'état du plugin dans le registre, puis le trace.
 
-        Le registre porte l'état lisible (glossaire) ; la trace reste le flux
-        d'observabilité, avec les mêmes payloads qu'avant.
+        Le registre porte l'état et les métadonnées lisibles (glossaire) ; la
+        trace reste le flux d'observabilité, avec les mêmes payloads qu'avant.
+        ``error`` est une raison lisible, jamais une valeur de Secret.
         """
-        registry.mark_state(plugin, state)
+        registry.mark_state(plugin, state, manifest=manifest, error=error)
         emit(
             self._trace_sink,
             _TRACE_SOURCE,
@@ -604,6 +566,129 @@ class PluginLoader:
         return trace
 
 
+def read_manifest(name: str, plugin_dir: Path) -> PluginManifest:
+    """Lit et valide strictement le manifeste d'un plugin.
+
+    C'est le chemin **fatal** du chargeur : il lève ``PluginLoadError`` pour un
+    manifeste absent, illisible ou incohérent. Le catalogue de la Console
+    l'appelle par dossier et attrape l'erreur, pour qu'un plugin cassé ou non
+    listé reste lisible sans faire échouer le démarrage.
+    """
+    path = plugin_dir / _MANIFEST_FILE
+    if not path.is_file():
+        raise PluginLoadError(f"plugin {name!r}: missing manifest {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PluginLoadError(
+            f"plugin {name!r}: manifest is not valid JSON ({exc})"
+        ) from exc
+    if not isinstance(data, dict):
+        raise PluginLoadError(f"plugin {name!r}: manifest must be a JSON object")
+    api_version = data.get("api_version")
+    if api_version != _API_VERSION:
+        raise PluginLoadError(
+            f"plugin {name!r}: unsupported api_version {api_version!r} "
+            f"(expected {_API_VERSION})"
+        )
+    fields: dict[str, str] = {}
+    for field in _REQUIRED_TEXT_FIELDS:
+        value = data.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise PluginLoadError(
+                f"plugin {name!r}: manifest field {field!r} is missing or empty"
+            )
+        fields[field] = value.strip()
+    manifest_name = fields["name"]
+    if manifest_name != name:
+        raise PluginLoadError(
+            f"plugin {name!r}: manifest name {manifest_name!r} does not match "
+            "its directory"
+        )
+    entrypoint = fields["entrypoint"]
+    if not (plugin_dir / entrypoint).is_file():
+        raise PluginLoadError(
+            f"plugin {name!r}: entrypoint {entrypoint!r} does not exist"
+        )
+    platform = fields["platform"]
+    if platform not in KNOWN_PLATFORMS:
+        # Une valeur inconnue est une faute de frappe, pas une plateforme
+        # future : la refuser évite de croire un plugin chargé.
+        raise PluginLoadError(
+            f"plugin {name!r}: unknown platform {platform!r} "
+            f"(known: {', '.join(KNOWN_PLATFORMS)})"
+        )
+    return PluginManifest(
+        api_version=api_version,
+        name=manifest_name,
+        version=fields["version"],
+        description=fields["description"],
+        platform=platform,
+        entrypoint=entrypoint,
+        config=_read_config_fields(name, data.get("config", [])),
+        secrets=_read_secret_fields(name, data.get("secrets", [])),
+    )
+
+
+def _read_entries(
+    name: str, field: str, raw: object
+) -> list[tuple[str, bool, Mapping[str, object]]]:
+    """Valide la forme commune des listes ``config`` et ``secrets``.
+
+    Chaque entrée est un objet avec une ``key`` non vide et un ``required``
+    booléen optionnel (faux par défaut).
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise PluginLoadError(
+            f"plugin {name!r}: manifest field {field!r} must be a list"
+        )
+    entries: list[tuple[str, bool, Mapping[str, object]]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise PluginLoadError(
+                f"plugin {name!r}: manifest field {field!r} entries must be objects"
+            )
+        key = entry.get("key")
+        if not isinstance(key, str) or not key.strip():
+            raise PluginLoadError(
+                f"plugin {name!r}: manifest field {field!r} entry without a 'key'"
+            )
+        required = entry.get("required", False)
+        if not isinstance(required, bool):
+            raise PluginLoadError(
+                f"plugin {name!r}: 'required' for {key!r} must be a boolean"
+            )
+        entries.append((key.strip(), required, entry))
+    return entries
+
+
+def _read_config_fields(name: str, raw: object) -> tuple[ConfigField, ...]:
+    fields: list[ConfigField] = []
+    for key, required, entry in _read_entries(name, "config", raw):
+        value_type = entry.get("type", "string")
+        if not isinstance(value_type, str) or not value_type.strip():
+            raise PluginLoadError(
+                f"plugin {name!r}: 'type' for {key!r} must be a string"
+            )
+        value_type = value_type.strip()
+        if value_type not in _CONFIG_FIELD_TYPES:
+            raise PluginLoadError(
+                f"plugin {name!r}: unknown type {value_type!r} for config key "
+                f"{key!r} (supported: {', '.join(_CONFIG_FIELD_TYPES)})"
+            )
+        fields.append(ConfigField(key=key, type=value_type, required=required))
+    return tuple(fields)
+
+
+def _read_secret_fields(name: str, raw: object) -> tuple[SecretField, ...]:
+    return tuple(
+        SecretField(key=key, required=required)
+        for key, required, _ in _read_entries(name, "secrets", raw)
+    )
+
+
 def _is_http_url(text: str) -> bool:
     """Vrai si ``text`` est une URL ``http``/``https`` avec un hôte non vide."""
     try:
@@ -611,6 +696,11 @@ def _is_http_url(text: str) -> bool:
         return parts.scheme in ("http", "https") and bool(parts.hostname)
     except ValueError:
         return False
+
+
+def is_http_url(text: str) -> bool:
+    """Nom public de la validation d'URL d'un champ de configuration."""
+    return _is_http_url(text)
 
 
 def secret_variable(plugin: str, key: str) -> str:

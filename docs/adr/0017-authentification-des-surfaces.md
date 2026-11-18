@@ -17,6 +17,11 @@ lecture du noyau — l'exception explicite à sa règle de route de lecture uniq
 Elles devront exposer les Tools d'une Session ordinaire dès qu'un **système de protection
 contre les injections** existera. Voir ADR-0020, section « Décision à réviser ».
 
+Amendé par l'ADR-0026 : le **Code d'installation** disparaît ; l'Installation se termine quand
+l'unique Compte existe et qu'un **Secret** Gemini utilisable est enregistré. Amendé par
+l'ADR-0025 : la clé Gemini et les secrets de Plugin vivent dans un magasin chiffré au repos, en
+écriture seule depuis la Console.
+
 ## Contexte
 
 Athena expose trois surfaces : la **Console web** (SPA, API JSON et flux de Traces), le
@@ -134,6 +139,12 @@ les méthodes mutantes (`POST`, `PUT`, `PATCH`, `DELETE`).
 - La révocation prend effet au handshake suivant, sans redémarrage.
 - Le client desktop lit son Jeton dans `ATHENA_ACCESS_TOKEN`, l'envoie au handshake et échoue
   avec un message explicite s'il manque ou est refusé.
+
+Amendé par le ticket #178 : le daemon du Client sert une page locale de couplage en boucle
+locale, où l'URL du serveur et le Jeton se saisissent sans éditer de fichier. Il ne sort plus
+faute de Jeton : un Jeton refusé ou un serveur injoignable laissent la page en vie avec une
+explication, et la connexion se rétablit sans redémarrer le processus. `ATHENA_ACCESS_TOKEN`
+reste une surcharge de processus prioritaire, et le Jeton ne se réaffiche jamais après saisie.
 
 ### Webhook
 

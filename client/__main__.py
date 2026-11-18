@@ -5,108 +5,69 @@ import logging
 import signal
 import sys
 
-from client.app import ClientApp
-from client.audio_io import AudioIO
 from client.config import AppConfig
-from client.wake_word import (
-    OpenWakeWordDetector,
-    WakeWordDetector,
-    WakeWordUnavailableError,
-)
-from client.ws_client import (
-    AccessTokenRefusedError,
-    MissingAccessTokenError,
-    WsTransport,
-    require_access_token,
-)
+from client.daemon import ClientDaemon
+from client.settings import SettingsStore
 
 log = logging.getLogger("athena.client")
 
 
-def _build_detector(cfg: AppConfig) -> WakeWordDetector | None:
-    """Charge le modèle une seule fois, uniquement si la Veille est active."""
-    if not cfg.wake_word.enabled:
-        log.info("Veille désactivée (ATHENA_WAKE_WORD=0)")
-        return None
-    return OpenWakeWordDetector.from_config(cfg.wake_word)
-
-
-def _build_app(cfg: AppConfig) -> ClientApp:
-    # Le Jeton est validé avant d'ouvrir le micro : un Client sans credential
-    # échoue tout de suite, avec un message qui dit où le récupérer. Le modèle
-    # est chargé ensuite ; c'est ``run()`` qui ouvre réellement le micro.
-    require_access_token(cfg.client)
-    transport = WsTransport(cfg.client)
-    detector = _build_detector(cfg)
-    return ClientApp(
-        cfg, audio=AudioIO(cfg.audio), transport=transport, detector=detector
-    )
-
-
-async def _enter_loop(app: ClientApp) -> None:
+async def _enter_loop(daemon: ClientDaemon) -> None:
     """Démarre une Session (ou barge-in) à chaque Entrée sur stdin."""
     while True:
         line = await asyncio.to_thread(sys.stdin.readline)
         if line == "":
             return
         try:
-            await app.tap()
+            await daemon.tap()
         except Exception:
             log.exception("Échec du démarrage de Session ignoré")
 
 
-async def main() -> None:
+async def main(shutdown: asyncio.Event | None = None) -> None:
+    """Démarre la page de couplage puis le Client audio.
+
+    Aucun Jeton n'est exigé ici : sans couplage, la page s'affiche et invite à
+    en saisir un. C'est elle qui répare une URL ou un Jeton invalide, sans
+    redémarrer le processus.
+    """
     cfg = AppConfig()
     logging.basicConfig(level=getattr(logging, cfg.log_level.upper(), logging.INFO))
 
-    app = _build_app(cfg)
+    daemon = ClientDaemon(cfg, SettingsStore(cfg.page.config_path))
+    await daemon.start()
 
     loop = asyncio.get_running_loop()
-    shutdown = asyncio.Event()
+    stop = shutdown if shutdown is not None else asyncio.Event()
 
-    def stop() -> None:
+    def request_stop() -> None:
         log.info("Arrêt...")
-        shutdown.set()
+        stop.set()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, stop)
+            loop.add_signal_handler(sig, request_stop)
         except NotImplementedError:
             pass
 
-    run_task = asyncio.create_task(app.run())
-    enter_task = asyncio.create_task(_enter_loop(app))
-    shutdown_task = asyncio.create_task(shutdown.wait())
+    enter_task = asyncio.create_task(_enter_loop(daemon))
+    shutdown_task = asyncio.create_task(stop.wait())
 
-    await asyncio.wait(
-        [run_task, shutdown_task], return_when=asyncio.FIRST_COMPLETED
-    )
-    failure = (
-        run_task.exception()
-        if run_task.done() and not run_task.cancelled()
-        else None
-    )
+    await asyncio.wait([shutdown_task], return_when=asyncio.FIRST_COMPLETED)
 
-    for task in (run_task, enter_task, shutdown_task):
+    for task in (enter_task, shutdown_task):
         task.cancel()
-    await asyncio.gather(
-        run_task, enter_task, shutdown_task, return_exceptions=True
-    )
-    if failure is not None:
-        raise failure
+    await asyncio.gather(enter_task, shutdown_task, return_exceptions=True)
+    await daemon.stop()
 
 
 def cli() -> None:
     try:
         asyncio.run(main())
-    except MissingAccessTokenError as exc:
-        print(f"Erreur de configuration : {exc}", file=sys.stderr)
-        raise SystemExit(2) from exc
-    except AccessTokenRefusedError as exc:
-        print(f"Connexion refusée : {exc}", file=sys.stderr)
-        raise SystemExit(2) from exc
-    except WakeWordUnavailableError as exc:
-        print(f"Veille indisponible : {exc}", file=sys.stderr)
+    except OSError as exc:
+        # Le cas courant est un port déjà pris : mieux vaut le dire que laisser
+        # une trace d'exception brute.
+        print(f"Page de couplage indisponible : {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 
 

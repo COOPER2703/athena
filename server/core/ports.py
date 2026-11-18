@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Mapping, NamedTuple, Protocol, Sequence
+from typing import Mapping, NamedTuple, Protocol, Sequence, runtime_checkable
 
 from plugin_api import ToolSpec
 from protocol import SessionEndReason
@@ -24,6 +24,103 @@ class SecretResolver(Protocol):
     """
 
     def resolve(self, name: str) -> str: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SecretStatus:
+    """État public d'un Secret : jamais sa valeur (ADR-0025).
+
+    ``configured`` dit qu'une valeur est enregistrée ; ``updated_at`` date sa
+    dernière écriture. Un Secret illisible (clé maître perdue) reste
+    ``configured`` — la ligne existe — et le magasin signale l'état global.
+    """
+
+    name: str
+    configured: bool
+    updated_at: float | None = None
+
+
+@runtime_checkable
+class SettingsStore(Protocol):
+    """Port du magasin de réglages : valeurs JSON et métadonnées (ADR-0025).
+
+    Le noyau ne connaît ni SQL ni le chiffrement. Le ticket #174 lit ces
+    valeurs pour calculer la source de chaque champ et les changements en
+    attente ; la Console ne fait qu'écrire, et l'application passe par un
+    redémarrage.
+    """
+
+    def value(self, key: str) -> str | None:
+        """Valeur enregistrée pour un champ, ou ``None``."""
+        ...
+
+    def values(self) -> Mapping[str, str]:
+        """Toutes les valeurs enregistrées, triées par nom de champ."""
+        ...
+
+    def set_value(self, key: str, value: str) -> None:
+        """Enregistre une valeur et sa date de mise à jour."""
+        ...
+
+    def delete_value(self, key: str) -> bool:
+        """Revient au défaut en effaçant la valeur ; ``False`` si absente."""
+        ...
+
+
+class SecretStore(Protocol):
+    """Port du magasin de Secrets, en **écriture seule** côté surface.
+
+    ``secret`` existe pour la racine de composition (résolution de la config et
+    des Secrets de plugin), jamais pour une route de l'API : aucune route ne
+    renvoie une valeur (ADR-0025).
+    """
+
+    @property
+    def unreadable(self) -> bool:
+        """Vrai si au moins un Secret stocké ne peut plus être déchiffré."""
+        ...
+
+    def secret(self, name: str) -> str | None:
+        """Valeur déchiffrée, ou ``None`` si absente ou illisible."""
+        ...
+
+    def statuses(self) -> Sequence[SecretStatus]:
+        """Nom, état et date de chaque Secret connu, sans valeur."""
+        ...
+
+    def set_secret(self, name: str, value: str) -> SecretStatus:
+        """Chiffre et enregistre un Secret, en créant la clé maître s'il en faut."""
+        ...
+
+    def delete_secret(self, name: str) -> bool:
+        """Efface un Secret ; ``False`` s'il n'existait pas."""
+        ...
+
+
+class SecretValidator(Protocol):
+    """Validation distante d'un Secret avant enregistrement (ADR-0025).
+
+    Seule la clé Gemini sait être vérifiée : ``validate`` rend un message
+    d'erreur en français, ou ``None`` si le Secret est utilisable. Aucune
+    implémentation ne doit mettre la valeur dans le message.
+    """
+
+    async def validate(self, name: str, value: str) -> str | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class InstallationStatus:
+    """État d'Installation d'une instance, calculé par la racine de composition.
+
+    ``setup_required`` reste la seule propriété du module d'auth (aucun Compte) ;
+    l'Installation, elle, se termine quand un Compte existe **et** qu'un Secret
+    Gemini utilisable est enregistré (ADR-0026).
+    """
+
+    gemini_configured: bool
+    installation_complete: bool
+    restart_required: bool
+    secrets_unreadable: bool
 
 
 class ClientLink(Protocol):
@@ -53,6 +150,8 @@ class LlmSocket(Protocol):
     async def send_audio(self, session_id: str, data: bytes) -> None: ...
 
     async def send_memory(self, session_id: str, text: str) -> None: ...
+
+    async def send_user_text(self, session_id: str, text: str) -> None: ...
 
     async def send_announcement(
         self, session_id: str, text: str, facts: str = ""
@@ -124,6 +223,84 @@ class JournalEntry:
     text: str
 
 
+@dataclass(frozen=True, slots=True)
+class ThreadEntry:
+    """Une entrée du fil de la Conversation, lue dans le Journal (ADR-0024).
+
+    ``id`` est le curseur stable de pagination (le ``rowid`` du Journal, jamais
+    ``created_at`` qui n'a qu'une seconde de précision). ``origin`` dit d'où
+    vient le tour : ``text`` (Console), ``voice`` (Session vocale) ou ``event``
+    (Annonce proactive) ; ``created_at`` est un horodatage ISO 8601 UTC.
+    """
+
+    id: int
+    role: str
+    origin: str
+    text: str
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadPage:
+    """Une page du fil, du plus ancien au plus récent, et sa rétention."""
+
+    entries: tuple[ThreadEntry, ...]
+    has_more: bool
+    retention_days: int
+
+
+class ThreadReader(Protocol):
+    """Lecture paginée du Journal pour le fil de la Conversation.
+
+    C'est une lecture **dynamique**, pas une extension de l'instantané
+    (ADR-0016 amendé par l'ADR-0024) : l'adaptateur Console ne voit ni la base
+    ni le noyau, la racine de composition lui injecte cette couture.
+    """
+
+    async def recent(
+        self, *, limit: int, before: int | None = None
+    ) -> ThreadPage: ...
+
+
+class TourDestination(Protocol):
+    """Destination d'un Tour, implémentée par la surface qui l'a demandé.
+
+    Les méthodes sont **synchrones et non bloquantes** : le noyau dépose et rend
+    la main, il n'attend jamais un client HTTP. Une destination absente laisse le
+    Tour se dérouler sans être diffusé (même contrat que l'instantané).
+    """
+
+    def text(self, tour_id: str, text: str) -> None: ...
+
+    def audio(self, tour_id: str, data: bytes) -> None: ...
+
+    def tool(
+        self,
+        tour_id: str,
+        name: str,
+        arguments: Mapping[str, object],
+        status: str,
+    ) -> None: ...
+
+    def done(self, tour_id: str, reason: str) -> None: ...
+
+    def failed(self, tour_id: str, code: str) -> None: ...
+
+    def busy(self, tour_id: str) -> None: ...
+
+
+class TourControl(Protocol):
+    """Ce que la Console peut demander au noyau : soumettre ou annuler un Tour.
+
+    La Console ne voit ni le Coordinator ni l'état de Session : elle dépose dans
+    le Canal d'événements unique, comme le fait ``push_event`` pour un Événement.
+    """
+
+    def submit_tour(self, tour_id: str, text: str) -> None: ...
+
+    def cancel_tour(self, tour_id: str) -> None: ...
+
+
 class MemoryStore(Protocol):
     """Async memory port injected into the pure kernel (D2).
 
@@ -139,7 +316,9 @@ class MemoryStore(Protocol):
 
     async def pinned_facts(self, user_id: str) -> list[str]: ...
 
-    async def append_turn(self, user_id: str, role: str, text: str) -> None: ...
+    async def append_turn(
+        self, user_id: str, role: str, text: str, origin: str = ""
+    ) -> None: ...
 
     async def recall(self, user_id: str, query: str) -> list[MemoryHit]: ...
 
@@ -152,6 +331,10 @@ class MemoryStore(Protocol):
     async def journal_entries_since(
         self, user_id: str, since: datetime | None
     ) -> list[JournalEntry]: ...
+
+    async def recent_entries(
+        self, user_id: str, *, limit: int, before: int | None = None
+    ) -> list[ThreadEntry]: ...
 
     async def last_consolidation(self, user_id: str) -> datetime | None: ...
 
@@ -204,9 +387,9 @@ class TraceSink(Protocol):
 class AuthError(Exception):
     """Échec d'une opération d'authentification, porteur d'un code stable.
 
-    Le code appartient au vocabulaire du port (``invalid_code``,
-    ``already_installed``, ``invalid_credentials``, ``too_many_attempts``,
-    ``weak_password``, ``invalid_username``) : les surfaces le traduisent en
+    Le code appartient au vocabulaire du port (``already_installed``,
+    ``invalid_credentials``, ``too_many_attempts``, ``weak_password``,
+    ``invalid_username``) : les surfaces le traduisent en
     statut HTTP, le port ne connaît pas HTTP. ``retry_after`` accompagne
     ``too_many_attempts`` avec le nombre de secondes restantes.
     """
@@ -311,23 +494,14 @@ class AuthService(Protocol):
         """Longueur minimale du mot de passe imposée côté serveur."""
         ...
 
-    def announce_installation_code(self) -> str | None:
-        """Écrit le Code d'installation au démarrage, s'il en faut un.
-
-        Sans Compte, génère (une fois par démarrage) le code à usage unique et
-        l'émet dans le flux de traces — donc dans le journal. Avec un Compte,
-        ne fait rien et renvoie ``None`` : le code ne doit jamais réapparaître.
-        """
-        ...
-
-    async def install(
-        self, code: str, username: str, password: str
-    ) -> IssuedTicket:
+    async def install(self, username: str, password: str) -> IssuedTicket:
         """Crée l'unique Compte et ouvre un Ticket Console.
 
-        Lève ``AuthError`` : ``invalid_code`` (code erroné ou consommé),
-        ``already_installed`` (un Compte existe), ``weak_password``,
-        ``invalid_username`` ou ``too_many_attempts``.
+        Aucun code n'est demandé (ADR-0026) : le premier visiteur est
+        propriétaire. Une fois le Compte créé, la route refuse pour de bon.
+
+        Lève ``AuthError`` : ``already_installed`` (un Compte existe),
+        ``weak_password`` ou ``invalid_username``.
         """
         ...
 

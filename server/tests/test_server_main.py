@@ -24,24 +24,11 @@ def _free_port() -> int:
         return probe.getsockname()[1]
 
 
-def test_cli_reports_a_missing_secret_with_a_clear_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-
-    with pytest.raises(SystemExit) as excinfo:
-        cli()
-
-    assert excinfo.value.code == 2
-    assert "GEMINI_API_KEY" in capsys.readouterr().err
-
-
 def test_cli_reports_invalid_configuration_early(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GEMINI_API_KEY", "key")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.setenv("WS_PORT", "not-a-port")
 
     with pytest.raises(SystemExit) as excinfo:
@@ -51,12 +38,11 @@ def test_cli_reports_invalid_configuration_early(
     assert "port" in capsys.readouterr().err.lower()
 
 
-def test_python_m_server_starts_and_shuts_down_cleanly_on_sigint(
+def test_python_m_server_starts_without_a_gemini_key_and_shuts_down_cleanly(
     tmp_path: Path,
 ) -> None:
     env = {
         **os.environ,
-        "GEMINI_API_KEY": "test-key",
         "WS_HOST": "127.0.0.1",
         "WS_PORT": str(_free_port()),
         "ATHENA_MEMORY_DB": str(tmp_path / "memory.db"),
@@ -66,8 +52,10 @@ def test_python_m_server_starts_and_shuts_down_cleanly_on_sigint(
         # Le test vérifie le cycle de vie du serveur, pas le Webhook : ne pas
         # dépendre du port fixe 8766 (occupé par une instance de dev).
         "ATHENA_WEBHOOK_ENABLED": "0",
+        # ADR-0026 : aucune clé Gemini n'est nécessaire pour démarrer.
         "LOG_LEVEL": "INFO",
     }
+    env.pop("GEMINI_API_KEY", None)
     process = subprocess.Popen(
         [sys.executable, "-m", "server"],
         cwd=REPO_ROOT,

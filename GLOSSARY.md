@@ -27,10 +27,18 @@ immédiatement. La gestion des Sessions est une responsabilité du noyau.
 _Avoid_: Conversation, call, chat
 
 **Connexion Live**:
-Le lien serveur ↔ Gemini Live, ouvert par le noyau pour tenir une Session ou faire prononcer
-une Annonce. Une Connexion Live peut exister sans Session ; une Session n'existe que lorsque
-de l'audio est effectivement échangé.
+Le lien serveur ↔ Gemini Live, ouvert par le noyau pour tenir une Session, jouer un Tour ou
+faire prononcer une Annonce. Une Connexion Live peut exister sans Session ; une Session
+n'existe que lorsque de l'audio est effectivement échangé avec un Client.
 _Avoid_: Session Gemini, session serveur, session interne, session cachée
+
+**Tour**:
+L'unité d'interaction avec Athena : une entrée (texte ou audio), le contexte assemblé
+(instruction système, Faits épinglés, Rappel, Tools du moment), une **Connexion Live** ouverte
+pour sa durée, et une destination qui reçoit le texte, l'audio et les appels de Tools. Un Tour
+texte est isolé : il ouvre et referme sa Connexion Live, et le noyau revient au **Repos** entre
+deux Tours. Une **Session** enchaîne plusieurs Tours sur une seule Connexion Live.
+_Avoid_: échange, requête, message, completion
 
 **Repos**:
 État du noyau où aucune Connexion Live n'est ouverte et aucune Session n'est visible. Seul
@@ -127,13 +135,14 @@ _Avoid_: endpoint, callback, hook
 ### Console
 
 **Console web**:
-La surface d'observation du serveur : une page unique servie en HTTP/JSON et WebSocket sur
-un port dédié, liée à `127.0.0.1` par défaut. Depuis l'ADR-0017, toute route d'API hors
-identité exige un **Ticket Console** ; seules la SPA, `/healthz`, `/api/session`, `/api/setup`
-et `/api/login` restent publiques. Elle lit un **instantané de lecture** de l'état (Session,
-Clients, Plugins, configuration non sensible) et le flux de **Traces** rejoué depuis le
-**Tampon de traces**. Ce n'est **pas un Client** : elle ne parle pas le Protocole partagé, ne
-s'enregistre pas, ne reçoit pas d'audio et ne démarre pas de Session (ADR-0003, ADR-0016).
+La surface unique d'une instance, servie en HTTP/JSON, SSE et WebSocket sur un port dédié,
+liée à `127.0.0.1` par défaut : **Conversation** écrite avec Athena, **Réglages**, gestion des
+**Plugins** installés et **Diagnostic** (Session, Clients, Plugins, Traces). Depuis l'ADR-0017,
+toute route d'API hors identité exige un **Ticket Console**. Elle lit l'**instantané de
+lecture** et le flux de **Traces**, soumet des **Tours** et lit les entrées récentes du
+**Journal**, et écrit les Réglages et les **Secrets** (ADR-0024, ADR-0025). Ce n'est **pas un
+Client** : elle ne parle pas le Protocole partagé, ne s'enregistre pas, ne transmet pas
+d'audio et ne démarre pas de Session (ADR-0003, ADR-0016, amendés par ADR-0024 et ADR-0025).
 _Avoid_: dashboard, UI, interface web, client web
 
 **Trace**:
@@ -232,11 +241,23 @@ Son secret, préfixé `ath_`, n'est affiché qu'à la création ; seule son empr
 stockée.
 _Avoid_: token, API key, clé d'API, mot de passe, ticket
 
-**Code d'installation**:
-Le code à usage unique généré au démarrage tant qu'aucun **Compte** n'existe, écrit dans le
-journal, et exigé par l'écran d'installation pour créer l'unique Compte. Il vit en mémoire
-seulement, ne survit pas au redémarrage et ne peut plus servir dès qu'un Compte existe.
-_Avoid_: mot de passe d'installation, code d'invitation, secret de setup
+**Secret**:
+Une valeur d'authentification que l'instance présente à un service externe — la clé Gemini,
+le jeton d'un Plugin. Nommé comme la variable d'environnement que le chargeur attend, stocké
+chiffré au repos, **en écriture seule** depuis la Console : il n'est jamais relu ni exposé par
+l'instantané. Se distingue du **Jeton d'accès**, que l'instance exige des machines *entrantes*,
+et du **Compte**, qui est l'identité humaine.
+_Avoid_: clé d'API, credential, token, mot de passe
+
+**Installation**:
+L'état d'une instance qui n'a pas encore d'unique **Compte** ou de **Secret** Gemini
+utilisable. Pendant l'Installation, la Console n'expose que l'écran d'installation et les
+Réglages ; le transport des Clients, le Webhook et Gemini restent fermés, et la Conversation
+est désactivée. L'Installation se termine quand le Compte existe et qu'un Secret Gemini
+utilisable est enregistré ; fournir ce Secret peut être passé, auquel cas un rappel permanent
+subsiste et Athena ne peut ni parler ni être jointe. Le premier visiteur devient le
+propriétaire : aucune preuve d'installation n'est exigée (ADR-0026).
+_Avoid_: setup, onboarding, première configuration, wizard
 
 ### Clients
 
@@ -418,3 +439,8 @@ _Avoid_: Raison, cause, status
   parle. Une Connexion Live silencieuse est refermée sans qu'aucun Client passe en `ACTIVE`.
 - **Événement → Journal**: Un Événement qu'Athena annonce est écrit dans le Journal ; un
   Événement qu'elle tait ne l'est pas.
+- **Console → Noyau (Tour)**: La Console soumet un Tour au Repos et reçoit sa réponse en texte
+  et en audio ; le noyau ne crée aucune Session et le Client reste libre de reprendre la
+  parole.
+- **Console → Réglages**: La Console écrit les Réglages et les Secrets ; l'environnement prime
+  sur le magasin, et les changements s'appliquent au redémarrage.
