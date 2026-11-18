@@ -286,14 +286,20 @@ longueur minimale lue depuis `/api/session` ; les autres navigateurs sont décon
 
 ### Parcours navigateur (E2E)
 
-Trois parcours Playwright ferment le filet de la Console. Ils tournent sur le **build réel**
+Quatre parcours Playwright ferment le filet de la Console. Ils tournent sur le **build réel**
 (`web/dist`) servi par le serveur du seam partagé (`server/tests/server_harness.py`), avec
 un faux modèle injecté : Installation jusqu'à la Conversation, connexion puis un Tour texte
-avec audio et interruption, enfin un réglage appliqué jusqu'au redémarrage. Aucun secret
-réel et aucun réseau externe : le validateur de Secrets et le modèle sont ceux du harnais.
+avec audio et interruption, un réglage appliqué jusqu'au redémarrage, et enfin la
+conversation vocale avec un micro simulé. Aucun secret réel et aucun réseau externe : le
+validateur de Secrets et le modèle sont ceux du harnais.
 
 - `make e2e` construit la SPA, démarre un serveur de test isolé (répertoire temporaire,
   ports éphémères, clé Gemini factice) et lance Playwright depuis `web/`.
+- Le parcours vocal rejoue `client/tests/data/athena.wav` par le micro factice de Chromium :
+  aucune machine n'a besoin d'un périphérique et aucune permission n'est demandée. Le faux
+  modèle y répond par une transcription d'entrée déterministe, une réponse texte et un
+  audio ; le serveur de contrôle peut aussi faire tenir une Session à un Client desktop
+  pour prouver le refus sans préemption.
 - Le superviseur `e2e/server.py` relance le serveur à la même adresse après chaque sortie
   propre (`ATHENA_RESTART_ON_APPLY=1`) : c'est ce qui rend le redémarrage d'un réglage
   observable. Un petit serveur de contrôle, propre au harnais, expose la génération courante

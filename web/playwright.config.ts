@@ -1,4 +1,6 @@
 import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { chromium, defineConfig } from "@playwright/test";
 
@@ -45,12 +47,26 @@ function chromiumExecutable(): string | undefined {
 
 const executablePath = chromiumExecutable();
 
+/**
+ * Micro simulé du parcours vocal : Chromium rejoue ce WAV à la place d'un
+ * périphérique réel. Le chemin doit être absolu, et le fichier est le même que
+ * celui des tests du Client desktop (PCM 16 bits mono 16 kHz).
+ */
+const FAKE_AUDIO_FILE = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "client",
+  "tests",
+  "data",
+  "athena.wav",
+);
+
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,
-  // Trois parcours, trois serveurs : deux workers suffisent sans saturer la CI.
+  // Quatre parcours, quatre serveurs : deux workers suffisent sans saturer la CI.
   workers: process.env.CI ? 2 : undefined,
   timeout: 90_000,
   expect: { timeout: 15_000 },
@@ -60,8 +76,16 @@ export default defineConfig({
     screenshot: "only-on-failure",
     launchOptions: {
       ...(executablePath === undefined ? {} : { executablePath }),
-      // Le parcours 2 doit entendre la réponse après le geste de sourdine.
-      args: ["--autoplay-policy=no-user-gesture-required"],
+      args: [
+        // Le parcours 2 doit entendre la réponse après le geste de sourdine.
+        "--autoplay-policy=no-user-gesture-required",
+        // Parcours 4 : un micro factice rejoue un WAV, et l'interface de
+        // permission est acceptée d'office. Aucune machine n'a besoin d'un
+        // périphérique, aucune permission n'est demandée à la personne.
+        "--use-fake-device-for-media-stream",
+        "--use-fake-ui-for-media-stream",
+        `--use-file-for-fake-audio-capture=${FAKE_AUDIO_FILE}`,
+      ],
     },
   },
 });
