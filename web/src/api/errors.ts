@@ -79,6 +79,11 @@ function readFieldErrors(value: unknown): FieldErrors {
  * refus métier (4xx). Les codes inconnus — une version future du serveur — ne
  * fuitent jamais leur nom dans l'interface.
  */
+
+/** Un Tour texte et un Tour vocal occupé disent la même chose, une seule fois. */
+const TOUR_BUSY =
+  "Athena est déjà en train de répondre. Réessayez quand elle aura terminé.";
+
 const MESSAGES: Readonly<Record<string, string>> = {
   unauthorized: "Votre Ticket Console a expiré. Reconnectez-vous.",
   setup_required:
@@ -101,12 +106,11 @@ const MESSAGES: Readonly<Record<string, string>> = {
   installation_incomplete:
     "L'Installation n'est pas terminée : enregistrez une clé Gemini dans les Réglages pour qu'Athena puisse parler.",
   // Conversation (ADR-0024) : refus et pannes du Tour.
-  busy: "Athena est déjà en train de répondre. Réessayez quand elle aura terminé.",
+  busy: TOUR_BUSY,
   // Conversation vocale (ADR-0027) : refus serveur et pannes locales.
   session_busy:
     "Une autre conversation est déjà en cours. Réessayez quand elle aura terminé.",
-  tour_busy:
-    "Athena est déjà en train de répondre. Réessayez quand elle aura terminé.",
+  tour_busy: TOUR_BUSY,
   voice_unavailable:
     "La conversation vocale n'est pas disponible sur cette instance.",
   microphone_denied:
@@ -216,9 +220,21 @@ export function describeError(error: unknown): string {
   return messageForCode(error.code);
 }
 
-/** Phrase française d'un code stable, sans dépendre d'une réponse HTTP. */
-export function describeCode(code: string): string {
-  return messageForCode(code);
+/**
+ * Phrase française d'un code stable, sans dépendre d'une réponse HTTP.
+ *
+ * `fallback` sert aux refus qui arrivent déjà avec une phrase (conversation
+ * vocale) : un code inconnu de cette table reprend la phrase du serveur, un
+ * code connu garde la phrase centralisée ici — une seule source de texte.
+ */
+export function describeCode(code: string, fallback?: string): string {
+  const known = MESSAGES[code] ?? MESSAGES[code.replaceAll(" ", "_")];
+  if (known !== undefined) {
+    return known;
+  }
+  return fallback !== undefined && fallback.trim() !== ""
+    ? fallback
+    : UNEXPECTED;
 }
 
 /** Phrase française de chaque erreur par champ, prête pour un formulaire. */

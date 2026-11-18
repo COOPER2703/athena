@@ -217,4 +217,17 @@ describe("describeCode", () => {
     expect(describeCode("code_du_futur")).toContain("inattendue");
     expect(describeCode("code_du_futur")).not.toContain("code_du_futur");
   });
+
+  it("garde la phrase du serveur pour un refus vocal qu'elle ne connaît pas", () => {
+    // Les refus de la conversation vocale portent déjà une phrase française :
+    // elle sert de repli, mais un code connu garde la phrase centralisée ici.
+    expect(describeCode("session_busy")).toContain("Une autre conversation");
+    expect(describeCode("session_busy", "Phrase serveur.")).not.toBe(
+      "Phrase serveur.",
+    );
+    expect(describeCode("code_du_futur", "Phrase serveur.")).toBe(
+      "Phrase serveur.",
+    );
+    expect(describeCode("code_du_futur", "")).toContain("inattendue");
+  });
 });

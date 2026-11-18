@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { describeCode } from "../../api/errors";
 import {
   applyVoiceEvent,
   bargeInDetected,
@@ -8,9 +9,7 @@ import {
   VOICE_INTERRUPTED_NOTICE,
   VOICE_RECONNECTING_NOTICE,
   voiceBarVisible,
-  voiceEndMessage,
-  voiceEndStatus,
-  voiceEndTitle,
+  voiceEndCopy,
   voicePhaseLabel,
   type VoiceEvent,
   type VoiceState,
@@ -165,8 +164,8 @@ describe("fin de conversation", () => {
     const state = run({ type: "start" }, { type: "ready" }, { type: "stop" });
 
     expect(state).toMatchObject({ phase: "ended", endReason: "user" });
-    expect(voiceEndTitle("user")).toBe("Conversation terminée");
-    expect(voiceEndMessage("user")).toContain("Vous avez terminé");
+    expect(voiceEndCopy("user").title).toBe("Conversation terminée");
+    expect(voiceEndCopy("user").message).toContain("Vous avez terminé");
   });
 
   it("termine proprement quand le système suspend le micro mobile", () => {
@@ -177,7 +176,7 @@ describe("fin de conversation", () => {
     );
 
     expect(state).toMatchObject({ phase: "ended", endReason: "background" });
-    expect(voiceEndMessage("background")).toContain("arrière-plan");
+    expect(voiceEndCopy("background").message).toContain("arrière-plan");
   });
 
   it("lit chaque motif du protocole et donne une phrase distincte", () => {
@@ -197,7 +196,7 @@ describe("fin de conversation", () => {
         { type: "ended", reason },
       );
       expect(state.phase).toBe("ended");
-      return voiceEndMessage(state.endReason ?? "normal");
+      return voiceEndCopy(state.endReason ?? "normal").message;
     });
 
     expect(new Set(messages).size).toBe(reasons.length);
@@ -215,8 +214,10 @@ describe("fin de conversation", () => {
     );
 
     expect(state.endReason).toBe("timeout");
-    expect(voiceEndMessage("timeout")).toContain("inactivité");
-    expect(voiceEndMessage("timeout")).not.toBe(voiceEndMessage("user"));
+    expect(voiceEndCopy("timeout").message).toContain("inactivité");
+    expect(voiceEndCopy("timeout").message).not.toBe(
+      voiceEndCopy("user").message,
+    );
   });
 
   it("retient un refus serveur avec son code et sa phrase", () => {
@@ -228,9 +229,21 @@ describe("fin de conversation", () => {
     expect(state.phase).toBe("refused");
     expect(state.problem).toEqual({
       code: "session_busy",
-      message: "Une autre conversation est déjà en cours.",
+      message: describeCode("session_busy"),
     });
     expect(voicePhaseLabel(state.phase)).toBe("Refusée");
+  });
+
+  it("reprend la phrase du serveur pour un refus qu'elle ne connaît pas", () => {
+    const state = run(
+      { type: "start" },
+      { type: "refused", code: "code_du_futur", message: "Phrase du serveur." },
+    );
+
+    expect(state.problem).toEqual({
+      code: "code_du_futur",
+      message: "Phrase du serveur.",
+    });
   });
 
   it("ne rouvre jamais une conversation terminée sur une trame tardive", () => {
@@ -407,10 +420,10 @@ describe("barre vocale", () => {
   });
 
   it("titre une erreur comme une interruption, pas comme une fin voulue", () => {
-    expect(voiceEndTitle("error")).toBe("Conversation interrompue");
-    expect(voiceEndTitle("completed")).toBe("Conversation terminée");
-    expect(voiceEndStatus("error")).toBe("Interrompue");
-    expect(voiceEndStatus("timeout")).toBe("Terminée");
+    expect(voiceEndCopy("error").title).toBe("Conversation interrompue");
+    expect(voiceEndCopy("client_gone").title).toBe("Conversation interrompue");
+    expect(voiceEndCopy("completed").title).toBe("Conversation terminée");
+    expect(voiceEndCopy("timeout").title).toBe("Conversation terminée");
   });
 });
 
