@@ -34,4 +34,5 @@ Les décisions du noyau et du système restent listées ici par leur fichier :
 - `0024-tour-unite-de-conversation.md` — le Tour comme unité de conversation.
 - `0025-reglages-et-secrets.md` — réglages applicatifs et Secrets chiffrés.
 - `0026-installation-sans-code.md` — l'Installation au premier démarrage.
+- `0027-console-heberge-un-client-vocal.md` — le Client Console et la conversation vocale.
 
