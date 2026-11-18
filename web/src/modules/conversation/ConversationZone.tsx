@@ -21,6 +21,14 @@ import type { TurnIssue } from "./useTurn";
 import { useAudioPlayer } from "./useAudioPlayer";
 import { useMuted } from "./useMuted";
 import { useTurn } from "./useTurn";
+import { useVoiceConversation } from "./VoiceProvider";
+import { VoiceBar } from "./VoiceBar";
+import { VoiceTranscript } from "./VoiceTranscript";
+import {
+  voiceBarVisible,
+  voiceEndMessage,
+  voiceEndStatus,
+} from "./voice";
 import { voiceSessionActive } from "./voiceSession";
 
 /**
@@ -49,6 +57,8 @@ export function ConversationZone() {
 
   const { muted, toggle: toggleMuted } = useMuted();
   const player = useAudioPlayer();
+  const voice = useVoiceConversation();
+  const inVoice = voiceBarVisible(voice.state.phase);
 
   const mutedRef = useRef(muted);
   mutedRef.current = muted;
@@ -146,7 +156,23 @@ export function ConversationZone() {
 
   const entries = flattenThread(thread.data?.pages);
   const retentionDays = thread.data?.pages[0]?.retentionDays ?? 0;
-  const voiceSession = occupancy.data === true;
+  // #185 lira `session.console` ; d'ici là, la Console ne se signale pas
+  // elle-même pendant sa propre conversation vocale.
+  const voiceSession = occupancy.data === true && !inVoice;
+
+  // Une fin de conversation (croix, end_session, timeout) a écrit au Journal :
+  // on le relit pour que la barre de saisie retrouve un fil à jour.
+  const previousVoicePhase = useRef(voice.state.phase);
+  useEffect(() => {
+    const phase = voice.state.phase;
+    if (
+      (phase === "ended" || phase === "refused") &&
+      previousVoicePhase.current !== phase
+    ) {
+      void thread.refetch();
+    }
+    previousVoicePhase.current = phase;
+  }, [thread.refetch, voice.state.phase]);
 
   return (
     <div className="flex flex-col gap-5 px-5 py-6 sm:px-8 lg:px-10 lg:py-8">
@@ -172,6 +198,8 @@ export function ConversationZone() {
         }}
         retentionDays={retentionDays}
       />
+
+      {inVoice ? <VoiceTranscript lines={voice.state.lines} /> : null}
 
       <div ref={liveRef}>
         {turn.turn !== null ? <LiveTurn turn={turn.turn} /> : null}
@@ -203,15 +231,56 @@ export function ConversationZone() {
         </Notice>
       ) : null}
 
-      <Composer
-        value={draft}
-        onChange={updateDraft}
-        onSend={handleSend}
-        onCancel={handleCancel}
-        streaming={turn.streaming}
-        muted={muted}
-        onToggleMute={handleToggleMute}
-      />
+      {voice.state.phase === "ended" ? (
+        <Notice
+          tone={voice.state.endReason === "error" ? "danger" : "info"}
+          title={voiceEndStatus(voice.state.endReason ?? "normal")}
+        >
+          <p>
+            {voice.state.problem?.message ||
+              voiceEndMessage(voice.state.endReason ?? "normal")}
+          </p>
+          <div className="mt-3">
+            <Button variant="ghost" size="sm" onClick={voice.dismiss}>
+              Fermer
+            </Button>
+          </div>
+        </Notice>
+      ) : null}
+
+      {voice.state.phase === "refused" ? (
+        <Notice tone="warning" title="Conversation vocale indisponible">
+          <p>
+            {voice.state.problem?.message ||
+              "La conversation vocale n'a pas pu démarrer."}
+          </p>
+          <div className="mt-3">
+            <Button variant="ghost" size="sm" onClick={voice.dismiss}>
+              Fermer
+            </Button>
+          </div>
+        </Notice>
+      ) : null}
+
+      {inVoice ? (
+        <VoiceBar
+          state={voice.state}
+          getLevel={voice.getLevel}
+          onStop={voice.stop}
+          onResume={voice.resume}
+        />
+      ) : (
+        <Composer
+          value={draft}
+          onChange={updateDraft}
+          onSend={handleSend}
+          onCancel={handleCancel}
+          onStartVoice={voice.start}
+          streaming={turn.streaming}
+          muted={muted}
+          onToggleMute={handleToggleMute}
+        />
+      )}
     </div>
   );
 }

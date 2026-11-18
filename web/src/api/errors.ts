@@ -102,6 +102,30 @@ const MESSAGES: Readonly<Record<string, string>> = {
     "L'Installation n'est pas terminée : enregistrez une clé Gemini dans les Réglages pour qu'Athena puisse parler.",
   // Conversation (ADR-0024) : refus et pannes du Tour.
   busy: "Athena est déjà en train de répondre. Réessayez quand elle aura terminé.",
+  // Conversation vocale (ADR-0027) : refus serveur et pannes locales.
+  session_busy:
+    "Une autre conversation est déjà en cours. Réessayez quand elle aura terminé.",
+  tour_busy:
+    "Athena est déjà en train de répondre. Réessayez quand elle aura terminé.",
+  voice_unavailable:
+    "La conversation vocale n'est pas disponible sur cette instance.",
+  microphone_denied:
+    "L'accès au micro a été refusé. Autorisez-le dans le navigateur, puis réessayez.",
+  microphone_missing:
+    "Aucun micro n'a été trouvé sur cet appareil. Branchez-en un, puis réessayez.",
+  microphone_unavailable:
+    "Le micro n'a pas pu être ouvert : il est peut-être déjà utilisé par une autre application.",
+  microphone_lost:
+    "Le micro n'est plus ouvert. Terminez la conversation, puis relancez-la pour le réactiver.",
+  insecure_context:
+    "Le micro exige une page sécurisée : ouvrez la Console en HTTPS ou sur 127.0.0.1.",
+  voice_unsupported:
+    "Ce navigateur ne prend pas en charge la capture audio (mediaDevices et AudioWorklet). Essayez un navigateur récent.",
+  audio_worklet_failed:
+    "La capture audio n'a pas pu démarrer dans ce navigateur. Rechargez la page, puis réessayez.",
+  voice_cut: "La liaison avec Athena a été interrompue.",
+  voice_connect_failed:
+    "La conversation vocale n'a pas pu joindre Athena. Vérifiez la connexion, puis réessayez.",
   llm_failed:
     "Le modèle n'a pas pu répondre. Votre message est conservé : réessayez dans un instant.",
   tour_failed:

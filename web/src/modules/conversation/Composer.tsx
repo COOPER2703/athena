@@ -3,6 +3,7 @@ import { useId, type KeyboardEvent } from "react";
 import { MAX_MESSAGE_CHARS } from "../../api/chat";
 import { cn } from "../../shared/cn";
 import {
+  MicrophoneIcon,
   SendIcon,
   SoundOffIcon,
   SoundOnIcon,
@@ -15,6 +16,7 @@ export interface ComposerProps {
   onChange: (value: string) => void;
   onSend: () => void;
   onCancel: () => void;
+  onStartVoice: () => void;
   streaming: boolean;
   muted: boolean;
   onToggleMute: () => void;
@@ -32,6 +34,7 @@ export function Composer({
   onChange,
   onSend,
   onCancel,
+  onStartVoice,
   streaming,
   muted,
   onToggleMute,
@@ -103,15 +106,32 @@ export function Composer({
       </p>
 
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <Button
-          variant="ghost"
-          size="sm"
-          aria-pressed={!muted}
-          onClick={onToggleMute}
-          icon={muted ? <SoundOffIcon /> : <SoundOnIcon />}
-        >
-          {muted ? "Son coupé" : "Son actif"}
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-pressed={!muted}
+            onClick={onToggleMute}
+            icon={muted ? <SoundOffIcon /> : <SoundOnIcon />}
+          >
+            {muted ? "Son coupé" : "Son actif"}
+          </Button>
+
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={onStartVoice}
+            disabled={streaming}
+            title={
+              streaming
+                ? "Attendez la fin de la réponse pour passer à la voix."
+                : "Démarrer la conversation vocale"
+            }
+            icon={<MicrophoneIcon />}
+          >
+            Parler
+          </Button>
+        </div>
 
         <Button
           type={streaming ? "button" : "submit"}
