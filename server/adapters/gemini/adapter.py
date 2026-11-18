@@ -19,6 +19,7 @@ from server.core.commands import (
 )
 from server.core.events import (
     Event,
+    LlmAudio,
     LlmClosed,
     LlmFailed,
     LlmFailureCause,
@@ -86,6 +87,10 @@ class GeminiLiveAdapter:
         # raisonne en tours : on recompose le tour complet avant de l'émettre,
         # sinon le Journal (mémoire) accumule des lignes comme « envoyé ».
         self._pending_transcription: list[str] = []
+        # L'entrée est fragmentée elle aussi. Le noyau journalise et rappelle
+        # par Événement utilisateur : on accumule donc les fragments jusqu'au
+        # début de la réponse, puis on émet **un** énoncé (ADR-0027).
+        self._pending_input: list[str] = []
 
     async def recv(self) -> Event:
         return await self._events.get()
@@ -138,6 +143,7 @@ class GeminiLiveAdapter:
         if self._receiver is not None or self._context is not None:
             await self._shutdown()
         self._pending_transcription.clear()
+        self._pending_input.clear()
         self._connection_id = connection_id
         self._terminated = False
         try:
@@ -206,13 +212,47 @@ class GeminiLiveAdapter:
                 payload={"connection_id": self._connection_id},
             )
 
-        for event in translate_response(response):
+        events = translate_response(response)
+        # Extraire l'entrée avant d'émettre quoi que ce soit : un même message
+        # peut porter l'audio de la réponse, et la parole utilisateur doit
+        # néanmoins la précéder au Journal.
+        for event in events:
+            if isinstance(event, LlmTranscription) and event.role is Role.USER:
+                self._pending_input.append(event.text)
+
+        server_content = getattr(response, "server_content", None)
+        if getattr(server_content, "interrupted", False):
+            # Barge-in : le tour en cours est coupé, l'énoncé accumulé ne doit
+            # pas attendre une réponse qui ne viendra pas.
+            await self._flush_input_transcription()
+
+        answering = any(
+            isinstance(event, LlmAudio)
+            or (isinstance(event, LlmTranscription) and event.role is Role.ASSISTANT)
+            for event in events
+        )
+        if answering:
+            # Le modèle commence à répondre : l'énoncé utilisateur est complet.
+            await self._flush_input_transcription()
+
+        for event in events:
+            if isinstance(event, LlmTranscription) and event.role is Role.USER:
+                continue
             if isinstance(event, LlmFailed):
                 await self._fail(event.cause)
             elif isinstance(event, LlmTranscription) and event.role is Role.ASSISTANT:
                 self._pending_transcription.append(event.text)
             else:
                 await self._events.put(event)
+
+    async def _flush_input_transcription(self) -> None:
+        """Émet la parole utilisateur accumulée comme un seul énoncé."""
+        if not self._pending_input:
+            return
+        text = "".join(self._pending_input)
+        self._pending_input.clear()
+        if text:
+            await self._events.put(LlmTranscription(text=text, role=Role.USER))
 
     async def _flush_transcription(self) -> None:
         """Émet la transcription de sortie accumulée comme un seul tour."""
@@ -245,6 +285,9 @@ class GeminiLiveAdapter:
             receiver.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await receiver
+        # Fermer la Connexion en cours d'énoncé ne doit rien perdre : la parole
+        # accumulée sort avant ``LlmClosed``.
+        await self._flush_input_transcription()
 
         context = self._context
         self._context = None
@@ -263,6 +306,9 @@ class GeminiLiveAdapter:
         if self._terminated:
             return
         self._terminated = True
+        # Fin de flux sans réponse : l'énoncé accumulé sort avant la clôture,
+        # pour que le noyau le journalise dans la Session encore ouverte.
+        await self._flush_input_transcription()
         await self._events.put(LlmClosed(connection_id=self._connection_id))
 
     async def send_audio(self, connection_id: str, data: bytes) -> None:
