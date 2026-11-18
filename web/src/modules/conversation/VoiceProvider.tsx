@@ -32,14 +32,20 @@ import {
 /** Ce que la coquille et la Conversation consomment de la voix. */
 export interface VoiceConversation {
   state: VoiceState;
-  /** Un tap démarre la conversation (jamais de push-to-talk ni de Wake word). */
-  start(): void;
+  /**
+   * Un tap démarre la conversation (jamais de push-to-talk ni de Wake word).
+   * `baselineId` est l'identifiant maximal du Journal déjà lu : le fil s'en
+   * sert pour ne pas confondre une parole ancienne avec un mot en direct.
+   */
+  start(baselineId: number): void;
   /** La croix termine et rend la barre de saisie. */
   stop(): void;
   /** « Reprendre » après une coupure, avec le micro déjà ouvert. */
   resume(): void;
   /** Ferme le bandeau d'une conversation terminée ou refusée. */
   dismiss(): void;
+  /** Oublie les `drop` premières lignes, reprises par la relecture du fil. */
+  settle(drop: number): void;
   /** Niveau RMS du micro pour l'onde, ou `null` si l'analyse est indisponible. */
   getLevel(): number | null;
 }
@@ -286,7 +292,7 @@ export function VoiceProvider({
     openSocketRef.current = openSocket;
   }, [openSocket]);
 
-  const start = useCallback(() => {
+  const start = useCallback((baselineId: number) => {
     if (!active || voiceBarVisible(stateRef.current.phase)) {
       return;
     }
@@ -300,7 +306,7 @@ export function VoiceProvider({
     if (!support.ok) {
       // Une tentative qui échoue avant le socket laisse la barre de saisie et
       // un message : « Parler » n'est jamais inerte.
-      apply({ type: "start" });
+      apply({ type: "start", baselineId });
       finish({
         type: "refused",
         code: support.code,
@@ -313,7 +319,7 @@ export function VoiceProvider({
     // `ready`.
     preparedContextRef.current = prepareCaptureContext();
     player.unlock();
-    apply({ type: "start" });
+    apply({ type: "start", baselineId });
     openSocket("start");
   }, [
     active,
@@ -361,6 +367,13 @@ export function VoiceProvider({
     }
     apply({ type: "dismiss" });
   }, [apply, finish]);
+
+  const settle = useCallback(
+    (drop: number) => {
+      apply({ type: "settle", drop });
+    },
+    [apply],
+  );
 
   const getLevel = useCallback((): number | null => {
     return captureRef.current?.readLevel() ?? null;
@@ -449,8 +462,8 @@ export function VoiceProvider({
   ]);
 
   const value = useMemo<VoiceConversation>(
-    () => ({ state, start, stop, resume, dismiss, getLevel }),
-    [dismiss, getLevel, resume, start, state, stop],
+    () => ({ state, start, stop, resume, dismiss, settle, getLevel }),
+    [dismiss, getLevel, resume, settle, start, state, stop],
   );
 
   return (

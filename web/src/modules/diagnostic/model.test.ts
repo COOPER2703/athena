@@ -23,6 +23,7 @@ const FULL = {
     session_id: "s1",
     connection_id: "s1",
     active_client_id: "c1",
+    console: true,
   },
   clients: [
     { client_id: "c1", client_name: "bureau", platform: "linux" },
@@ -79,6 +80,7 @@ describe("normalizeSnapshot", () => {
       sessionId: "s1",
       connectionId: "s1",
       activeClientId: "c1",
+      console: true,
     });
     expect(snapshot.clients).toEqual([
       { clientId: "c1", clientName: "bureau", platform: "linux" },
@@ -134,6 +136,7 @@ describe("normalizeSnapshot", () => {
   it("tolère un instantané sans les sections d'Installation et de santé", () => {
     const legacy = normalizeSnapshot({ session: { state: "Idle" } });
 
+    expect(legacy.session.console).toBe(false);
     expect(legacy.installation.complete).toBe(false);
     expect(legacy.health.traceBuffer).toBeNull();
     expect(legacy.health.lastConsolidation).toBeNull();

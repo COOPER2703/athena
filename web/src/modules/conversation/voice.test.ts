@@ -68,6 +68,39 @@ describe("démarrage d'une conversation", () => {
   });
 });
 
+describe("lignes transitoires", () => {
+  it("retient le repère du Journal au démarrage", () => {
+    expect(idleVoice().journalBaseline).toBe(0);
+    expect(run({ type: "start", baselineId: 42 }).journalBaseline).toBe(42);
+  });
+
+  it("oublie les lignes que le Journal vient de reprendre", () => {
+    // Après une relecture du fil, les tours confirmés n'ont plus à rester en
+    // mémoire : le Journal les affiche, la ligne vivante suivante reste seule.
+    const state = run(
+      { type: "start" },
+      { type: "ready" },
+      { type: "transcript", role: "user", text: "Bonjour" },
+      { type: "transcript", role: "assistant", text: "Salut." },
+      { type: "transcript", role: "user", text: "Encore" },
+      { type: "settle", drop: 2 },
+    );
+
+    expect(state.lines).toEqual([{ role: "user", text: "Encore" }]);
+  });
+
+  it("ne retire jamais plus de lignes qu'il n'en existe", () => {
+    const state = run(
+      { type: "start" },
+      { type: "ready" },
+      { type: "transcript", role: "user", text: "Bonjour" },
+      { type: "settle", drop: 5 },
+    );
+
+    expect(state.lines).toEqual([]);
+  });
+});
+
 describe("transcriptions et réponse", () => {
   it("ajoute les mots de l'utilisateur et repasse en écoute", () => {
     const state = run(

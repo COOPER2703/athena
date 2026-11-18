@@ -16,6 +16,7 @@ import { Button } from "../../shared/ui/Button";
 import { Notice } from "../../shared/ui/Notice";
 import { Composer } from "./Composer";
 import { LiveTurn } from "./LiveTurn";
+import { mergeLiveTranscript } from "./liveTranscript";
 import { Thread } from "./Thread";
 import type { TurnIssue } from "./useTurn";
 import { useAudioPlayer } from "./useAudioPlayer";
@@ -23,7 +24,6 @@ import { useMuted } from "./useMuted";
 import { useTurn } from "./useTurn";
 import { useVoiceConversation } from "./VoiceProvider";
 import { VoiceBar } from "./VoiceBar";
-import { VoiceTranscript } from "./VoiceTranscript";
 import {
   voiceBarVisible,
   voiceEndMessage,
@@ -35,9 +35,12 @@ import { voiceSessionActive } from "./voiceSession";
  * Conversation : un fil unique et une barre de saisie.
  *
  * Le fil vient du Journal (`GET /api/thread`, paginé vers le passé) ; le Tour
- * en cours vient du flux SSE de `POST /api/chat`. Dès qu'un Tour se termine, le
- * fil est relu et le Tour local disparaît : le message n'est jamais affiché
- * deux fois. L'audio est coupé par défaut et se joue après un geste.
+ * en cours vient du flux SSE de `POST /api/chat`, les paroles de la
+ * conversation vocale du WebSocket `GET /api/voice`. Dès qu'un Tour se
+ * termine, le fil est relu et le Tour local disparaît : le message n'est jamais
+ * affiché deux fois. Les mots du micro apparaissent en direct, puis le Journal
+ * les reprend à la fin de chaque tour (ADR-0027). L'audio est coupé par défaut
+ * et se joue après un geste.
  */
 export function ConversationZone() {
   const thread = useInfiniteQuery({
@@ -71,16 +74,37 @@ export function ConversationZone() {
     [player],
   );
 
-  const refreshThread = useCallback(async () => {
-    try {
-      const result = await thread.refetch();
-      return !result.isError;
-    } catch {
-      return false;
+  const settleVoice = voice.settle;
+  // Lignes encore vivantes au moment où la relecture démarre : une fois le
+  // Journal relu, elles y sont forcément (le serveur écrit avant d'émettre).
+  const voiceLinesRef = useRef(0);
+  voiceLinesRef.current = voice.state.lines.length;
+  const refreshRef = useRef<Promise<boolean> | null>(null);
+  const refreshThread = useCallback((): Promise<boolean> => {
+    if (refreshRef.current !== null) {
+      return refreshRef.current;
     }
-  }, [thread.refetch]);
+    const pending = voiceLinesRef.current;
+    const run = (async () => {
+      try {
+        const result = await thread.refetch();
+        if (result.isError) {
+          return false;
+        }
+        settleVoice(pending);
+        return true;
+      } catch {
+        return false;
+      } finally {
+        refreshRef.current = null;
+      }
+    })();
+    refreshRef.current = run;
+    return run;
+  }, [settleVoice, thread.refetch]);
+  const finishRefresh = useCallback(() => refreshThread(), [refreshThread]);
 
-  const turn = useTurn({ onFinished: refreshThread, onAudio: handleAudio });
+  const turn = useTurn({ onFinished: finishRefresh, onAudio: handleAudio });
 
   const [draft, updateDraft] = useDraft("conversation");
   const restoredIssue = useRef<TurnIssue | null>(null);
@@ -156,9 +180,42 @@ export function ConversationZone() {
 
   const entries = flattenThread(thread.data?.pages);
   const retentionDays = thread.data?.pages[0]?.retentionDays ?? 0;
-  // #185 lira `session.console` ; d'ici là, la Console ne se signale pas
-  // elle-même pendant sa propre conversation vocale.
-  const voiceSession = occupancy.data === true && !inVoice;
+
+  const entriesRef = useRef(entries);
+  entriesRef.current = entries;
+  const startVoice = useCallback(() => {
+    // Repère du Journal : une parole antérieure identique ne doit pas
+    // absorber les mots prononcés maintenant.
+    const baseline = entriesRef.current.reduce(
+      (max, entry) => Math.max(max, entry.id),
+      0,
+    );
+    voice.start(baseline);
+  }, [voice]);
+
+  // Une parole vivante n'a de sens que pendant la conversation : à la fin, le
+  // Journal relu les reprend toutes et le fil ne montre que la vérité
+  // persistée.
+  const liveLines = inVoice ? voice.state.lines : [];
+  const lines = mergeLiveTranscript(
+    entries,
+    liveLines,
+    voice.state.journalBaseline,
+  );
+
+  // La transcription d'Athena arrive en fin de tour : c'est le signal pour
+  // relire le Journal, qui contient alors la question et la réponse.
+  const assistantLines = voice.state.lines.filter(
+    (line) => line.role === "assistant",
+  ).length;
+  const previousAssistantLines = useRef(assistantLines);
+  useEffect(() => {
+    const increased = assistantLines > previousAssistantLines.current;
+    previousAssistantLines.current = assistantLines;
+    if (increased) {
+      void refreshThread();
+    }
+  }, [assistantLines, refreshThread]);
 
   // Une fin de conversation (croix, end_session, timeout) a écrit au Journal :
   // on le relit pour que la barre de saisie retrouve un fil à jour.
@@ -169,10 +226,21 @@ export function ConversationZone() {
       (phase === "ended" || phase === "refused") &&
       previousVoicePhase.current !== phase
     ) {
-      void thread.refetch();
+      void refreshThread();
     }
     previousVoicePhase.current = phase;
-  }, [thread.refetch, voice.state.phase]);
+  }, [refreshThread, voice.state.phase]);
+
+  // L'avertissement ignore la Session du Client Console : c'est le serveur qui
+  // le dit (`session.console`), jamais une comparaison de nom affiché.
+  const voiceSession = occupancy.data === true;
+
+  // Un changement de phase vocale est le moment où l'occupation réelle change
+  // le plus : on relit l'instantané sans attendre le prochain intervalle.
+  const refetchOccupancy = occupancy.refetch;
+  useEffect(() => {
+    void refetchOccupancy();
+  }, [refetchOccupancy, voice.state.phase]);
 
   return (
     <div className="flex flex-col gap-5 px-5 py-6 sm:px-8 lg:px-10 lg:py-8">
@@ -185,7 +253,7 @@ export function ConversationZone() {
       ) : null}
 
       <Thread
-        entries={entries}
+        lines={lines}
         loading={thread.isPending}
         error={thread.error}
         hasMore={thread.hasNextPage}
@@ -198,8 +266,6 @@ export function ConversationZone() {
         }}
         retentionDays={retentionDays}
       />
-
-      {inVoice ? <VoiceTranscript lines={voice.state.lines} /> : null}
 
       <div ref={liveRef}>
         {turn.turn !== null ? <LiveTurn turn={turn.turn} /> : null}
@@ -275,7 +341,7 @@ export function ConversationZone() {
           onChange={updateDraft}
           onSend={handleSend}
           onCancel={handleCancel}
-          onStartVoice={voice.start}
+          onStartVoice={startVoice}
           streaming={turn.streaming}
           muted={muted}
           onToggleMute={handleToggleMute}
