@@ -482,10 +482,24 @@ export function useVoiceConversation(): VoiceConversation {
   return value;
 }
 
-/** Mobile ou tablette : pointeur grossier, donc micro premier plan seulement. */
+/**
+ * Mobile ou tablette : appareil **sans survol**.
+ *
+ * `(hover: none)` est le signal honnête du mobile — un ordinateur tactile garde
+ * un survol et sa page continue donc en arrière-plan. Le pointeur grossier seul
+ * classerait ce bureau tactile comme mobile et couperait la conversation pour
+ * rien ; il ne sert que de repli aux navigateurs qui ignorent `hover`.
+ */
 function isMobileLike(): boolean {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
     return false;
   }
-  return window.matchMedia("(pointer: coarse)").matches;
+  const query = window.matchMedia;
+  if (query("(hover: none)").matches) {
+    return true;
+  }
+  if (query("(hover: hover)").matches) {
+    return false;
+  }
+  return query("(pointer: coarse)").matches;
 }
