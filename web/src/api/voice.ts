@@ -34,10 +34,30 @@ export interface VoiceConnection {
   close(): void;
 }
 
+/**
+ * Identifiant de cet **onglet**, tiré une fois par chargement de page.
+ *
+ * Il ne sert qu'à reconnaître sa propre reconnexion : le serveur remplace
+ * alors son Client Console abandonné, sans jamais voler la Session d'un second
+ * onglet, qui présente le sien.
+ */
+const TAB_ID = newTabId();
+
+function newTabId(): string {
+  if (
+    typeof crypto !== "undefined" &&
+    typeof crypto.randomUUID === "function"
+  ) {
+    return crypto.randomUUID();
+  }
+  return `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 /** URL du WebSocket vocal, sur la même origine que la page servie. */
 export function voiceUrl(): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/api/voice`;
+  const tab = encodeURIComponent(TAB_ID);
+  return `${protocol}//${window.location.host}/api/voice?tab=${tab}`;
 }
 
 /**

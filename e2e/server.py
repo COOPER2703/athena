@@ -34,6 +34,7 @@ import math
 import signal
 import struct
 import sys
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
 
@@ -165,8 +166,8 @@ class ControlServer:
         self._server: Any = None
         self._generation = 0
         self._ready = False
-        #: Contexte de la connexion du Client desktop qui occupe la Session.
-        self._occupant: Any = None
+        #: Pile de sortie de la connexion du Client desktop qui occupe la Session.
+        self._occupant: AsyncExitStack | None = None
 
     @property
     def url(self) -> str:
@@ -226,14 +227,16 @@ class ControlServer:
             return web.json_response({"occupied": False}, status=409)
         if self._occupant is not None:
             return web.json_response({"occupied": True})
-        manager = server.client(name="desktop", platform="linux")
-        client = await manager.__aenter__()
+        stack = AsyncExitStack()
         try:
+            client = await stack.enter_async_context(
+                server.client(name="desktop", platform="linux")
+            )
             await client.start_session()
-        except Exception:
-            await manager.__aexit__(None, None, None)
+        except BaseException:
+            await stack.aclose()
             raise
-        self._occupant = manager
+        self._occupant = stack
         return web.json_response(
             {"occupied": True, "client_id": client.client_id}
         )
@@ -254,12 +257,12 @@ class ControlServer:
 
     async def release_occupant(self) -> None:
         """Referme la connexion du Client desktop, si elle existe encore."""
-        manager = self._occupant
+        stack = self._occupant
         self._occupant = None
-        if manager is None:
+        if stack is None:
             return
         try:
-            await manager.__aexit__(None, None, None)
+            await stack.aclose()
         except Exception:
             # Un serveur déjà arrêté a pu fermer le socket : rien à libérer.
             pass

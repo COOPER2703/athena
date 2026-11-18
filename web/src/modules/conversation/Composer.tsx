@@ -121,12 +121,7 @@ export function Composer({
             variant="secondary"
             size="sm"
             onClick={onStartVoice}
-            disabled={streaming}
-            title={
-              streaming
-                ? "Attendez la fin de la réponse pour passer à la voix."
-                : "Démarrer la conversation vocale"
-            }
+            title="Démarrer la conversation vocale"
             icon={<MicrophoneIcon />}
           >
             Parler

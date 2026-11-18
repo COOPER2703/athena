@@ -26,8 +26,8 @@ import { useVoiceConversation } from "./VoiceProvider";
 import { VoiceBar } from "./VoiceBar";
 import {
   voiceBarVisible,
-  voiceEndMessage,
-  voiceEndStatus,
+  voiceEndCopy,
+  type VoiceState,
 } from "./voice";
 import { voiceSessionActive } from "./voiceSession";
 
@@ -298,20 +298,7 @@ export function ConversationZone() {
       ) : null}
 
       {voice.state.phase === "ended" ? (
-        <Notice
-          tone={voice.state.endReason === "error" ? "danger" : "info"}
-          title={voiceEndStatus(voice.state.endReason ?? "normal")}
-        >
-          <p>
-            {voice.state.problem?.message ||
-              voiceEndMessage(voice.state.endReason ?? "normal")}
-          </p>
-          <div className="mt-3">
-            <Button variant="ghost" size="sm" onClick={voice.dismiss}>
-              Fermer
-            </Button>
-          </div>
-        </Notice>
+        <EndedNotice state={voice.state} onDismiss={voice.dismiss} />
       ) : null}
 
       {voice.state.phase === "refused" ? (
@@ -348,5 +335,29 @@ export function ConversationZone() {
         />
       )}
     </div>
+  );
+}
+
+/** Bandeau d'une conversation close : titre et phrase viennent de la même table. */
+function EndedNotice({
+  state,
+  onDismiss,
+}: {
+  state: VoiceState;
+  onDismiss: () => void;
+}) {
+  const copy = voiceEndCopy(state.endReason ?? "normal");
+  return (
+    <Notice
+      tone={state.endReason === "error" ? "danger" : "info"}
+      title={copy.title}
+    >
+      <p>{state.problem?.message || copy.message}</p>
+      <div className="mt-3">
+        <Button variant="ghost" size="sm" onClick={onDismiss}>
+          Fermer
+        </Button>
+      </div>
+    </Notice>
   );
 }

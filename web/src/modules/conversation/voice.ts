@@ -8,6 +8,7 @@
  * et quel motif ramène la barre de saisie (ADR-0027).
  */
 
+import { describeCode } from "../../api/errors";
 import { decodeBase64 } from "./audio";
 
 /** Qui a prononcé une transcription. */
@@ -177,62 +178,65 @@ export function voicePhaseLabel(phase: VoicePhase): string {
   }
 }
 
-/** Libellé d'état d'une conversation close, tel que l'écran le montre. */
-export function voiceEndStatus(
-  reason: VoiceEndReason,
-): "Terminée" | "Interrompue" {
-  switch (reason) {
-    case "client_gone":
-    case "error":
-    case "shutdown":
-    case "replaced":
-      return "Interrompue";
-    default:
-      return "Terminée";
-  }
-}
-
-/** Titre du bandeau affiché après la fin d'une conversation. */
-export function voiceEndTitle(reason: VoiceEndReason): string {
-  switch (reason) {
-    case "client_gone":
-    case "error":
-    case "shutdown":
-    case "replaced":
-      return "Conversation interrompue";
-    default:
-      return "Conversation terminée";
-  }
+/** Le bandeau d'une conversation close : un titre et une phrase, une par cause. */
+export interface VoiceEndCopy {
+  /** Titre du bandeau, jamais le libellé d'état « Terminée » / « Interrompue ». */
+  title: string;
+  /** Ce que la personne doit comprendre : qui a coupé, et pourquoi. */
+  message: string;
 }
 
 /**
- * Phrase de fin, une par cause.
+ * Texte de fin, une entrée par cause.
  *
  * La croix, une fin décidée par Athena, le timeout, une coupure et un
  * changement d'appareil ne se racontent pas de la même façon : la personne doit
  * savoir si elle a agi, si Athena a conclu, ou si le système a coupé.
  */
-export function voiceEndMessage(reason: VoiceEndReason): string {
-  switch (reason) {
-    case "user":
-      return "Vous avez terminé la conversation. La barre de saisie est de nouveau disponible.";
-    case "background":
-      return "Conversation terminée : sur mobile, le système suspend le micro dès que la page passe en arrière-plan.";
-    case "completed":
-      return "Athena a terminé la conversation.";
-    case "timeout":
-      return "Conversation terminée après une longue inactivité.";
-    case "client_gone":
-      return "La liaison vocale s'est fermée.";
-    case "normal":
-      return "La conversation est terminée.";
-    case "error":
-      return "La conversation s'est arrêtée sur une erreur.";
-    case "shutdown":
-      return "Le serveur s'est arrêté ; la conversation est terminée.";
-    case "replaced":
-      return "Un autre appareil a repris la conversation.";
-  }
+const END_COPY: Readonly<Record<VoiceEndReason, VoiceEndCopy>> = {
+  user: {
+    title: "Conversation terminée",
+    message:
+      "Vous avez terminé la conversation. La barre de saisie est de nouveau disponible.",
+  },
+  background: {
+    title: "Conversation terminée",
+    message:
+      "Conversation terminée : sur mobile, le système suspend le micro dès que la page passe en arrière-plan.",
+  },
+  completed: {
+    title: "Conversation terminée",
+    message: "Athena a terminé la conversation.",
+  },
+  timeout: {
+    title: "Conversation terminée",
+    message: "Conversation terminée après une longue inactivité.",
+  },
+  client_gone: {
+    title: "Conversation interrompue",
+    message: "La liaison vocale s'est fermée.",
+  },
+  normal: {
+    title: "Conversation terminée",
+    message: "La conversation est terminée.",
+  },
+  error: {
+    title: "Conversation interrompue",
+    message: "La conversation s'est arrêtée sur une erreur.",
+  },
+  shutdown: {
+    title: "Conversation interrompue",
+    message: "Le serveur s'est arrêté ; la conversation est terminée.",
+  },
+  replaced: {
+    title: "Conversation interrompue",
+    message: "Un autre appareil a repris la conversation.",
+  },
+};
+
+/** Titre et phrase du bandeau de fin, sans autre table de correspondance. */
+export function voiceEndCopy(reason: VoiceEndReason): VoiceEndCopy {
+  return END_COPY[reason];
 }
 
 /** Vrai quand la voix de l'utilisateur doit couper la lecture locale. */
@@ -330,7 +334,10 @@ export function applyVoiceEvent(
         ...state,
         phase: "refused",
         endReason: null,
-        problem: { code: event.code, message: event.message },
+        problem: {
+          code: event.code,
+          message: describeCode(event.code, event.message),
+        },
       };
 
     case "cut":

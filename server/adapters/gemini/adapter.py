@@ -187,7 +187,9 @@ class GeminiLiveAdapter:
                         break
                 # Fin du tour : la transcription de sortie accumulée devient
                 # une seule prise de parole du domaine.
-                await self._flush_transcription()
+                await self._flush_transcription(
+                    self._pending_transcription, Role.ASSISTANT
+                )
                 if not delivered:
                     break
         except asyncio.CancelledError:
@@ -213,57 +215,48 @@ class GeminiLiveAdapter:
             )
 
         events = translate_response(response)
-        # Extraire l'entrée avant d'émettre quoi que ce soit : un même message
-        # peut porter l'audio de la réponse, et la parole utilisateur doit
-        # néanmoins la précéder au Journal.
+        # Un même message peut porter l'audio de la réponse : la parole
+        # utilisateur doit néanmoins la précéder au Journal. Un seul tri des
+        # Événements évite de retester le rôle à chaque boucle.
+        user_texts: list[str] = []
+        assistant_texts: list[str] = []
+        deferred: list[Event] = []
         for event in events:
-            if isinstance(event, LlmTranscription) and event.role is Role.USER:
-                self._pending_input.append(event.text)
+            if isinstance(event, LlmTranscription):
+                if event.role is Role.USER:
+                    user_texts.append(event.text)
+                else:
+                    assistant_texts.append(event.text)
+            else:
+                deferred.append(event)
+        self._pending_input.extend(user_texts)
 
-        server_content = getattr(response, "server_content", None)
-        if getattr(server_content, "interrupted", False):
-            # Barge-in : le tour en cours est coupé, l'énoncé accumulé ne doit
-            # pas attendre une réponse qui ne viendra pas.
-            await self._flush_input_transcription()
-
-        answering = any(
-            isinstance(event, LlmAudio)
-            or (isinstance(event, LlmTranscription) and event.role is Role.ASSISTANT)
-            for event in events
+        interrupted = getattr(
+            getattr(response, "server_content", None), "interrupted", False
         )
-        if answering:
-            # Le modèle commence à répondre : l'énoncé utilisateur est complet.
-            await self._flush_input_transcription()
+        answering = bool(assistant_texts) or any(
+            isinstance(event, LlmAudio) for event in deferred
+        )
+        if interrupted or answering:
+            # Barge-in (le tour en cours est coupé) ou début de réponse : l'énoncé
+            # utilisateur est complet, il sort maintenant ou jamais.
+            await self._flush_transcription(self._pending_input, Role.USER)
 
-        for event in events:
-            if isinstance(event, LlmTranscription) and event.role is Role.USER:
-                continue
+        self._pending_transcription.extend(assistant_texts)
+        for event in deferred:
             if isinstance(event, LlmFailed):
                 await self._fail(event.cause)
-            elif isinstance(event, LlmTranscription) and event.role is Role.ASSISTANT:
-                self._pending_transcription.append(event.text)
             else:
                 await self._events.put(event)
 
-    async def _flush_input_transcription(self) -> None:
-        """Émet la parole utilisateur accumulée comme un seul énoncé."""
-        if not self._pending_input:
+    async def _flush_transcription(self, pending: list[str], role: Role) -> None:
+        """Émet le texte accumulé comme un seul énoncé, puis vide la liste."""
+        if not pending:
             return
-        text = "".join(self._pending_input)
-        self._pending_input.clear()
+        text = "".join(pending)
+        pending.clear()
         if text:
-            await self._events.put(LlmTranscription(text=text, role=Role.USER))
-
-    async def _flush_transcription(self) -> None:
-        """Émet la transcription de sortie accumulée comme un seul tour."""
-        if not self._pending_transcription:
-            return
-        text = "".join(self._pending_transcription)
-        self._pending_transcription.clear()
-        if text:
-            await self._events.put(
-                LlmTranscription(text=text, role=Role.ASSISTANT)
-            )
+            await self._events.put(LlmTranscription(text=text, role=role))
 
     async def _fail(self, cause: LlmFailureCause) -> None:
         if self._terminated:
@@ -287,7 +280,7 @@ class GeminiLiveAdapter:
                 await receiver
         # Fermer la Connexion en cours d'énoncé ne doit rien perdre : la parole
         # accumulée sort avant ``LlmClosed``.
-        await self._flush_input_transcription()
+        await self._flush_transcription(self._pending_input, Role.USER)
 
         context = self._context
         self._context = None
@@ -308,7 +301,7 @@ class GeminiLiveAdapter:
         self._terminated = True
         # Fin de flux sans réponse : l'énoncé accumulé sort avant la clôture,
         # pour que le noyau le journalise dans la Session encore ouverte.
-        await self._flush_input_transcription()
+        await self._flush_transcription(self._pending_input, Role.USER)
         await self._events.put(LlmClosed(connection_id=self._connection_id))
 
     async def send_audio(self, connection_id: str, data: bytes) -> None:
