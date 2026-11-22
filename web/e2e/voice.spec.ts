@@ -304,7 +304,7 @@ test("refus sans préemption, puis conversation vocale simulée", async ({
     "la conversation doit être intacte après un aller-retour de zone",
   ).toBeVisible();
   await expect(page.getByLabel("Message")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Son actif" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Couper le son" })).toHaveCount(0);
   expect(
     voiceTrace.sockets.length,
     `changer de zone ne doit pas rouvrir le WebSocket vocal.\n${traceReport(voiceTrace)}`,

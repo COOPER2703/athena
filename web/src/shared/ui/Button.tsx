@@ -3,7 +3,7 @@ import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { cn } from "../cn";
 
 export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
-export type ButtonSize = "sm" | "md";
+export type ButtonSize = "sm" | "md" | "square";
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
@@ -24,9 +24,10 @@ const VARIANTS: Readonly<Record<ButtonVariant, string>> = {
 const SIZES: Readonly<Record<ButtonSize, string>> = {
   sm: "h-8 gap-1.5 px-2.5 text-xs",
   md: "h-10 gap-2 px-4 text-sm",
+  square: "h-9 w-9 p-0",
 };
 
-/** Bouton de la Console : quatre variantes, deux tailles, focus toujours visible. */
+/** Bouton de la Console : quatre variantes, trois tailles, focus toujours visible. */
 export function Button({
   variant = "secondary",
   size = "md",

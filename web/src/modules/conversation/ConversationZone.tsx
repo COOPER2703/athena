@@ -317,7 +317,7 @@ export function ConversationZone() {
         ) : null}
       </div>
 
-      <div className="sticky bottom-0 z-20 -mx-5 -mb-6 shrink-0 border-t border-border bg-canvas/95 px-5 py-3 backdrop-blur sm:-mx-8 sm:px-8 lg:static lg:z-auto lg:mx-0 lg:mb-0 lg:border-0 lg:bg-transparent lg:p-0 lg:backdrop-blur-none">
+      <div className="sticky bottom-0 z-20 -mx-5 -mb-6 shrink-0 border-t border-border bg-canvas/95 px-5 py-2 backdrop-blur sm:-mx-8 sm:px-8 lg:static lg:z-auto lg:mx-0 lg:mb-0 lg:border-0 lg:bg-transparent lg:p-0 lg:backdrop-blur-none">
         {inVoice ? (
           <VoiceBar
             state={voice.state}

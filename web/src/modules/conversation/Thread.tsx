@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { describeError } from "../../api/errors";
 import { zoneById } from "../../app/routing";
@@ -53,6 +53,26 @@ export function Thread({
   const [announcement, setAnnouncement] = useState("");
   const announcedRef = useRef("");
   const endRef = useRef<HTMLDivElement>(null);
+  const anchoredRef = useRef(false);
+
+  /** Amène la fin du fil dans la vue : ouverture, puis paroles vivantes. */
+  const scrollToEnd = useCallback((behavior: ScrollBehavior) => {
+    endRef.current?.scrollIntoView({ block: "end", behavior });
+  }, []);
+
+  // À la première lecture, on ouvre le fil sur son message le plus récent :
+  // la page ne doit pas s'arrêter en haut, sur le plus ancien de la fenêtre.
+  // Une seule fois par visite, pour ne jamais arracher quelqu'un qui remonte
+  // l'historique.
+  useEffect(() => {
+    if (anchoredRef.current || loading || lines.length === 0) {
+      return;
+    }
+    anchoredRef.current = true;
+    requestAnimationFrame(() => {
+      scrollToEnd("auto");
+    });
+  }, [loading, lines.length, scrollToEnd]);
 
   // Une nouvelle parole vivante est annoncée une seule fois, et le fil suit :
   // la personne voit ses mots arriver sans quitter la barre vocale. Quand une
@@ -73,11 +93,8 @@ export function Thread({
     const reduced =
       typeof window.matchMedia === "function" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    endRef.current?.scrollIntoView({
-      block: "nearest",
-      behavior: reduced ? "auto" : "smooth",
-    });
-  }, [lastLive?.key, lastLive?.text]);
+    scrollToEnd(reduced ? "auto" : "smooth");
+  }, [lastLive?.key, lastLive?.text, scrollToEnd]);
 
   return (
     <section
@@ -100,13 +117,22 @@ export function Thread({
         {hasMore ? (
           <Button
             variant="ghost"
-            size="sm"
+            size="square"
             onClick={onLoadMore}
             disabled={loadingMore}
-            icon={<RefreshIcon />}
-          >
-            {loadingMore ? "Chargement…" : "Charger les messages plus anciens"}
-          </Button>
+            aria-busy={loadingMore}
+            aria-label={
+              loadingMore
+                ? "Chargement des messages plus anciens"
+                : "Charger les messages plus anciens"
+            }
+            title={
+              loadingMore
+                ? "Chargement des messages plus anciens"
+                : "Charger les messages plus anciens"
+            }
+            icon={<RefreshIcon className={loadingMore ? "animate-spin" : undefined} />}
+          />
         ) : null}
       </div>
 
@@ -164,7 +190,8 @@ export function Thread({
         </ol>
       ) : null}
 
-      <div ref={endRef} />
+      {/* `scroll-mb-20` dégage la barre de saisie collante en mobile. */}
+      <div ref={endRef} className="scroll-mb-20" />
     </section>
   );
 }
