@@ -136,14 +136,24 @@ _Avoid_: endpoint, callback, hook
 
 **Console web**:
 La surface unique d'une instance, servie en HTTP/JSON, SSE et WebSocket sur un port dédié,
-liée à `127.0.0.1` par défaut : **Conversation** écrite avec Athena, **Réglages**, gestion des
-**Plugins** installés et **Diagnostic** (Session, Clients, Plugins, Traces). Depuis l'ADR-0017,
-toute route d'API hors identité exige un **Ticket Console**. Elle lit l'**instantané de
-lecture** et le flux de **Traces**, soumet des **Tours** et lit les entrées récentes du
-**Journal**, et écrit les Réglages et les **Secrets** (ADR-0024, ADR-0025). Ce n'est **pas un
-Client** : elle ne parle pas le Protocole partagé, ne s'enregistre pas, ne transmet pas
-d'audio et ne démarre pas de Session (ADR-0003, ADR-0016, amendés par ADR-0024 et ADR-0025).
-_Avoid_: dashboard, UI, interface web, client web
+liée à `127.0.0.1` par défaut : **Conversation** écrite et vocale avec Athena, **Réglages**,
+gestion des **Plugins** installés et **Diagnostic** (Session, Clients, Plugins, Traces).
+Depuis l'ADR-0017, toute route d'API hors identité exige un **Ticket Console**. Elle lit
+l'**instantané de lecture** et le flux de **Traces**, soumet des **Tours**, héberge le
+**Client Console** le temps d'une conversation vocale et lit les entrées récentes du
+**Journal**, et écrit les Réglages et les **Secrets** (ADR-0024, ADR-0025, ADR-0027). Le
+navigateur n'est **pas un Client** : il ne parle pas le Protocole partagé, ne s'enregistre
+pas et ne détient aucun **Jeton d'accès** ; il ne transmet de l'audio que par le Client
+Console qu'il fait naître (ADR-0003, ADR-0016, amendés par ADR-0024, ADR-0025 et ADR-0027).
+_Avoid_: dashboard, UI, interface web, client web, super-client
+
+**Client Console**:
+Le **Client** que la Console web héberge pendant une conversation vocale. Il possède un
+`client_id`, un nom tiré du navigateur et la plateforme `web` ; il est le Client actif de sa
+Session, apparaît dans les Clients de l'instantané et écrit au Journal. Il ne parle pas le
+Protocole partagé, ne détient aucun **Jeton d'accès**, ne reçoit aucun appel de Tool client
+et ne dure que le temps de sa Session.
+_Avoid_: client navigateur, client web, pseudo-client, super-client
 
 **Trace**:
 Une entrée du flux d'observation : horodatage, Source, `kind`, niveau et payload. La Console
@@ -228,7 +238,8 @@ _Avoid_: user, compte utilisateur, profil, login
 **Ticket Console**:
 L'état authentifié d'un navigateur sur la Console, matérialisé par le cookie `athena_ticket`
 (`HttpOnly; Secure; SameSite=Strict`, `Path=/`), valable 30 jours glissants et révocable
-(déconnexion, « déconnecter partout »). Il authentifie aussi le WebSocket du flux de Traces.
+(déconnexion, « déconnecter partout »). Il authentifie aussi les WebSockets du flux de
+Traces et de la conversation vocale (ADR-0027).
 Se distingue de la **Session** (conversation Live), de la **Connexion Live** (lien Gemini) et
 du **Jeton d'accès** (machine).
 _Avoid_: session, session web, cookie de session, login
@@ -442,5 +453,8 @@ _Avoid_: Raison, cause, status
 - **Console → Noyau (Tour)**: La Console soumet un Tour au Repos et reçoit sa réponse en texte
   et en audio ; le noyau ne crée aucune Session et le Client reste libre de reprendre la
   parole.
+- **Console → Client Console**: La Console héberge un Client Console le temps d'une
+  conversation vocale ; ce Client tient une Session ordinaire et le navigateur ne parle
+  jamais le Protocole partagé.
 - **Console → Réglages**: La Console écrit les Réglages et les Secrets ; l'environnement prime
   sur le magasin, et les changements s'appliquent au redémarrage.

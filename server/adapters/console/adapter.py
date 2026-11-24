@@ -43,6 +43,7 @@ from server.adapters.console.contract import (
     STREAM_PATH,
     THREAD_PATH,
     TOKENS_PATH,
+    VOICE_PATH,
 )
 from server.adapters.console.events import EventInjection
 from server.adapters.console.plugins import PluginsRoutes
@@ -55,6 +56,7 @@ from server.adapters.console.status import (
 from server.adapters.console.stream import stream_handler
 from server.adapters.console.thread import ThreadRoutes
 from server.adapters.console.trace_buffer import TraceBuffer
+from server.adapters.console.voice import voice_handler
 from server.adapters.event_body import MAX_BODY_BYTES
 from server.adapters.plugins.admin import PluginAdmin
 from server.adapters.trace import NullTraceSink
@@ -63,6 +65,7 @@ from server.core.ports import (
     InstallationStatus,
     SecretStore,
     SecretValidator,
+    SessionControl,
     ThreadReader,
     TraceSink,
     TourControl,
@@ -200,6 +203,9 @@ class ConsoleAdapter:
         self._trace_sink: TraceSink = trace_sink or NullTraceSink()
         self._snapshot: Callable[[], Mapping[str, object]] | None = None
         self._event_injection: EventInjection | None = None
+        # Couture de la Session vocale (ADR-0027), liée au démarrage comme
+        # celle du Tour : sans elle, la route refuse sans ouvrir de Client.
+        self._session_control: SessionControl | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
 
@@ -226,6 +232,8 @@ class ConsoleAdapter:
         snapshot: Callable[[], Mapping[str, object]],
         push: Callable[[str, str], None] | None = None,
         tour: TourControl | None = None,
+        *,
+        session: SessionControl | None = None,
     ) -> None:
         """Lie la surface HTTP, l'instantané et les coutures du noyau.
 
@@ -233,10 +241,13 @@ class ConsoleAdapter:
         ne possède aucune file propre, elle dépose dans le Canal d'événements
         unique (ADR-0007). Sans couture, l'injection répond 503. ``tour`` est la
         couture du **Tour** (ADR-0024) : soumettre et annuler, jamais atteindre
-        le Coordinator. Sans elle, la Conversation répond 501.
+        le Coordinator. ``session`` est celle de la **Session vocale**
+        (ADR-0027) : ouvrir et fermer un Client Console éphémère. Sans elle, la
+        Conversation répond 501 et la voix refuse sans ouvrir de Client.
         """
         self._snapshot = snapshot
         self._chat.bind(tour)
+        self._session_control = session
         self._event_injection = EventInjection(
             push=push, trace_sink=self._trace_sink
         )
@@ -279,6 +290,7 @@ class ConsoleAdapter:
         self._site = None
         self._snapshot = None
         self._event_injection = None
+        self._session_control = None
 
     def _register_routes(self, app: web.Application) -> None:
         """Enregistre les routes de lecture et d'injection.
@@ -356,6 +368,16 @@ class ConsoleAdapter:
         # Conversation : refusée côté serveur tant que l'Installation n'est pas
         # terminée, puis Tour complet en ``text/event-stream`` (ADR-0024).
         app.router.add_post(CHAT_PATH, self._chat.handle)
+        # Conversation vocale : WebSocket dédiée, authentifiée par le Ticket
+        # Console comme le flux de Traces, avant le repli ``/api/*`` (ADR-0027).
+        app.router.add_get(
+            VOICE_PATH,
+            voice_handler(
+                lambda: self._session_control,
+                ticket_valid=self._console_auth.ticket_guard,
+                ticket_check_interval=min(self._status_interval, 30.0),
+            ),
+        )
         # Fil de la Conversation : lecture paginée du Journal, en lecture seule.
         app.router.add_get(THREAD_PATH, self._thread_routes.handle)
         # Tout chemin inconnu **sous /api** reste du JSON : un client de l'API

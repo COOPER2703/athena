@@ -42,11 +42,11 @@ test("connexion, Tour texte et audio, puis interruption", async ({
   await expect(page.getByLabel("Message")).toBeVisible();
 
   // --- Le son est coupé par défaut et s'active au geste ------------------
-  const muted = page.getByRole("button", { name: "Son coupé" });
+  const muted = page.getByRole("button", { name: "Activer le son" });
   await expect(muted).toBeVisible();
   await muted.click();
   await expect(
-    page.getByRole("button", { name: "Son actif" }),
+    page.getByRole("button", { name: "Couper le son" }),
   ).toBeVisible();
 
   // --- Tour ordinaire : Tool, activité, texte, audio --------------------
@@ -88,4 +88,42 @@ test("connexion, Tour texte et audio, puis interruption", async ({
       return snapshot.session.state;
     })
     .toBe("Idle");
+});
+
+/**
+ * Le fil s'ouvre déjà défilé sur son message le plus récent : arriver sur le
+ * plus ancien de la fenêtre donnerait l'impression d'un historique figé. Le
+ * Journal est simulé par interception, sans faire vivre soixante Tours au faux
+ * modèle.
+ */
+test("le fil s'ouvre sur son message le plus récent", async ({
+  page,
+  server,
+}) => {
+  await page.goto(server.url);
+  await page.getByLabel("Nom du Compte").fill(E2E_USERNAME);
+  await page.getByLabel("Mot de passe").fill(E2E_PASSWORD);
+  await page.getByRole("button", { name: "Se connecter" }).click();
+  await expect(page).toHaveURL(/\/conversation$/);
+
+  const entries = Array.from({ length: 60 }, (_, index) => {
+    const rank = String(index + 1).padStart(3, "0");
+    return {
+      id: index + 1,
+      role: index % 2 === 0 ? "user" : "assistant",
+      origin: "text",
+      text: `Repère du fil ${rank}`,
+      created_at: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+    };
+  });
+  await page.route("**/api/thread*", (route) =>
+    route.fulfill({
+      json: { v: 1, entries, next_before: null, retention_days: 3 },
+    }),
+  );
+
+  await page.reload();
+
+  await expect(page.getByText("Repère du fil 060")).toBeInViewport();
+  await expect(page.getByText("Repère du fil 001")).not.toBeInViewport();
 });

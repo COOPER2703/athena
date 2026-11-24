@@ -22,6 +22,8 @@ export interface SessionStatus {
   sessionId: string;
   connectionId: string;
   activeClientId: string;
+  /** Vrai quand la Session est portée par le Client Console (ADR-0027). */
+  console: boolean;
 }
 
 /** Plugin tel que le registre l'expose (nom, état, Tools attribués). */
@@ -153,6 +155,7 @@ export function emptySnapshot(): DiagnosticSnapshot {
       sessionId: "",
       connectionId: "",
       activeClientId: "",
+      console: false,
     },
     clients: [],
     plugins: [],
@@ -194,6 +197,7 @@ export function normalizeSnapshot(raw: unknown): DiagnosticSnapshot {
       sessionId: asText(session.session_id),
       connectionId: asText(session.connection_id),
       activeClientId: asText(session.active_client_id),
+      console: asBoolean(session.console),
     },
     clients: asList(root.clients)
       .filter(isRecord)

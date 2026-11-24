@@ -96,10 +96,11 @@ class Console:
     def url(self) -> str:
         return f"http://127.0.0.1:{self.adapter.port}"
 
-    async def start(self) -> None:
+    async def start(self, session: object | None = None) -> None:
         await self.adapter.start(
             self.snapshot,
             lambda source, content: self.pushed.append((source, content)),
+            session=session,
         )
 
     async def stop(self) -> None:

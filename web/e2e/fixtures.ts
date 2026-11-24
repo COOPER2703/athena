@@ -28,6 +28,15 @@ export interface E2EServer {
   generation(): Promise<number>;
   /** Demande une sortie propre et attend la génération suivante. */
   restart(): Promise<number>;
+  /**
+   * Fait tenir une Session à un Client desktop du Protocole partagé.
+   *
+   * Aucune Console ne peut alors démarrer : le noyau est occupé par un autre
+   * Client, et la voix refuse sans préempter.
+   */
+  occupySession(): Promise<void>;
+  /** Libère la Session du Client desktop et attend le retour au Repos. */
+  releaseSession(): Promise<void>;
 }
 
 interface Fixtures {
@@ -203,6 +212,26 @@ export const test = base.extend<Fixtures & Options>({
           () => output,
         );
         return state.generation;
+      },
+      async occupySession(): Promise<void> {
+        const response = await fetch(`${controlUrl}/session/occupy`, {
+          method: "POST",
+        });
+        if (!response.ok) {
+          throw new Error(
+            `Session E2E non occupée : HTTP ${response.status}\n${output}`,
+          );
+        }
+      },
+      async releaseSession(): Promise<void> {
+        const response = await fetch(`${controlUrl}/session/release`, {
+          method: "POST",
+        });
+        if (!response.ok) {
+          throw new Error(
+            `Session E2E non libérée : HTTP ${response.status}\n${output}`,
+          );
+        }
       },
     };
 

@@ -18,6 +18,42 @@ describe("voiceSessionActive", () => {
     ).toBe(false);
   });
 
+  it("ignore la Session portée par le Client Console", () => {
+    // La Console ne doit pas s'avertir elle-même d'une « Session vocale en
+    // cours » : l'instantané dit que le Client Console la porte (ADR-0027).
+    expect(
+      voiceSessionActive({
+        session: {
+          state: "SessionVisible",
+          session_id: "abc",
+          console: true,
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("garde l'avertissement pour un Client desktop", () => {
+    expect(
+      voiceSessionActive({
+        session: {
+          state: "SessionVisible",
+          session_id: "abc",
+          console: false,
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("reste faux tant que la Session n'est pas visible", () => {
+    // `console` vaut vrai dès l'acceptation de la WebSocket, avant que la
+    // Session n'ait un identifiant : il n'y a encore rien à signaler.
+    expect(
+      voiceSessionActive({
+        session: { state: "LiveConnecting", session_id: "", console: true },
+      }),
+    ).toBe(false);
+  });
+
   it("reste faux sur un instantané absent ou mal formé", () => {
     expect(voiceSessionActive(null)).toBe(false);
     expect(voiceSessionActive({})).toBe(false);

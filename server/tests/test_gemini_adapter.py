@@ -430,6 +430,13 @@ def test_streamed_output_transcription_is_not_merged_across_turns() -> None:
 
 
 def test_audio_and_transcription_in_one_message_are_both_emitted() -> None:
+    """L'entrée précède la réponse, même quand Gemini les livre ensemble.
+
+    Le noyau journalise la parole utilisateur avant l'audio : la transcription
+    d'entrée doit donc sortir en premier, pour que la réponse qui commence dans
+    le même message ne la déplace pas après coup.
+    """
+
     async def scenario() -> None:
         response = SimpleNamespace(
             data=b"\x10\x20",
@@ -444,13 +451,168 @@ def test_audio_and_transcription_in_one_message_are_both_emitted() -> None:
         await adapter.execute(OpenLiveConnection(connection_id="s1"))
         assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
 
-        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmAudio(data=b"\x10\x20")
         assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmTranscription(
             text="bonjour", role=Role.USER
         )
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmAudio(data=b"\x10\x20")
         assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmTranscription(
             text="salut", role=Role.ASSISTANT
         )
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
+
+    asyncio.run(scenario())
+
+
+def _input_response(text: str) -> Any:
+    return SimpleNamespace(
+        server_content=SimpleNamespace(
+            input_transcription=SimpleNamespace(text=text),
+            output_transcription=None,
+        )
+    )
+
+
+def test_streamed_input_transcription_is_emitted_once_before_the_answer() -> None:
+    async def scenario() -> None:
+        responses = [
+            _input_response("bonjour"),
+            _input_response(" comment"),
+            _input_response(" ça va"),
+            SimpleNamespace(data=b"\x01"),
+        ]
+        live_connect = FakeLiveConnect(session=FakeSession(responses=responses))
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmTranscription(
+            text="bonjour comment ça va", role=Role.USER
+        )
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmAudio(data=b"\x01")
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_input_transcriptions_are_not_merged_across_utterances() -> None:
+    async def scenario() -> None:
+        turns = [
+            [_input_response("premier"), SimpleNamespace(data=b"\x01")],
+            [_input_response("second"), SimpleNamespace(data=b"\x02")],
+        ]
+        live_connect = FakeLiveConnect(session=PerTurnSession(turns))
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmTranscription(
+            text="premier", role=Role.USER
+        )
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmAudio(data=b"\x01")
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmTranscription(
+            text="second", role=Role.USER
+        )
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmAudio(data=b"\x02")
+
+        await adapter.execute(CloseLiveConnection(connection_id="s1"))
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_input_transcription_is_flushed_on_interruption() -> None:
+    async def scenario() -> None:
+        responses = [
+            _input_response("j'allais"),
+            _input_response(" dire"),
+            SimpleNamespace(
+                server_content=SimpleNamespace(
+                    input_transcription=None,
+                    output_transcription=None,
+                    interrupted=True,
+                )
+            ),
+        ]
+        live_connect = FakeLiveConnect(session=FakeSession(responses=responses))
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmTranscription(
+            text="j'allais dire", role=Role.USER
+        )
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_explicit_close_flushes_a_pending_utterance() -> None:
+    async def scenario() -> None:
+        function_call = SimpleNamespace(id="1", name="save_memory", args={})
+        turn = [
+            _input_response("j'allais"),
+            _input_response(" dire"),
+            SimpleNamespace(tool_call=SimpleNamespace(function_calls=[function_call])),
+        ]
+        live_connect = FakeLiveConnect(session=PerTurnSession([turn]))
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmToolCall)
+
+        await adapter.execute(CloseLiveConnection(connection_id="s1"))
+
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmTranscription(
+            text="j'allais dire", role=Role.USER
+        )
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_end_of_stream_flushes_a_pending_utterance() -> None:
+    async def scenario() -> None:
+        responses = [_input_response("bonjour"), _input_response(" à tous")]
+        live_connect = FakeLiveConnect(session=FakeSession(responses=responses))
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmTranscription(
+            text="bonjour à tous", role=Role.USER
+        )
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
+            connection_id="s1"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_empty_input_transcription_emits_nothing() -> None:
+    async def scenario() -> None:
+        responses = [_input_response(""), SimpleNamespace(data=b"\x01")]
+        live_connect = FakeLiveConnect(session=FakeSession(responses=responses))
+        adapter = _adapter(live_connect)
+
+        await adapter.execute(OpenLiveConnection(connection_id="s1"))
+        assert isinstance(await asyncio.wait_for(adapter.recv(), 1.0), LlmOpened)
+
+        assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmAudio(data=b"\x01")
         assert await asyncio.wait_for(adapter.recv(), 1.0) == LlmClosed(
             connection_id="s1"
         )
@@ -956,3 +1118,42 @@ def test_reopening_stamps_each_terminal_with_its_own_connection_id() -> None:
         )
 
     asyncio.run(scenario())
+
+
+def test_default_live_connect_dials_the_alpha_api_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Le modèle Live n'est servi qu'en ``v1alpha`` ; ``v1`` répond 404.
+
+    Régression : le client était construit sans ``http_options``, donc sur la
+    version d'API par défaut du SDK, et chaque Connexion Live échouait en
+    ``server rejected WebSocket connection: HTTP 404``.
+    """
+    from google import genai
+
+    from server.adapters.gemini.adapter import _default_live_connect
+
+    captured: dict[str, Any] = {}
+    sentinel = object()
+
+    class FakeLiveClient:
+        def connect(self, **kwargs: Any) -> object:
+            captured["connect"] = kwargs
+            return sentinel
+
+    class FakeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["client"] = kwargs
+            self.aio = SimpleNamespace(live=FakeLiveClient())
+
+    monkeypatch.setattr(genai, "Client", FakeClient)
+
+    session = _default_live_connect("ath-key")("gemini-3.1-flash-live-preview", "cfg")
+
+    assert session is sentinel
+    assert captured["client"]["api_key"] == "ath-key"
+    assert captured["client"]["http_options"].api_version == "v1alpha"
+    assert captured["connect"] == {
+        "model": "gemini-3.1-flash-live-preview",
+        "config": "cfg",
+    }
