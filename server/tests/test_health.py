@@ -42,7 +42,7 @@ def _snapshot(state: HealthState, **overrides: object) -> dict[str, object]:
         "version": "9.9.9",
         "uptime_seconds": 12.5,
         "state": state,
-        "databases": {"memory": 10, "auth": 20, "settings": 0},
+        "databases": {"memory": 10, "auth": 20, "settings": 0, "schedule": 0},
     }
     values.update(overrides)
     return health_snapshot(**values)  # type: ignore[arg-type]
@@ -55,7 +55,7 @@ def test_a_fresh_health_section_has_no_error_and_no_consolidation() -> None:
         "version": "9.9.9",
         "uptime_seconds": 12.5,
         "last_consolidation": None,
-        "databases": {"memory": 10, "auth": 20, "settings": 0},
+        "databases": {"memory": 10, "auth": 20, "settings": 0, "schedule": 0},
         "last_error": None,
         "trace_buffer": None,
     }
@@ -129,8 +129,13 @@ def test_sizes_and_uptime_are_bounded_and_ordered() -> None:
     )
 
     assert section["uptime_seconds"] == 0.0
-    # Les trois bases sont toujours publiées, dans l'ordre stable, jamais négatif.
-    assert section["databases"] == {"memory": 1, "auth": 0, "settings": 0}
+    # Les quatre bases sont toujours publiées, dans l'ordre stable, jamais négatif.
+    assert section["databases"] == {
+        "memory": 1,
+        "auth": 0,
+        "settings": 0,
+        "schedule": 0,
+    }
     assert section["trace_buffer"] == {"size": 7, "capacity": 500}
 
 
@@ -149,7 +154,8 @@ def test_database_sizes_sum_the_wal_and_shared_memory_files(
             "memory": memory_db,
             "auth": auth_db,
             "settings": tmp_path / "settings.db",
+            "schedule": tmp_path / "schedule.db",
         }
     )
 
-    assert sizes == {"memory": 17, "auth": 3, "settings": 0}
+    assert sizes == {"memory": 17, "auth": 3, "settings": 0, "schedule": 0}

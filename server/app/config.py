@@ -4,6 +4,7 @@ import os
 from enum import StrEnum
 from pathlib import Path
 from typing import Mapping
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -19,6 +20,7 @@ from server.app.secrets import EnvSecretResolver, SecretResolver
 from server.core.ports import MissingSecretError
 from server.core.settings import (
     DEFAULT_RESTART_COMMAND,
+    DEFAULT_TIMEZONE,
     LOG_LEVELS,
     SETTINGS,
 )
@@ -74,6 +76,10 @@ DEFAULT_PLUGINS_STATE = "plugins.json"
 # chemin de la clé peut pointer vers un répertoire de credentials systemd.
 DEFAULT_SETTINGS_DB = "settings.db"
 DEFAULT_MASTER_KEY_FILE = "master.key"
+# Planificateur (ADR-0028) : base dédiée, à côté de la mémoire, de l'auth et des
+# réglages. Le fuseau est un nom IANA ; son défaut suit le processus (``TZ``,
+# puis le fuseau système), aligné avec le Réglage ``timezone``.
+DEFAULT_SCHEDULE_DB = "schedule.db"
 # Redémarrage automatique après application des Réglages (ADR-0025). Désactivé
 # par défaut : un serveur lancé à la main ne doit pas s'arrêter sans
 # superviseur. Activé, le processus sort proprement et son superviseur le
@@ -332,6 +338,38 @@ class SettingsConfig(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
+class ScheduleConfig(BaseModel):
+    """Fuseau d'interprétation et base dédiée du Planificateur (ADR-0028).
+
+    ``timezone`` est un nom IANA (``Europe/Paris``) : une règle quotidienne ou
+    hebdomadaire s'interprète dans ce fuseau, tandis que les instants sont
+    stockés en UTC. ``db_path`` est en lecture seule dans l'interface, comme
+    les autres chemins de base.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    timezone: str = Field(default=DEFAULT_TIMEZONE, min_length=1)
+    db_path: str = Field(default=DEFAULT_SCHEDULE_DB, min_length=1)
+
+    @field_validator("timezone", mode="before")
+    @classmethod
+    def _check_timezone(cls, value: object) -> object:
+        text = value.strip() if isinstance(value, str) else value
+        try:
+            ZoneInfo(str(text))
+        except (ZoneInfoNotFoundError, ValueError, TypeError):
+            raise ValueError(
+                "ATHENA_TIMEZONE must be an IANA timezone name"
+            ) from None
+        return text
+
+    @field_validator("db_path", mode="before")
+    @classmethod
+    def _strip_path(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
 class AppConfig(BaseModel):
     """Configuration validée au démarrage, injectée par constructeur."""
 
@@ -345,6 +383,7 @@ class AppConfig(BaseModel):
     auth: AuthConfig = Field(default_factory=AuthConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
     settings: SettingsConfig = Field(default_factory=SettingsConfig)
+    schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     log_level: LogLevel = LogLevel.INFO
     log_dir: str = Field(default=DEFAULT_LOG_DIR, min_length=1)
     debug_decisions: bool = False
@@ -415,6 +454,8 @@ SETTING_TARGETS: dict[str, tuple[str, str]] = {
     "auth_db": ("auth", "db_path"),
     "settings_db": ("settings", "db_path"),
     "master_key_file": ("settings", "master_key_file"),
+    "timezone": ("schedule", "timezone"),
+    "schedule_db": ("schedule", "db_path"),
     "plugins_dir": ("plugins", "directory"),
     "plugins_state": ("plugins", "state_path"),
     "embed_model": ("memory", "embed_model"),
@@ -509,6 +550,7 @@ def load_config(
         "auth": {},
         "plugins": {},
         "settings": {},
+        "schedule": {},
     }
     for field in SETTINGS:
         section, attribute = SETTING_TARGETS[field.key]

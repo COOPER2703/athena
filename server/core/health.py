@@ -24,7 +24,7 @@ from server.core.ports import TraceEntry
 _ERROR_LEVELS = frozenset({"error", "critical"})
 
 #: Ordre des bases publiées par le bandeau (les noms sont stables).
-DATABASE_NAMES = ("memory", "auth", "settings")
+DATABASE_NAMES = ("memory", "auth", "settings", "schedule")
 
 
 @dataclass(frozen=True, slots=True)

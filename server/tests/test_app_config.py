@@ -24,6 +24,7 @@ from server.app.config import (
     LogLevel,
     MemoryConfig,
     PluginsConfig,
+    ScheduleConfig,
     ServerConfig,
     SettingsConfig,
     WebhookConfig,
@@ -382,6 +383,46 @@ def test_plugin_paths_are_configurable_from_the_environment() -> None:
 
     assert cfg.plugins.directory == "var/plugins"
     assert cfg.plugins.state_path == "var/plugins.json"
+
+
+def test_schedule_defaults_are_a_dedicated_database_and_a_valid_timezone() -> None:
+    cfg = load_config(env={"GEMINI_API_KEY": "k"}, env_file=None)
+
+    assert cfg.schedule == ScheduleConfig()
+    assert cfg.schedule.db_path == "schedule.db"
+    assert cfg.schedule.db_path != cfg.memory.db_path
+    assert cfg.schedule.db_path != cfg.auth.db_path
+    assert cfg.schedule.db_path != cfg.settings.db_path
+    # Le défaut suit le fuseau du processus ; il doit toujours être chargeable.
+    assert cfg.schedule.timezone == cfg.schedule.timezone.strip()
+    assert cfg.schedule.timezone
+
+
+def test_schedule_reads_and_strips_its_environment() -> None:
+    cfg = load_config(
+        env={
+            "GEMINI_API_KEY": "k",
+            "ATHENA_SCHEDULE_DB": " var/schedule.db ",
+            "ATHENA_TIMEZONE": " Europe/Paris ",
+        },
+        env_file=None,
+    )
+
+    assert cfg.schedule.db_path == "var/schedule.db"
+    assert cfg.schedule.timezone == "Europe/Paris"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"ATHENA_SCHEDULE_DB": "   "},
+        {"ATHENA_TIMEZONE": "   "},
+        {"ATHENA_TIMEZONE": "Mars/Olympus"},
+    ],
+)
+def test_invalid_schedule_config_is_a_validation_error(overrides) -> None:
+    with pytest.raises(ValidationError):
+        load_config(env={"GEMINI_API_KEY": "k", **overrides}, env_file=None)
 
 
 def test_settings_paths_default_next_to_the_other_databases() -> None:
