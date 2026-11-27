@@ -43,7 +43,9 @@ API publique
     après un redémarrage. ``restart_on_apply``, ``restart_command`` et
     ``restart`` règlent l'application des Réglages : la callable injectée
     remplace la sortie du processus, pour qu'un test observe le redémarrage
-    sans tuer pytest. Le serveur est arrêté proprement à la sortie du bloc, et
+    sans tuer pytest. ``wall_clock`` fige l'horloge murale du contexte temporel
+    (date, heure locale, fuseau) sans attendre. Le serveur est arrêté
+    proprement à la sortie du bloc, et
     le logging racine est restauré.
 
 ``AthenaServer`` (ce que rend la fixture)
@@ -115,6 +117,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from datetime import datetime
 from typing import Any, AsyncIterator, Callable, Mapping
 
 import aiohttp
@@ -1287,6 +1290,7 @@ async def running_server(
     restart_on_apply: bool = False,
     restart_command: str = "docker restart athena",
     restart: Callable[[], None] | None = None,
+    wall_clock: Callable[[], datetime] | None = None,
 ) -> AsyncIterator[AthenaServer]:
     """Démarre le serveur complet sur des ports éphémères et l'arrête à la sortie.
 
@@ -1355,6 +1359,7 @@ async def running_server(
         auth_now=clock,
         monotonic=clock,
         restart=restart,
+        wall_clock=wall_clock,
     )
     runner = asyncio.create_task(app.run())
     server = AthenaServer(

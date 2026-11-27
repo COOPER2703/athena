@@ -174,6 +174,27 @@ def test_announcement_uses_the_system_prompt_plus_the_announce_instruction():
     assert "ANNONCE" in instruction
 
 
+def test_announcement_carries_the_current_time_context():
+    """L'Annonce est une Session comme une autre : elle reçoit l'heure locale."""
+    now_context = (
+        "[CONTEXTE TEMPOREL]\n"
+        "Nous sommes le jeudi 27 novembre 2026, il est 14:32:05 (Europe/Paris)."
+    )
+    coordinator = Coordinator(
+        system_prompt="SYSTÈME",
+        announce_prompt="ANNONCE",
+        judge=FakeJudge(),
+        now_context=lambda: now_context,
+    )
+    handle(coordinator, EventReceived(source="matrix", content="x"))
+
+    commands = close_window(coordinator)
+
+    assert opened(commands).instruction == (
+        "SYSTÈME\n\nANNONCE\n\n" + now_context
+    )
+
+
 def test_announcement_activates_the_memory_context_like_a_normal_session():
     """L'Annonce bénéficie de l'Activation : contexte mémoire injecté dans
     l'instruction et faits épinglés semés dans le dédoublonnage du Rappel."""

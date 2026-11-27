@@ -90,6 +90,10 @@ EVENT_MAX_CHARS = 4096
 TOUR_TIMEOUT = 30.0
 _MEMORY_HEADER = "[MÉMOIRE]"
 _EVENT_HEADER = "[ÉVÉNEMENTS]"
+#: En-tête de la section dynamique portant la date et l'heure locales. Le noyau
+#: ne compose pas l'heure lui-même : la racine lui injecte le texte rendu, et
+#: l'absence de couture laisse l'instruction strictement inchangée.
+NOW_CONTEXT_HEADER = "[CONTEXTE TEMPOREL]"
 # Un contenu externe ne doit jamais pouvoir forger l'en-tête du bloc de faits
 # ni en ouvrir un second : ses occurrences sont neutralisées dans le rendu
 # destiné au modèle (#81). Le Journal et le dédoublonnage du Rappel gardent,
@@ -138,6 +142,7 @@ class Coordinator:
         recall_k: int = 5,
         recall_window_turns: int = 3,
         recall_max_distance: float = 0.6,
+        now_context: Callable[[], str] | None = None,
         connected_clients: Callable[[], Sequence[str]] | None = None,
     ) -> None:
         self._memory = memory
@@ -153,6 +158,10 @@ class Coordinator:
         self._recall_k = recall_k
         self._recall_window_turns = recall_window_turns
         self._recall_max_distance = recall_max_distance
+        # Section dynamique date/heure locale : la racine fournit le texte
+        # rendu (noyau pur, aucun accès à l'horloge). Absente, la section
+        # disparaît complètement de l'instruction.
+        self._now_context = now_context
         self._state = SessionState.IDLE
         # Présence des Clients (ADR-0028, ticket #193) : couture injectée, sans
         # import d'adaptateur. ``None`` signifie « présence inconnue » et
@@ -646,6 +655,7 @@ class Coordinator:
             self._system_prompt,
             self._plugin_instruction(),
             self._announce_prompt,
+            self._now_context_section(),
             context,
         )
 
@@ -759,7 +769,10 @@ class Coordinator:
             await self._journal("user", event.text, origin="text")
 
         instruction = self._compose_instruction(
-            self._system_prompt, self._plugin_instruction(), context
+            self._system_prompt,
+            self._plugin_instruction(),
+            self._now_context_section(),
+            context,
         )
         commands.extend(
             self._open_live(
@@ -950,7 +963,10 @@ class Coordinator:
             )
         plugin_instruction = self._plugin_instruction()
         instruction = self._compose_instruction(
-            self._system_prompt, plugin_instruction, context
+            self._system_prompt,
+            plugin_instruction,
+            self._now_context_section(),
+            context,
         )
 
         commands.extend(
@@ -1024,12 +1040,24 @@ class Coordinator:
             return ""
         return self._plugins.instruction()
 
+    def _now_context_section(self) -> str:
+        """Section dynamique date/heure, vide sans couture injectée.
+
+        Le texte est rendu par la racine de composition : le noyau n'appelle
+        aucune horloge et aucune bibliothèque de fuseau. Une couture qui rend
+        une chaîne vide disparaît aussi, sans laisser de section fantôme.
+        """
+        if self._now_context is None:
+            return ""
+        return self._now_context().strip()
+
     @staticmethod
     def _compose_instruction(*sections: str) -> str:
         """Assemble l'instruction d'une Connexion Live, sections vides omises.
 
         Ordre fixé par l'appelant : prompt système → instructions de plugin →
-        instruction d'Annonce → contexte mémoire. Les sections non vides sont
+        instruction d'Annonce → contexte temporel → contexte mémoire. Les
+        sections non vides sont
         séparées par une ligne vide ; sans aucune section, l'instruction est la
         chaîne vide (jamais des sauts de ligne).
         """

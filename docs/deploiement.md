@@ -122,7 +122,7 @@ resterait active.
 | Variable | Requis | Valeur |
 | --- | --- | --- |
 | `GEMINI_API_KEY` | non | Clé de l'API Gemini. Absente, le serveur démarre en **Installation** : la clé se saisit dans la Console après création du Compte. Fournie ici, elle prime sur le magasin (porte de secours). |
-| `TZ` | recommandé | `Europe/Paris`. Détermine l'heure locale de la consolidation (`ATHENA_CONSOLIDATION_HOURS=0,12`) et l'horodatage des journaux. Défaut image : UTC. |
+| `TZ` | recommandé | `Europe/Paris`. Détermine le fuseau système, donc le défaut du Réglage `timezone` (`ATHENA_TIMEZONE`) : heure locale des prompts (section `[CONTEXTE TEMPOREL]`), interprétation des Planifications, consolidation (`ATHENA_CONSOLIDATION_HOURS=0,12`) et horodatage des journaux. Défaut image : UTC. |
 | `ATHENA_PLUGIN_<PLUGIN>_<SECRET>` | si le plugin est activé | Un secret déclaré par le manifeste du plugin. `<PLUGIN>` est le nom du plugin en majuscules, tout caractère non alphanumérique remplacé par `_` ; `<SECRET>` est la clé déclarée. Le `README.md` du plugin documente ses variables, leur obligation et sa configuration d'activation. |
 | `LOG_LEVEL` | non | `INFO` par défaut. |
 | `ATHENA_RESTART_ON_APPLY` | non | `1` : appliquer un Réglage depuis la Console fait sortir proprement le processus, que `--restart unless-stopped` relance. Défaut `0` : rien ne s'arrête, la Console affiche la commande à exécuter. |
@@ -355,7 +355,7 @@ problème de routage ou de bind.
 | `secrets_unreadable` dans `GET /api/session` | `master.key` absent du `/data` ou sauvegardé sans `settings.db` : re-saisir les Secrets dans la Console. |
 | `unable to open database file` | `/data` absent, ou propriétaire différent de `1000`. |
 | Le conteneur démarre mais se vide à chaque recréation | montages manquants (les répertoires créés dans l'Image sont éphémères). |
-| La consolidation ne se déclenche pas aux heures attendues | `TZ` non fourni : le conteneur est en UTC. |
+| La consolidation ne se déclenche pas aux heures attendues, ou les prompts annoncent une heure décalée | `TZ` non fourni : le conteneur est en UTC. Le Réglage `timezone` de la Console fixe le fuseau de l'instance (application au redémarrage) ; `TZ` n'en fournit que le défaut. |
 | Le conteneur écrit dans `/app` et échoue en lecture seule | une variable de chemin a été surchargée vers un chemin relatif. |
 
 ---
