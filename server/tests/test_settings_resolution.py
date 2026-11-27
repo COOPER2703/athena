@@ -17,6 +17,7 @@ from server.core.settings import (
     field_by_key,
     resolve_all,
     resolve_setting,
+    system_timezone_name,
 )
 
 
@@ -112,6 +113,43 @@ def test_every_field_exposes_its_environment_variable_and_default() -> None:
     assert len(fields) == len(SETTINGS)
     assert all(field.env for field in SETTINGS)
     assert all(field.default == fields[field.key].default for field in SETTINGS)
+
+
+def test_the_instance_timezone_defaults_to_the_system_zone() -> None:
+    timezone = _resolve("timezone")
+
+    assert timezone.value == system_timezone_name()
+    assert timezone.source is SettingSource.DEFAULT
+    assert timezone.read_only is False
+
+
+def test_the_instance_timezone_is_masked_by_the_environment() -> None:
+    timezone = _resolve(
+        "timezone",
+        process_env={"ATHENA_TIMEZONE": "Europe/Paris"},
+        store={"timezone": "America/New_York"},
+    )
+
+    assert timezone.value == "Europe/Paris"
+    assert timezone.source is SettingSource.ENV
+    assert timezone.read_only is True
+
+
+def test_the_schedule_database_is_a_read_only_path() -> None:
+    field = field_by_key("schedule_db")
+
+    assert field is not None
+    assert field.editable is False
+    assert field.env == "ATHENA_SCHEDULE_DB"
+    assert _resolve("schedule_db").read_only is True
+
+
+def test_system_timezone_name_is_a_resolvable_iana_name() -> None:
+    from zoneinfo import ZoneInfo
+
+    name = system_timezone_name()
+
+    assert ZoneInfo(name).key
 
 
 def test_resolve_all_returns_every_field_with_its_source() -> None:

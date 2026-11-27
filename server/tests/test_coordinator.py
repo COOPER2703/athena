@@ -363,6 +363,44 @@ def test_session_requested_without_any_context_has_empty_instruction():
     assert _opened(commands).instruction == ""
 
 
+NOW_CONTEXT = (
+    "[CONTEXTE TEMPOREL]\n"
+    "Nous sommes le jeudi 27 novembre 2026, il est 14:32:05 (Europe/Paris)."
+)
+
+
+def test_session_requested_carries_the_current_time_context():
+    coordinator = Coordinator(
+        system_prompt="SYSTÈME", now_context=lambda: NOW_CONTEXT
+    )
+
+    commands = asyncio.run(coordinator.handle(SessionRequested(client_id="c1")))
+
+    assert _opened(commands).instruction == "SYSTÈME\n\n" + NOW_CONTEXT
+
+
+def test_without_a_time_context_seam_the_section_is_absent():
+    coordinator = Coordinator(system_prompt="SYSTÈME")
+
+    commands = asyncio.run(coordinator.handle(SessionRequested(client_id="c1")))
+
+    assert _opened(commands).instruction == "SYSTÈME"
+
+
+def test_a_text_turn_carries_the_current_time_context():
+    from server.core.events import TourRequested
+
+    coordinator = Coordinator(
+        system_prompt="SYSTÈME", now_context=lambda: NOW_CONTEXT
+    )
+
+    commands = asyncio.run(
+        coordinator.handle(TourRequested(tour_id="t1", text="salut"))
+    )
+
+    assert _opened(commands).instruction == "SYSTÈME\n\n" + NOW_CONTEXT
+
+
 def test_activation_is_traced_with_a_context_summary():
     memory = FakeMemory(context="X" * 12)
     coordinator = Coordinator(memory=memory, user_id="alice", system_prompt="S")
