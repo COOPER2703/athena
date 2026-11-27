@@ -149,6 +149,12 @@ n'est réinitialisé en silence.
 - Précédence : **environnement du processus > magasin > `.env` > défauts**, avec la source
   de chaque champ (`server/core/settings.py`). L'environnement masque un champ en lecture
   seule ; les chemins des bases, des Plugins et des journaux sont en lecture seule.
+- `timezone` est un Réglage d'instance (nom IANA, `ATHENA_TIMEZONE`) : défaut = fuseau
+  système, modifiable dans la Console, en lecture seule quand l'environnement le masque.
+  Chaque instruction de Session, de Tour et d'Annonce porte une section
+  `[CONTEXTE TEMPOREL]` composée à l'ouverture (date, heure locale à la seconde, fuseau) ;
+  le prompt statique n'est pas modifié. La base des Planifications, `ATHENA_SCHEDULE_DB`
+  (`schedule.db`), est un chemin en lecture seule.
 - Sans clé Gemini, le serveur démarre en **Installation** : transport des Clients, Webhook
   et Gemini ne sont pas démarrés ; la Console, les Réglages et le Diagnostic répondent.
   `GEMINI_API_KEY` n'est plus obligatoire au démarrage.

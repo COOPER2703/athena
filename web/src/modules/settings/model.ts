@@ -80,7 +80,7 @@ const SECTIONS: ReadonlyArray<{
     id: "advanced",
     title: "Avancé",
     summary: "Seuils d'authentification, journalisation et chemins protégés.",
-    keys: [],
+    keys: ["timezone", "schedule_db"],
   },
 ];
 
@@ -173,6 +173,11 @@ const META: Readonly<Record<string, SettingMeta>> = {
   login_max_attempts: { label: "Tentatives avant blocage" },
   login_block_minutes: { label: "Durée du blocage (min)" },
   log_level: { label: "Niveau de journalisation" },
+  timezone: {
+    label: "Fuseau horaire de l'instance",
+    hint: "Nom IANA, par exemple Europe/Paris. Il donne l'heure locale des prompts et des Planifications.",
+  },
+  schedule_db: { label: "Base des Planifications" },
   memory_db: { label: "Base mémoire" },
   auth_db: { label: "Base d'authentification" },
   settings_db: { label: "Base des réglages" },
@@ -202,6 +207,8 @@ export function settingHint(field: SettingField): string {
       return boundsLabel(field);
     case "hours":
       return "Liste d'heures entre 0 et 23, séparées par des virgules.";
+    case "timezone":
+      return "Nom IANA, par exemple Europe/Paris.";
     case "string":
       return field.choices.length > 0
         ? `Valeurs possibles : ${field.choices.join(", ")}.`
@@ -365,6 +372,9 @@ export function canonicalValue(field: SettingField, raw: string): string {
       const hours = parseHours(value);
       return hours === null ? value : hours.join(",");
     }
+    case "timezone": {
+      return value;
+    }
     case "string": {
       if (field.choices.length > 0) {
         return matchChoice(field.choices, value) ?? value;
@@ -458,6 +468,22 @@ function isHostKey(key: string): boolean {
 }
 
 /**
+ * Miroir navigateur du contrôle IANA du serveur.
+ *
+ * `Intl` connaît la base de fuseaux de la plateforme ; une chaîne qui n'y
+ * résout pas serait de toute façon refusée par le serveur. Pas d'inventaire
+ * embarqué : la règle reste une seule, celle de la plateforme.
+ */
+function isValidTimezone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Valide le brouillon complet, en miroir du serveur.
  *
  * Rend un message français par champ fautif ; un objet vide signifie « prêt à
@@ -503,6 +529,14 @@ function validateField(field: SettingField, raw: string): string | null {
     return parseHours(value) === null
       ? "Attendu : une liste d'heures entre 0 et 23, séparées par des virgules."
       : null;
+  }
+  if (field.kind === "timezone") {
+    if (value === "") {
+      return "Un nom de fuseau IANA est attendu, par exemple Europe/Paris.";
+    }
+    return isValidTimezone(value)
+      ? null
+      : "Nom de fuseau IANA attendu, par exemple Europe/Paris.";
   }
   if (value === "") {
     return "Une valeur est attendue.";

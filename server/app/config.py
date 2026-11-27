@@ -4,7 +4,7 @@ import os
 from enum import StrEnum
 from pathlib import Path
 from typing import Mapping
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -20,9 +20,9 @@ from server.app.secrets import EnvSecretResolver, SecretResolver
 from server.core.ports import MissingSecretError
 from server.core.settings import (
     DEFAULT_RESTART_COMMAND,
-    DEFAULT_TIMEZONE,
     LOG_LEVELS,
     SETTINGS,
+    system_timezone_name,
 )
 
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-live-preview"
@@ -76,9 +76,8 @@ DEFAULT_PLUGINS_STATE = "plugins.json"
 # chemin de la clé peut pointer vers un répertoire de credentials systemd.
 DEFAULT_SETTINGS_DB = "settings.db"
 DEFAULT_MASTER_KEY_FILE = "master.key"
-# Planificateur (ADR-0028) : base dédiée, à côté de la mémoire, de l'auth et des
-# réglages. Le fuseau est un nom IANA ; son défaut suit le processus (``TZ``,
-# puis le fuseau système), aligné avec le Réglage ``timezone``.
+# Base des Planifications (ADR-0028) : dédiée, à côté de la mémoire et de
+# l'auth, sauvegardable indépendamment. Elle survit aux redémarrages.
 DEFAULT_SCHEDULE_DB = "schedule.db"
 # Redémarrage automatique après application des Réglages (ADR-0025). Désactivé
 # par défaut : un serveur lancé à la main ne doit pas s'arrêter sans
@@ -339,30 +338,32 @@ class SettingsConfig(BaseModel):
 
 
 class ScheduleConfig(BaseModel):
-    """Fuseau d'interprétation et base dédiée du Planificateur (ADR-0028).
+    """Fuseau de l'instance et base des Planifications (ADR-0028).
 
-    ``timezone`` est un nom IANA (``Europe/Paris``) : une règle quotidienne ou
-    hebdomadaire s'interprète dans ce fuseau, tandis que les instants sont
-    stockés en UTC. ``db_path`` est en lecture seule dans l'interface, comme
-    les autres chemins de base.
+    ``timezone`` est un nom IANA résolvable : il décide de l'heure locale
+    injectée dans les prompts comme de l'interprétation des règles quotidiennes
+    et hebdomadaires. Un nom inconnu fait échouer le démarrage en le nommant,
+    plutôt que de laisser le Planificateur calculer dans un fuseau deviné.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    timezone: str = Field(default=DEFAULT_TIMEZONE, min_length=1)
+    timezone: str = Field(default_factory=system_timezone_name)
     db_path: str = Field(default=DEFAULT_SCHEDULE_DB, min_length=1)
 
     @field_validator("timezone", mode="before")
     @classmethod
-    def _check_timezone(cls, value: object) -> object:
-        text = value.strip() if isinstance(value, str) else value
+    def _validate_timezone(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        name = value.strip()
         try:
-            ZoneInfo(str(text))
-        except (ZoneInfoNotFoundError, ValueError, TypeError):
+            ZoneInfo(name)
+        except (KeyError, ValueError, OSError) as error:
             raise ValueError(
-                "ATHENA_TIMEZONE must be an IANA timezone name"
-            ) from None
-        return text
+                f"Unknown IANA timezone for ATHENA_TIMEZONE: {name!r}"
+            ) from error
+        return name
 
     @field_validator("db_path", mode="before")
     @classmethod

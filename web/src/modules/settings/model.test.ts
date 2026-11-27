@@ -16,6 +16,7 @@ import {
   resetSetting,
   restartPlan,
   secretSummary,
+  settingHint,
   settingLabel,
   settingsPayload,
   settingsSections,
@@ -188,6 +189,38 @@ const MEMORY_DB: SettingField = {
   choices: [],
 };
 
+const TIMEZONE: SettingField = {
+  key: "timezone",
+  env: "ATHENA_TIMEZONE",
+  kind: "timezone",
+  value: "Europe/Paris",
+  defaultValue: "Europe/Paris",
+  source: "default",
+  editable: true,
+  readOnly: false,
+  pending: false,
+  pendingValue: null,
+  minimum: null,
+  maximum: null,
+  choices: [],
+};
+
+const SCHEDULE_DB: SettingField = {
+  key: "schedule_db",
+  env: "ATHENA_SCHEDULE_DB",
+  kind: "string",
+  value: "schedule.db",
+  defaultValue: "schedule.db",
+  source: "default",
+  editable: false,
+  readOnly: true,
+  pending: false,
+  pendingValue: null,
+  minimum: null,
+  maximum: null,
+  choices: [],
+};
+
 const FIELDS: readonly SettingField[] = [
   VOICE,
   CONSOLE_HOST,
@@ -199,6 +232,8 @@ const FIELDS: readonly SettingField[] = [
   RECALL_DISTANCE,
   CONSOLIDATION_HOURS,
   MEMORY_DB,
+  TIMEZONE,
+  SCHEDULE_DB,
   {
     ...VOICE,
     key: "futur_reglage",
@@ -267,7 +302,19 @@ describe("sections", () => {
       "server_port",
       "webhook_enabled",
     ]);
-    expect(keys.advanced).toEqual(["log_level", "memory_db", "futur_reglage"]);
+    expect(keys.advanced).toEqual([
+      "log_level",
+      "memory_db",
+      "timezone",
+      "schedule_db",
+      "futur_reglage",
+    ]);
+  });
+
+  it("nomme le fuseau de l'instance et sa base de Planifications", () => {
+    expect(settingLabel("timezone")).toBe("Fuseau horaire de l'instance");
+    expect(settingLabel("schedule_db")).toBe("Base des Planifications");
+    expect(settingHint(TIMEZONE)).toContain("Europe/Paris");
   });
 
   it("n'affiche pas une section vide", () => {
@@ -406,9 +453,23 @@ describe("validation", () => {
     });
   });
 
+  it("refuse un nom de fuseau IANA inconnu", () => {
+    expect(
+      validateSettings(FIELDS, { ...draft(), timezone: "Mars/Olympus" }),
+    ).toEqual({
+      timezone: "Nom de fuseau IANA attendu, par exemple Europe/Paris.",
+    });
+    expect(
+      validateSettings(FIELDS, { ...draft(), timezone: " Asia/Tokyo " }),
+    ).toEqual({});
+  });
+
   it("ignore les champs en lecture seule même si le brouillon les porte", () => {
     expect(
       validateSettings(FIELDS, { ...draft(), memory_db: "http://faux" }),
+    ).toEqual({});
+    expect(
+      validateSettings(FIELDS, { ...draft(), schedule_db: "http://faux" }),
     ).toEqual({});
   });
 });
@@ -423,6 +484,7 @@ describe("objet envoyé", () => {
       log_level: "info",
       consolidation_hours: "0, 12",
       memory_db: "ne-part-pas.db",
+      timezone: " Europe/Paris ",
     };
 
     const values = settingsPayload(FIELDS, draft);
@@ -436,10 +498,12 @@ describe("objet envoyé", () => {
       webhook_enabled: "0",
       recall_max_distance: "0.6",
       consolidation_hours: "0,12",
+      timezone: "Europe/Paris",
       futur_reglage: "Leda",
     });
     expect(values).not.toHaveProperty("console_host");
     expect(values).not.toHaveProperty("memory_db");
+    expect(values).not.toHaveProperty("schedule_db");
   });
 });
 

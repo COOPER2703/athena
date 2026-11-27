@@ -25,11 +25,11 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass, field as dc_field
-from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Mapping, Sequence
 from urllib.parse import urlsplit
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 # La clé Gemini est le seul Secret que l'Installation exige (ADR-0026). Les
 # Secrets de plugin suivent la même convention ``ATHENA_PLUGIN_…`` (ADR-0014),
@@ -48,51 +48,6 @@ LOG_LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 # Elle correspond au déploiement canonique (conteneur ``athena``) ; un
 # déploiement systemd la remplace par ``ATHENA_RESTART_COMMAND``.
 DEFAULT_RESTART_COMMAND = "docker restart athena"
-
-
-def system_timezone_name() -> str:
-    """Nom IANA du fuseau du processus, défaut du Réglage ``timezone``.
-
-    ``TZ`` d'abord (c'est lui que l'image et l'orchestrateur fournissent), puis
-    ``/etc/timezone`` et le lien ``/etc/localtime``, puis le nom rendu par
-    ``datetime``. On ne rend qu'un nom que ``zoneinfo`` sait charger ; à
-    défaut, ``UTC``. Cette lecture unique fixe un défaut de configuration :
-    elle ne participe pas au fonctionnement du noyau.
-    """
-    candidates: list[str] = []
-    env_zone = os.environ.get("TZ", "").strip()
-    if env_zone:
-        candidates.append(env_zone)
-    try:
-        with open("/etc/timezone", encoding="utf-8") as handle:
-            declared = handle.read().strip()
-        if declared:
-            candidates.append(declared)
-    except OSError:
-        pass
-    link = os.path.realpath("/etc/localtime")
-    marker = "/zoneinfo/"
-    if marker in link:
-        candidates.append(link.split(marker, 1)[1])
-    tz = datetime.now().astimezone().tzinfo
-    if tz is not None:
-        key = getattr(tz, "key", None)
-        if isinstance(key, str):
-            candidates.append(key)
-        name = tz.tzname(None)
-        if isinstance(name, str):
-            candidates.append(name)
-    for candidate in candidates:
-        try:
-            ZoneInfo(candidate)
-        except (ZoneInfoNotFoundError, ValueError):
-            continue
-        return candidate
-    return "UTC"
-
-
-#: Fuseau par défaut de l'instance, aligné entre le Réglage et ``ScheduleConfig``.
-DEFAULT_TIMEZONE = system_timezone_name()
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
@@ -114,8 +69,9 @@ class SettingField:
     """Un réglage déclaré : nom stable, variable d'environnement, défaut.
 
     ``kind`` borne le formulaire et la validation (``string``, ``int``,
-    ``float``, ``bool``, ``hours``) ; ``minimum``, ``maximum`` et ``choices``
-    sont exposés à l'interface pour qu'elle n'ait pas à redire les bornes.
+    ``float``, ``bool``, ``hours``, ``timezone``) ; ``minimum``, ``maximum``
+    et ``choices`` sont exposés à l'interface pour qu'elle n'ait pas à redire
+    les bornes.
     """
 
     key: str
@@ -222,6 +178,39 @@ class SettingsUpdate:
     removals: tuple[str, ...]
 
 
+def system_timezone_name() -> str:
+    """Nom IANA du fuseau de la machine, sans jamais lever.
+
+    Trois essais, du plus explicite au plus sûr : la variable ``TZ`` quand elle
+    nomme un fuseau résolvable, le lien ``/etc/localtime`` quand il pointe dans
+    ``/usr/share/zoneinfo``, puis ``UTC``. Le résultat est toujours un nom que
+    ``zoneinfo.ZoneInfo`` sait ouvrir : un fuseau illisible ne doit pas empêcher
+    le serveur de démarrer.
+    """
+    candidate = os.environ.get("TZ", "").strip()
+    if candidate and _resolvable_zone(candidate):
+        return candidate
+    try:
+        resolved = Path("/etc/localtime").resolve()
+        parts = resolved.parts
+        if "zoneinfo" in parts:
+            index = parts.index("zoneinfo")
+            candidate = "/".join(parts[index + 1 :])
+            if candidate and _resolvable_zone(candidate):
+                return candidate
+    except OSError:
+        pass
+    return "UTC"
+
+
+def _resolvable_zone(name: str) -> bool:
+    try:
+        ZoneInfo(name)
+    except (KeyError, ValueError, OSError):
+        return False
+    return True
+
+
 # Table déclarative des réglages. Les défauts reprennent ceux du chargeur de
 # configuration : c'est cette table que #174 expose derrière l'API, et
 # ``server/app/config.py`` la relit pour charger comme pour appliquer le
@@ -315,16 +304,17 @@ SETTINGS: tuple[SettingField, ...] = (
     SettingField(
         "login_block_minutes", "ATHENA_AUTH_LOGIN_BLOCK_MINUTES", "15", "int", minimum=1
     ),
-    # Planificateur (ADR-0028) : le fuseau interprète les règles quotidiennes et
-    # hebdomadaires ; la base dédiée est un chemin en lecture seule.
-    SettingField("timezone", "ATHENA_TIMEZONE", DEFAULT_TIMEZONE),
-    SettingField(
-        "schedule_db", "ATHENA_SCHEDULE_DB", "schedule.db", editable=False
-    ),
     # Observabilité
     SettingField("log_level", "LOG_LEVEL", "INFO", choices=LOG_LEVELS),
+    # Instance : le fuseau décide de l'heure locale des prompts et des règles
+    # du Planificateur ; la base des Planifications reste protégée comme les
+    # autres chemins.
+    SettingField(
+        "timezone", "ATHENA_TIMEZONE", system_timezone_name(), "timezone"
+    ),
     # Chemins en lecture seule : une valeur fausse est destructrice ou coupe
     # l'accès sans recours depuis l'interface.
+    SettingField("schedule_db", "ATHENA_SCHEDULE_DB", "schedule.db", editable=False),
     SettingField("memory_db", "ATHENA_MEMORY_DB", "athena_memory.db", editable=False),
     SettingField("auth_db", "ATHENA_AUTH_DB", "auth.db", editable=False),
     SettingField("settings_db", "ATHENA_SETTINGS_DB", "settings.db", editable=False),
@@ -463,6 +453,16 @@ def normalize_value(field: SettingField, raw: object) -> tuple[str | None, str |
                 "des virgules."
             )
         return ",".join(str(hour) for hour in hours), None
+    if field.kind == "timezone":
+        if not text:
+            return None, (
+                "Un nom de fuseau IANA est attendu, par exemple Europe/Paris."
+            )
+        if not _resolvable_zone(text):
+            return None, (
+                "Nom de fuseau IANA inconnu : attendu par exemple Europe/Paris."
+            )
+        return text, None
     if not text:
         return None, "Une valeur est attendue."
     if len(text) > _MAX_STRING_LENGTH:
