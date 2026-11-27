@@ -35,4 +35,6 @@ Les décisions du noyau et du système restent listées ici par leur fichier :
 - `0025-reglages-et-secrets.md` — réglages applicatifs et Secrets chiffrés.
 - `0026-installation-sans-code.md` — l'Installation au premier démarrage.
 - `0027-console-heberge-un-client-vocal.md` — le Client Console et la conversation vocale.
+- `0028-planificateur-evenements-planifies.md` — le Planificateur, ses Occurrences et l'Annonce
+  sans jugement.
 
