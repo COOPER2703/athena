@@ -5,7 +5,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable, Mapping, Protocol
+from typing import Awaitable, Callable, Mapping, Protocol, Sequence
 
 from server import __version__
 from server.adapters.auth import SqliteAuthStore
@@ -486,6 +486,27 @@ class _ConsoleClient:
     platform: str = CONSOLE_PLATFORM
 
 
+def connected_client_ids(
+    transport: Transport | None, console_client: _ConsoleClient | None
+) -> Sequence[str]:
+    """Identifiants des Clients **réellement** connectés, par ordre de préférence.
+
+    Les Clients du transport d'abord, dans leur ordre de connexion : ce sont les
+    auditeurs durables. Le Client Console éphémère vient ensuite et ne compte
+    que tant que sa surface accepte encore des trames — une conversation vocale
+    est une Session, donc un auditeur comme un autre une fois le noyau au
+    Repos. La fonction est un simple lecture, appelée à chaque Événement par le
+    noyau via une fermeture : l'activation à chaud (remplacement du transport)
+    et la mort du Client Console sont donc toujours vues à jour.
+    """
+    client_ids: list[str] = []
+    if transport is not None:
+        client_ids.extend(transport.clients)
+    if console_client is not None and console_client.surface.alive():
+        client_ids.append(console_client.client_id)
+    return client_ids
+
+
 class App:
     """Racine de composition : possède les adaptateurs et la boucle de propriété.
 
@@ -585,6 +606,13 @@ class App:
             recall_k=recall_k,
             recall_window_turns=recall_window_turns,
             recall_max_distance=recall_max_distance,
+            # Présence (ADR-0028, #193) : une **fermeture**, pas un instantané,
+            # pour que l'activation à chaud du transport et la naissance/mort du
+            # Client Console soient lues à chaque Événement. En production, la
+            # couture n'est jamais ``None``.
+            connected_clients=lambda: connected_client_ids(
+                self._transport, self._console_client
+            ),
         )
         self._events: asyncio.Queue[Event] = asyncio.Queue()
         # Activation à chaud de la fin d'Installation : une seule à la fois,

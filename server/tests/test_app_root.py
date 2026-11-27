@@ -5,6 +5,7 @@ import json
 import logging
 import socket
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable, TypeVar
 
 from protocol import SessionEndReason
@@ -20,6 +21,7 @@ from server.app.config import (
 from server.app.root import (
     App,
     build_app,
+    connected_client_ids,
     load_announce_prompt,
     load_judge_prompt,
     load_system_prompt,
@@ -38,6 +40,7 @@ from server.core.commands import (
 )
 from server.core.events import (
     ClientAudio,
+    ClientDisconnected,
     ClientRegistered,
     Event,
     LlmAudio,
@@ -98,6 +101,12 @@ class FakeAdapter:
         self.tool_results.append((connection_id, tool_id, name, result))
 
     async def feed(self, event: Event) -> None:
+        # Comme le vrai transport : les Clients branchés se lisent sur
+        # ``clients``, que la racine consulte pour la présence (ADR-0028).
+        if isinstance(event, ClientRegistered):
+            self.clients[event.client_id] = object()
+        elif isinstance(event, ClientDisconnected):
+            self.clients.pop(event.client_id, None)
         await self.events.put(event)
 
     def of_type(self, command_type: type[_CommandT]) -> list[_CommandT]:
@@ -588,6 +597,81 @@ def test_pushed_event_at_rest_judges_then_opens_an_announcement_connection() -> 
             assert announcement.connection_id == opened.connection_id
             assert announcement.text == "La porte est ouverte"
             assert clock.scheduled[-1] == (opened.connection_id, ANNOUNCE_TIMEOUT)
+
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+        finally:
+            if not runner.done():
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+class _ConsoleSurface:
+    """Surface du Client Console : seule ``alive`` est lue par la présence."""
+
+    def __init__(self, alive: bool = True) -> None:
+        self.alive_now = alive
+
+    def alive(self) -> bool:
+        return self.alive_now
+
+
+def test_connected_client_ids_lists_transport_clients_then_the_live_console_client():
+    transport = FakeAdapter()
+    transport.clients = {"desktop": object(), "phone": object()}
+    console = SimpleNamespace(
+        client_id="console", surface=_ConsoleSurface(alive=True)
+    )
+
+    # Ordre de préférence : Clients du transport (ordre de connexion) puis le
+    # Client Console éphémère, tant que sa surface vit.
+    assert list(connected_client_ids(transport, console)) == [
+        "desktop",
+        "phone",
+        "console",
+    ]
+    console.surface.alive_now = False
+    assert list(connected_client_ids(transport, console)) == ["desktop", "phone"]
+    assert list(connected_client_ids(None, None)) == []
+
+
+def test_pushed_event_without_a_client_waits_then_judges_on_the_first_registration() -> None:
+    """La couture de présence est injectée par ``App`` (donc par ``build_app``).
+
+    Sans Client connecté, aucune fenêtre ne s'arme et l'Événement patiente dans
+    la File, tracé ; le premier Client enregistré ouvre la fenêtre sans qu'un
+    nouvel Événement soit poussé.
+    """
+
+    async def scenario() -> None:
+        judge = FakeJudge(message="La porte est ouverte")
+        transport, gemini, clock, sink, app = _build(
+            announce_prompt="JUGE", judge=judge
+        )
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: transport.started)
+
+            app.push_event("matrix", "porte ouverte")
+            await wait_until(
+                lambda: any(entry.kind == "EventDeferred" for entry in sink.entries)
+            )
+            assert (EVENT_WINDOW_TIMER_ID, EVENT_WINDOW_TIMEOUT) not in clock.scheduled
+            assert not gemini.of_type(OpenLiveConnection)
+            assert judge.calls == []
+
+            await transport.feed(ClientRegistered(client_id="c1"))
+            await wait_until(
+                lambda: (EVENT_WINDOW_TIMER_ID, EVENT_WINDOW_TIMEOUT)
+                in clock.scheduled
+            )
+            assert judge.calls == []
+
+            await clock.fire(EVENT_WINDOW_TIMER_ID)
+            await wait_until(lambda: gemini.of_type(OpenLiveConnection))
+            assert judge.calls[-1] == ["[matrix] porte ouverte"]
 
             app.request_shutdown()
             await asyncio.wait_for(runner, 1.0)
