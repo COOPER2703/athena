@@ -4,8 +4,10 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping, Protocol
+from zoneinfo import ZoneInfo
 
 from server import __version__
 from server.adapters.auth import SqliteAuthStore
@@ -27,6 +29,7 @@ from server.adapters.plugins import PluginLoader
 from server.adapters.plugins.admin import PluginAdmin
 from server.adapters.plugins.catalogue import PluginCatalogue
 from server.adapters.plugins.state import PluginStateStore
+from server.adapters.schedule import SqliteScheduleStore
 from server.adapters.settings import LayeredSecretResolver, SqliteSettingsStore
 from server.adapters.trace import NullTraceSink, emit
 from server.adapters.transport import ClientConnection, WebSocketTransport
@@ -108,6 +111,7 @@ from server.core.ports import (
     TraceSink,
 )
 from server.core.session_tools import register_session_tools
+from server.core.schedule_tools import register_schedule_tools
 from server.core.settings import GEMINI_SECRET, SettingsView
 from server.core.tools import ToolRegistry
 
@@ -1349,6 +1353,13 @@ def build_app(
         journal_retention_days=config.memory.journal_retention_days,
     )
 
+    # Planificateur (ADR-0028) : base dédiée, derrière le port ``ScheduleStore``.
+    # Le store est construit même en Installation — les Planifications y
+    # persistent sans runtime — et sa connexion reste paresseuse.
+    schedule_store = SqliteScheduleStore(
+        db_path=config.schedule.db_path, trace_sink=trace_sink
+    )
+
     # Une seule fabrique construit les surfaces d'exécution : au démarrage
     # quand une clé existe déjà, et à la fin de l'Installation sinon (story 12).
     # Elle garde la configuration gelée et retient la clé réellement chargée.
@@ -1387,6 +1398,16 @@ def build_app(
     # Tool du noyau de fin de Session (#130) : enregistré avec les Tools du
     # noyau, donc avant les plugins. Une collision de nom reste fatale (ADR-0014).
     register_session_tools(plugins.tools)
+    # Planificateur (#194) : création et lecture seulement ; le réveil du pump
+    # sera injecté par #195 via ``on_change``. Les règles s'interprètent dans le
+    # fuseau du Réglage, déjà validé par la configuration.
+    schedule_zone = ZoneInfo(config.schedule.timezone)
+    register_schedule_tools(
+        plugins.tools,
+        schedule_store,
+        now=lambda: datetime.now(schedule_zone),
+        timezone=schedule_zone,
+    )
     plugin_loader = PluginLoader(
         directory=config.plugins.directory,
         state_path=config.plugins.state_path,
@@ -1524,6 +1545,7 @@ def build_app(
             "memory": config.memory.db_path,
             "auth": config.auth.db_path,
             "settings": config.settings.db_path,
+            "schedule": config.schedule.db_path,
         },
         trace_buffer=(
             console_trace_buffer.stats

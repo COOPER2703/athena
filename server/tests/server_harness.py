@@ -138,6 +138,7 @@ from server.app.config import (
     GeminiConfig,
     MemoryConfig,
     PluginsConfig,
+    ScheduleConfig,
     ServerConfig,
     SettingsConfig,
     WebhookConfig,
@@ -664,6 +665,7 @@ class ServerPaths:
     memory_db: Path
     auth_db: Path
     settings_db: Path
+    schedule_db: Path
     master_key: Path
     plugins_dir: Path
     plugins_state: Path
@@ -1173,6 +1175,7 @@ def _paths(root: Path, static_dir: Path | None) -> ServerPaths:
         memory_db=root / "memory.db",
         auth_db=root / "auth.db",
         settings_db=root / "settings.db",
+        schedule_db=root / "schedule.db",
         master_key=root / "master.key",
         plugins_dir=root / "plugins",
         plugins_state=root / "plugins.json",
@@ -1216,6 +1219,7 @@ def _config(
             db_path=str(paths.settings_db),
             master_key_file=str(paths.master_key),
         ),
+        schedule=ScheduleConfig(db_path=str(paths.schedule_db)),
         log_dir=str(paths.log_dir),
         log_level=_LOG_LEVEL,
         restart_on_apply=restart_on_apply,
