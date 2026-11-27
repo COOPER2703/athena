@@ -122,7 +122,7 @@ resterait active.
 | Variable | Requis | Valeur |
 | --- | --- | --- |
 | `GEMINI_API_KEY` | non | Clé de l'API Gemini. Absente, le serveur démarre en **Installation** : la clé se saisit dans la Console après création du Compte. Fournie ici, elle prime sur le magasin (porte de secours). |
-| `TZ` | recommandé | `Europe/Paris`. Détermine l'heure locale de la consolidation (`ATHENA_CONSOLIDATION_HOURS=0,12`) et l'horodatage des journaux. Défaut image : UTC. |
+| `TZ` | recommandé | `Europe/Paris`. Détermine l'heure locale de la consolidation (`ATHENA_CONSOLIDATION_HOURS=0,12`), l'horodatage des journaux et le fuseau par défaut du Planificateur (surchargeable par le Réglage `timezone` / `ATHENA_TIMEZONE`). Défaut image : UTC. |
 | `ATHENA_PLUGIN_<PLUGIN>_<SECRET>` | si le plugin est activé | Un secret déclaré par le manifeste du plugin. `<PLUGIN>` est le nom du plugin en majuscules, tout caractère non alphanumérique remplacé par `_` ; `<SECRET>` est la clé déclarée. Le `README.md` du plugin documente ses variables, leur obligation et sa configuration d'activation. |
 | `LOG_LEVEL` | non | `INFO` par défaut. |
 | `ATHENA_RESTART_ON_APPLY` | non | `1` : appliquer un Réglage depuis la Console fait sortir proprement le processus, que `--restart unless-stopped` relance. Défaut `0` : rien ne s'arrête, la Console affiche la commande à exécuter. |
@@ -153,6 +153,7 @@ dans un `env_file` versionné du dépôt.
 | `ATHENA_AUTH_DB` | `/data/auth.db` |
 | `ATHENA_MEMORY_DB` | `/data/athena_memory.db` |
 | `ATHENA_SETTINGS_DB` | `/data/settings.db` |
+| `ATHENA_SCHEDULE_DB` | `/data/schedule.db` |
 | `ATHENA_MASTER_KEY_FILE` | `/data/master.key` |
 | `ATHENA_LOG_DIR` | `/logs` |
 | `ATHENA_PLUGINS_STATE` | `/data/plugins.json` |
@@ -181,7 +182,7 @@ possible mais c'est alors une décision explicite, à documenter dans l'inventai
 
 | Chemin hôte | Chemin conteneur | Propriétaire | Contenu |
 | --- | --- | --- | --- |
-| `/srv/athena/data` | `/data` | `1000:1000`, `0750` | `auth.db`, `athena_memory.db`, `settings.db`, `master.key` (`0600`), `plugins.json` |
+| `/srv/athena/data` | `/data` | `1000:1000`, `0750` | `auth.db`, `athena_memory.db`, `settings.db`, `schedule.db`, `master.key` (`0600`), `plugins.json` |
 | `/srv/athena/logs` | `/logs` | `1000:1000`, `0750` | `server.log` + `.1`…`.3` (rotation 5 Mio) |
 
 Invariants :
@@ -226,6 +227,7 @@ Secrets illisibles (signalé par `secrets_unreadable`, sans réinitialisation si
 sqlite3 /srv/athena/data/auth.db ".backup '/backup/auth.db'"
 sqlite3 /srv/athena/data/athena_memory.db ".backup '/backup/athena_memory.db'"
 sqlite3 /srv/athena/data/settings.db ".backup '/backup/settings.db'"
+sqlite3 /srv/athena/data/schedule.db ".backup '/backup/schedule.db'"
 cp /srv/athena/data/master.key /backup/master.key
 chmod 600 /backup/master.key
 ```

@@ -99,12 +99,13 @@ export interface HealthInfo {
 }
 
 /** Noms des bases publiées, dans l'ordre du bandeau. */
-export const DATABASE_NAMES = ["memory", "auth", "settings"] as const;
+export const DATABASE_NAMES = ["memory", "auth", "settings", "schedule"] as const;
 
 export const DATABASE_LABELS: Readonly<Record<string, string>> = {
   memory: "Mémoire",
   auth: "Comptes",
   settings: "Réglages",
+  schedule: "Planifications",
 };
 
 /** Instantané complet, sans l'enveloppe versionnée `v`. */
@@ -172,7 +173,7 @@ export function emptySnapshot(): DiagnosticSnapshot {
       version: "",
       uptimeSeconds: null,
       lastConsolidation: null,
-      databases: { memory: 0, auth: 0, settings: 0 },
+      databases: { memory: 0, auth: 0, settings: 0, schedule: 0 },
       lastError: null,
       traceBuffer: null,
     },

@@ -110,6 +110,7 @@ describe("normalizeSnapshot", () => {
       memory: 1024,
       auth: 2048,
       settings: 0,
+      schedule: 0,
     });
     expect(snapshot.health.lastError).toEqual({
       timestamp: 1_700_000_123,
@@ -159,6 +160,7 @@ describe("normalizeSnapshot", () => {
       memory: 0,
       auth: 0,
       settings: 0,
+      schedule: 0,
     });
     expect(snapshot.health.lastConsolidation?.factsStored).toBe(0);
     expect(snapshot.health.traceBuffer).toEqual({ size: 0, capacity: 500 });
