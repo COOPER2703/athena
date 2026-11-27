@@ -4,8 +4,10 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping, Protocol
+from zoneinfo import ZoneInfo
 
 from server import __version__
 from server.adapters.auth import SqliteAuthStore
@@ -73,7 +75,7 @@ from server.core.commands import (
     StartIdleTimer,
     Trace,
 )
-from server.core.coordinator import Coordinator
+from server.core.coordinator import NOW_CONTEXT_HEADER, Coordinator
 from server.core.events import (
     ClientAudio,
     ClientDisconnected,
@@ -506,6 +508,7 @@ class App:
         user_id: str = "owner",
         system_prompt: str = "",
         announce_prompt: str = "",
+        now_context: Callable[[], str] | None = None,
         judge: EventJudge | None = None,
         tools: ToolRegistry | None = None,
         plugins: PluginRegistry | None = None,
@@ -585,6 +588,7 @@ class App:
             recall_k=recall_k,
             recall_window_turns=recall_window_turns,
             recall_max_distance=recall_max_distance,
+            now_context=now_context,
         )
         self._events: asyncio.Queue[Event] = asyncio.Queue()
         # Activation à chaud de la fin d'Installation : une seule à la fois,
@@ -1209,6 +1213,52 @@ class App:
             destination.busy(command.tour_id)
 
 
+#: Noms français sans dépendre de la locale du processus : un conteneur minimal
+#: n'installe pas forcément les locales, et le prompt doit rester stable.
+_FRENCH_WEEKDAYS = (
+    "lundi",
+    "mardi",
+    "mercredi",
+    "jeudi",
+    "vendredi",
+    "samedi",
+    "dimanche",
+)
+_FRENCH_MONTHS = (
+    "janvier",
+    "février",
+    "mars",
+    "avril",
+    "mai",
+    "juin",
+    "juillet",
+    "août",
+    "septembre",
+    "octobre",
+    "novembre",
+    "décembre",
+)
+
+
+def format_now_context(moment: datetime, timezone_name: str) -> str:
+    """Rend la section ``[CONTEXTE TEMPOREL]`` dans le fuseau de l'instance.
+
+    ``moment`` est un instant (naïf, il est lu comme UTC) ; la conversion vers
+    ``timezone_name`` suit les règles IANA, passage d'heure d'été compris. La
+    seconde est incluse : le modèle convertit « dans 10 min » sans deviner.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    local = moment.astimezone(ZoneInfo(timezone_name))
+    weekday = _FRENCH_WEEKDAYS[local.weekday()]
+    month = _FRENCH_MONTHS[local.month - 1]
+    return (
+        f"{NOW_CONTEXT_HEADER}\n"
+        f"Nous sommes le {weekday} {local.day} {month} {local.year}, "
+        f"il est {local:%H:%M:%S} ({timezone_name})."
+    )
+
+
 def build_app(
     config: AppConfig,
     *,
@@ -1222,6 +1272,7 @@ def build_app(
     embedder: Embedder | None = None,
     auth_now: Callable[[], float] | None = None,
     monotonic: Callable[[], float] | None = None,
+    wall_clock: Callable[[], datetime] | None = None,
     restart: Callable[[], None] | None = None,
 ) -> App:
     """Construit explicitement : config → trace → adaptateurs → Coordinator.
@@ -1242,7 +1293,8 @@ def build_app(
     (Console, auth, mémoire SQLite), et la configuration effective se remplace
     sans relancer le processus. ``restart`` remplace la sortie propre demandée
     par l'application des Réglages : le harnais observe le redémarrage sans
-    tuer pytest.
+    tuer pytest. ``wall_clock`` est l'horloge murale du contexte temporel
+    (défaut : ``datetime.now(UTC)``) : un test fige l'heure sans attendre.
     """
     # Magasin de réglages et de Secrets (ADR-0025) : base dédiée à côté de la
     # mémoire et de l'auth. Il précède le flux de traces — il porte
@@ -1484,6 +1536,19 @@ def build_app(
             plugin_admin=plugin_admin,
         )
 
+    # Contexte temporel : la racine rend la section à chaque ouverture de
+    # Session, Tour ou Annonce, dans le fuseau du Réglage. Le noyau ne reçoit
+    # qu'une callable, jamais une horloge ni ``zoneinfo`` (pureté du noyau).
+    wall_clock = (
+        wall_clock
+        if wall_clock is not None
+        else (lambda: datetime.now(timezone.utc))
+    )
+    timezone_name = config.schedule.timezone
+
+    def render_now_context() -> str:
+        return format_now_context(wall_clock(), timezone_name)
+
     app = App(
         transport=transport,
         gemini=gemini,
@@ -1493,6 +1558,7 @@ def build_app(
         user_id=config.memory.user_id,
         system_prompt=load_system_prompt(),
         announce_prompt=load_announce_prompt(),
+        now_context=render_now_context,
         judge=judge,
         tools=plugins.tools,
         plugins=plugins,
