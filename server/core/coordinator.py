@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from enum import StrEnum
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 from protocol import SessionEndReason
 
@@ -143,6 +143,7 @@ class Coordinator:
         recall_window_turns: int = 3,
         recall_max_distance: float = 0.6,
         now_context: Callable[[], str] | None = None,
+        connected_clients: Callable[[], Sequence[str]] | None = None,
     ) -> None:
         self._memory = memory
         self._user_id = user_id
@@ -162,6 +163,14 @@ class Coordinator:
         # disparaît complètement de l'instruction.
         self._now_context = now_context
         self._state = SessionState.IDLE
+        # Présence des Clients (ADR-0028, ticket #193) : couture injectée, sans
+        # import d'adaptateur. ``None`` signifie « présence inconnue » et
+        # conserve l'ancien comportement (fenêtre ouverte sans auditeur) : c'est
+        # un défaut de compatibilité pour les tests du noyau, jamais la règle de
+        # production — ``build_app`` injecte **toujours** une vraie lecture.
+        # Le callable rend les identifiants connectés, dans l'ordre de
+        # préférence (le premier reçoit une Annonce si l'enregistré a disparu).
+        self._connected_clients = connected_clients
         self._client_id = ""
         self._connection_id = ""
         self._session_id = ""
@@ -251,6 +260,58 @@ class Coordinator:
             return "session_busy"
         return ""
 
+    def _connected_client_ids(self) -> Sequence[str] | None:
+        """Identifiants des Clients connectés, ou ``None`` si la présence est inconnue.
+
+        ``None`` n'est rendu que par le défaut de test ; en production, la
+        racine de composition injecte toujours une lecture réelle (transport
+        plus Client Console éphémère).
+        """
+        if self._connected_clients is None:
+            return None
+        return self._connected_clients()
+
+    def _has_connected_client(self) -> bool:
+        """Vrai dès qu'un Client peut réellement recevoir une Annonce."""
+        client_ids = self._connected_client_ids()
+        return client_ids is None or bool(client_ids)
+
+    def _announcement_target(self) -> str:
+        """Client qui reçoit l'Annonce, vide si aucun Client n'est connecté.
+
+        Le dernier Client enregistré ne fait pas foi : il peut être périmé
+        après une déconnexion. On préfère l'enregistré s'il est **encore**
+        connecté, sinon le premier Client connecté (ordre de préférence de la
+        couture), sinon personne. Avec une présence inconnue (défaut de test),
+        on garde l'ancien comportement : l'enregistré, même sans vérification.
+        """
+        client_ids = self._connected_client_ids()
+        if client_ids is None:
+            return self._registered_client_id
+        for client_id in client_ids:
+            if client_id == self._registered_client_id:
+                return client_id
+        return client_ids[0] if client_ids else ""
+
+    def _defer_for_lack_of_client(self, count: int) -> list[Command]:
+        """Trace un report faute de Client, sans consommer la File.
+
+        Un seul nom de trace (``EventDeferred``) et une raison stable
+        (``no_client``) pour que le Diagnostic explique un délai, que le report
+        vienne de l'arrivée d'un Événement au Repos ou de l'échéance de la
+        fenêtre.
+        """
+        return [
+            self._trace(
+                "EventDeferred",
+                from_state=self._state,
+                to_state=self._state,
+                client_id=self._registered_client_id,
+                reason="no_client",
+                extra={"events": count},
+            )
+        ]
+
     async def handle(self, event: Event) -> list[Command]:
         commands = await self._dispatch(event)
         # Modèle unifié : dès que le noyau est au Repos avec des Événements en
@@ -331,6 +392,13 @@ class Coordinator:
                 extra={"source": event.source, "queued": len(self._event_queue)},
             )
         ]
+        # Au Repos sans Client, l'Événement patiente : la fenêtre ne s'ouvrira
+        # pas (``_open_window_if_needed``), et le report est tracé pour que le
+        # Diagnostic explique le délai (ADR-0028, story 25).
+        if self._state is SessionState.IDLE and not self._has_connected_client():
+            commands.extend(
+                self._defer_for_lack_of_client(len(self._event_queue))
+            )
         commands.extend(self._enforce_ceiling())
         return commands
 
@@ -415,11 +483,17 @@ class Coordinator:
         Paresseuse : armée par le premier Événement en attente, elle émet un
         ``StartIdleTimer`` sur la **clé réservée** et n'est pas relancée par les
         arrivées suivantes ; l'échéance juge le lot d'un bloc.
+
+        Sans Client connecté, elle ne s'ouvre pas : les Événements patientent
+        dans l'ordre d'arrivée (ADR-0028). Comme ``handle`` l'appelle après
+        **chaque** Événement, ``ClientRegistered`` rouvre la fenêtre sans
+        attendre un nouvel Événement.
         """
         if (
             self._state is not SessionState.IDLE
             or self._window_open
             or not self._event_queue
+            or not self._has_connected_client()
         ):
             return []
         self._window_open = True
@@ -540,13 +614,24 @@ class Coordinator:
         détailler l'Événement à la demande. La Connexion est marquée ``auto`` :
         son premier son devient une Session automatique annoncée au Client de
         référence.
+
+        La cible est un Client **réellement connecté** (ADR-0028) : si le
+        dernier enregistré a disparu, le premier connecté reçoit l'Annonce.
+        Quand la présence est connue et qu'aucun Client n'est connecté au
+        moment d'ouvrir, la Connexion n'est pas ouverte : le lot retourne en
+        tête de File, intact, et le report est tracé. Une présence inconnue
+        (défaut de test) garde l'ancien comportement.
         """
+        target = self._announcement_target()
+        if not target and self._connected_clients is not None:
+            self._event_queue = [*batch, *self._event_queue]
+            return self._defer_for_lack_of_client(len(batch))
         self._judged_batch = batch
         self._session_counter += 1
         self._connection_id = f"s{self._session_counter}"
         self._session_id = ""
         self._visible = False
-        self._client_id = self._registered_client_id
+        self._client_id = target
         self._auto = True
         self._judging = True
         self._state = SessionState.LIVE_CONNECTING
@@ -1350,12 +1435,20 @@ class Coordinator:
         Si le noyau a quitté le Repos entre-temps (l'utilisateur a pris la
         parole), la fenêtre se referme sans juger et la File reste intacte :
         elle sera rouverte au prochain Repos.
+
+        Si le dernier Client a disparu pendant que le minuteur courait, même
+        chose : la fenêtre se referme sans juger, la File reste intacte, et le
+        report est tracé. C'est le prochain ``ClientRegistered`` qui rouvrira
+        la fenêtre — aucun minuteur à annuler, donc aucune identité de timer
+        perdue (ADR-0028).
         """
         if not self._window_open:
             return self._decision("EventWindowFired")
         self._window_open = False
         if self._state is not SessionState.IDLE:
             return self._decision("EventWindowFired")
+        if not self._has_connected_client():
+            return self._defer_for_lack_of_client(len(self._event_queue))
         return await self._judge_batch()
 
     def _rearm_timer(self) -> StartIdleTimer:

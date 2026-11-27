@@ -165,6 +165,30 @@ n'est réinitialisé en silence.
   attend un redémarrage (`restart_required` vrai) : la Connexion Live garde celle chargée
   au démarrage, et la Conversation reste utilisable avec l'ancienne jusque-là.
 
+### Événements et Annonces
+
+Le **Canal d'événements** est unique (Webhook, plugins, Console, Planificateur) et la **File
+d'attente d'Événements** est bornée (`EVENT_QUEUE_MAX`, 120) : au-delà, les plus anciens sont
+jetés et chaque abandon est tracé (`EventQueueDropped`).
+
+Une **Annonce** — Session automatique ouverte pour prononcer un fait — n'est jamais adressée
+dans le vide. Règle unique, valable pour **toutes** les Annonces (pas seulement celles du
+Planificateur, ADR-0028) :
+
+- la fenêtre de jugement ne s'ouvre **pas** tant qu'aucun Client n'est réellement connecté ;
+  les Événements patientent dans la File, dans l'ordre d'arrivée ;
+- le premier Client enregistré rouvre la fenêtre sans attendre un nouvel Événement ;
+- si le dernier Client disparaît pendant que la fenêtre court, l'échéance ne juge pas : la
+  File reste intacte et le report est tracé (`EventDeferred`, raison `no_client`) ;
+- la cible d'une Annonce est un Client **connecté** : l'enregistré s'il l'est encore, sinon le
+  premier connecté — jamais un `client_id` périmé après une déconnexion.
+
+La présence se lit par une **couture injectée** dans le `Coordinator`
+(`connected_clients`), sans import d'adaptateur : la racine de composition y branche un
+callable qui rend les Clients du transport (ordre de connexion) puis le Client Console
+éphémère tant que sa surface vit. Une fermeture, pas un instantané : l'activation à chaud et
+la mort du Client Console sont vues à jour.
+
 ### Page locale de couplage
 
 Le daemon du Client desktop (`python -m client`) sert une page de couplage en boucle locale

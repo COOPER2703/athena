@@ -242,3 +242,26 @@ def visible_session(client_id: str = "c1") -> list:
         LlmOpened(),
         LlmAudio(data=b"hi"),
     ]
+
+
+class Presence:
+    """Présence simulée des Clients, injectée dans la couture du noyau.
+
+    Le noyau ne lit la présence que par ce callable (``connected_clients``) :
+    le test la fait varier entre deux Événements pour reproduire une
+    déconnexion ou une connexion, sans passer par un transport réel.
+    """
+
+    def __init__(self, *client_ids: str) -> None:
+        self._ids = list(client_ids)
+
+    def __call__(self) -> list[str]:
+        return list(self._ids)
+
+    def connect(self, client_id: str) -> None:
+        if client_id not in self._ids:
+            self._ids.append(client_id)
+
+    def disconnect(self, client_id: str) -> None:
+        if client_id in self._ids:
+            self._ids.remove(client_id)
