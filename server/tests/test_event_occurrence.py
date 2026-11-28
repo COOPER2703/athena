@@ -26,16 +26,20 @@ from server.core import (
     EVENT_MAX_CHARS,
     EVENT_QUEUE_MAX,
     PLANNED_REMINDER_TRIGGER,
+    ClientDisconnected,
     ClientRegistered,
     Coordinator,
     EventReceived,
     LlmAudio,
     LlmClosed,
+    LlmFailed,
+    LlmFailureCause,
     LlmOpened,
     OccurrenceDropReason,
     OccurrenceReceived,
     OpenLiveConnection,
     SendAnnouncementToLlm,
+    SessionRequested,
     SessionState,
     ShutdownRequested,
     StartIdleTimer,
@@ -397,3 +401,438 @@ def test_a_silenced_ordinary_event_never_enters_the_journal_of_a_mixed_lot():
     facts = [text for role, text in memory.turns if role == "event"]
     assert "[planificateur] sortir les poubelles" in facts
     assert "[matrix] porte" not in facts
+
+
+# ---------------------------------------------------------------------------
+# Abandon d'une Annonce avant visibilité (#198) : une Occurrence est un
+# engagement de l'utilisateur, jamais une perte silencieuse. Si la Connexion
+# d'Annonce échoue avant d'avoir parlé, le rappel retourne en tête de File et
+# l'Annonce suivante le journalise **une fois** — ni zéro, ni deux.
+# ---------------------------------------------------------------------------
+
+
+def test_an_occurrence_aborted_by_an_llm_failure_is_announced_later_once():
+    memory = FakeMemory()
+    coordinator = Coordinator(
+        memory=memory,
+        user_id="alice",
+        announce_prompt="JUGE",
+        judge=FakeJudge(),
+        connected_clients=lambda: ["c1"],
+    )
+    drive(
+        coordinator,
+        [
+            OccurrenceReceived(content="appeler le plombier", schedule_id="sch_1"),
+            window_timer(),
+            LlmOpened(),
+        ],
+    )
+
+    commands = handle(
+        coordinator, LlmFailed(cause=LlmFailureCause.ERROR, connection_id="s1")
+    )
+
+    assert coordinator.state is SessionState.IDLE
+    # L'Occurrence est intacte en File : la fenêtre se réarme pour la relancer.
+    assert StartIdleTimer in [type(command) for command in commands]
+    assert occurrence_drops(commands, OccurrenceDropReason.JUDGMENT_ABORTED) == []
+    assert memory.turns == []
+
+    # Une Annonce ultérieure la prononce, et le Journal la reçoit une fois.
+    announcement(close_window(coordinator))
+    drive(coordinator, [LlmOpened(), LlmAudio(data=b"rappel")])
+    assert coordinator.state is SessionState.SESSION_VISIBLE
+    assert memory.turns == [
+        ("event", "[planificateur] appeler le plombier"),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Lot mixte (#198) : un seul tour d'Annonce porte les deux faits, le juge ne
+# voit que l'Événement ordinaire, et le contenu planifié reste un fait — jamais
+# la phrase prononcée.
+# ---------------------------------------------------------------------------
+
+
+def test_a_mixed_lot_announces_one_turn_with_the_judge_phrase_then_the_trigger():
+    judge = FakeJudge(message="La porte est ouverte")
+    coordinator, judge, _presence = at_rest("c1", judge=judge)
+
+    drive(
+        coordinator,
+        [
+            EventReceived(source="matrix", content="porte"),
+            OccurrenceReceived(content="sortir les poubelles", schedule_id="sch_1"),
+        ],
+    )
+    commands = close_window(coordinator)
+
+    assert judge.calls == [["[matrix] porte"]]
+    assert len([c for c in commands if isinstance(c, OpenLiveConnection)]) == 1
+    command = announcement(commands)
+    # Exactement le message du juge, puis la consigne neutre de rappel.
+    assert command.text == f"La porte est ouverte\n\n{PLANNED_REMINDER_TRIGGER}"
+    # Le contenu planifié n'est jamais lu mot pour mot : c'est un fait.
+    assert "poubelles" not in command.text
+    assert command.facts.splitlines() == [
+        "[ÉVÉNEMENTS]",
+        "- [matrix] porte",
+        "- [planificateur] sortir les poubelles",
+    ]
+
+
+def test_the_failed_judgment_trace_is_scoped_to_the_ordinary_events():
+    judge = FakeJudge(failed=True)
+    coordinator, judge, _presence = at_rest("c1", judge=judge)
+
+    drive(
+        coordinator,
+        [
+            EventReceived(source="matrix", content="porte"),
+            EventReceived(source="door", content="colis"),
+            OccurrenceReceived(content="sortir les poubelles", schedule_id="sch_1"),
+        ],
+    )
+    commands = close_window(coordinator)
+
+    assert judge.calls == [["[matrix] porte", "[door] colis"]]
+    failed = [
+        trace for trace in traces(commands) if trace.kind == "EventJudgmentFailed"
+    ]
+    # Une seule trace, portant le compte des Événements ordinaires seulement.
+    assert len(failed) == 1
+    assert failed[0].payload["events"] == 2
+    command = announcement(commands)
+    assert command.text == PLANNED_REMINDER_TRIGGER
+    assert command.facts.splitlines() == [
+        "[ÉVÉNEMENTS]",
+        "- [planificateur] sortir les poubelles",
+    ]
+
+
+def test_an_occurrence_only_lot_never_consults_the_judge():
+    judge = FakeJudge(message="Phrase qui ne doit jamais servir")
+    coordinator, judge, _presence = at_rest("c1", judge=judge)
+
+    drive(
+        coordinator,
+        [
+            OccurrenceReceived(content="appeler le plombier", schedule_id="sch_1"),
+            OccurrenceReceived(content="point hebdo", schedule_id="sch_2"),
+        ],
+    )
+    commands = close_window(coordinator)
+
+    assert judge.calls == []
+    assert announcement(commands).text == PLANNED_REMINDER_TRIGGER
+
+
+def test_the_journal_receives_each_announced_fact_once_in_arrival_order():
+    memory = FakeMemory()
+    coordinator = Coordinator(
+        memory=memory,
+        user_id="alice",
+        announce_prompt="JUGE",
+        judge=FakeJudge(message="La porte est ouverte"),
+        connected_clients=lambda: ["c1"],
+    )
+    drive(
+        coordinator,
+        [
+            EventReceived(source="matrix", content="porte"),
+            OccurrenceReceived(content="sortir les poubelles", schedule_id="sch_1"),
+            OccurrenceReceived(content="appeler le plombier", schedule_id="sch_2"),
+            window_timer(),
+            LlmOpened(),
+            LlmAudio(data=b"rappel"),
+        ],
+    )
+
+    assert memory.turns == [
+        ("event", "[matrix] porte"),
+        ("event", "[planificateur] sortir les poubelles"),
+        ("event", "[planificateur] appeler le plombier"),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# File d'attente (#198) : l'ordre d'arrivée et le dédoublonnage restent ceux
+# des Événements ordinaires. Les Occurrences ne sont jamais dédupliquées, même
+# identiques ou identiques au contenu d'un Événement.
+# ---------------------------------------------------------------------------
+
+
+def test_an_ordinary_duplicate_collapses_around_occurrences():
+    judge = FakeJudge(message="La porte est ouverte")
+    coordinator, judge, _presence = at_rest("c1", judge=judge)
+
+    commands = drive(
+        coordinator,
+        [
+            OccurrenceReceived(content="sortir les poubelles", schedule_id="sch_1"),
+            EventReceived(source="matrix", content="porte"),
+            EventReceived(source="matrix", content="porte"),
+            OccurrenceReceived(content="appeler le plombier", schedule_id="sch_2"),
+        ],
+    )
+    duplicates = [
+        trace
+        for trace in traces(commands)
+        if trace.kind == "EventQueueDropped"
+        and trace.payload.get("reason") == "duplicate"
+    ]
+    assert len(duplicates) == 1
+
+    commands = close_window(coordinator)
+
+    # Le juge ne voit que l'unique Événement ordinaire, dans le lot complet.
+    assert judge.calls == [["[matrix] porte"]]
+    assert announcement(commands).facts.splitlines() == [
+        "[ÉVÉNEMENTS]",
+        "- [planificateur] sortir les poubelles",
+        "- [matrix] porte",
+        "- [planificateur] appeler le plombier",
+    ]
+
+
+def test_an_occurrence_and_an_ordinary_event_with_the_same_content_are_both_kept():
+    judge = FakeJudge(message="La porte est ouverte")
+    coordinator, judge, _presence = at_rest("c1", judge=judge)
+
+    drive(
+        coordinator,
+        [
+            OccurrenceReceived(content="porte", schedule_id="sch_1"),
+            EventReceived(source="matrix", content="porte"),
+        ],
+    )
+    commands = close_window(coordinator)
+
+    assert judge.calls == [["[matrix] porte"]]
+    assert announcement(commands).facts.splitlines() == [
+        "[ÉVÉNEMENTS]",
+        "- [planificateur] porte",
+        "- [matrix] porte",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Préemption d'une Annonce (#198) : l'utilisateur gagne, le lot revient intact
+# devant la File, et il n'est journalisé qu'une fois — à l'Annonce qui parle.
+# ---------------------------------------------------------------------------
+
+
+def test_a_mixed_lot_preempted_by_a_user_session_is_announced_and_journaled_once():
+    memory = FakeMemory()
+    judge = FakeJudge(message="La porte est ouverte")
+    coordinator = Coordinator(
+        memory=memory,
+        user_id="alice",
+        announce_prompt="JUGE",
+        judge=judge,
+        connected_clients=lambda: ["c1"],
+    )
+    drive(
+        coordinator,
+        [
+            EventReceived(source="matrix", content="porte"),
+            OccurrenceReceived(content="sortir les poubelles", schedule_id="sch_1"),
+            window_timer(),
+            LlmOpened(),
+        ],
+    )
+
+    commands = handle(coordinator, SessionRequested(client_id="c2"))
+
+    # Le lot préempté n'est pas perdu : aucun fait abandonné, journal vide.
+    assert occurrence_drops(commands, OccurrenceDropReason.JUDGMENT_ABORTED) == []
+    assert [
+        trace
+        for trace in traces(commands)
+        if trace.kind == "EventQueueDropped"
+        and trace.payload.get("reason") == "judgment_aborted"
+    ] == []
+    assert memory.turns == []
+
+    # L'utilisateur tient sa Session, puis la rend : la File ré-annonce.
+    session = coordinator.connection_id
+    drive(coordinator, [LlmOpened(), LlmAudio(data=b"bonjour")])
+    assert coordinator.state is SessionState.SESSION_VISIBLE
+    handle(coordinator, LlmClosed(connection_id=session))
+    commands = close_window(coordinator)
+
+    # Le juge revoit l'Événement ordinaire, l'Occurrence reste dans le lot.
+    assert judge.calls == [["[matrix] porte"], ["[matrix] porte"]]
+    assert announcement(commands).text == (
+        f"La porte est ouverte\n\n{PLANNED_REMINDER_TRIGGER}"
+    )
+
+    drive(coordinator, [LlmOpened(), LlmAudio(data=b"rappel")])
+    assert memory.turns == [
+        ("event", "[matrix] porte"),
+        ("event", "[planificateur] sortir les poubelles"),
+    ]
+
+
+def test_a_mixed_lot_lost_to_an_llm_failure_keeps_only_the_occurrence():
+    memory = FakeMemory()
+    judge = FakeJudge(message="La porte est ouverte")
+    coordinator = Coordinator(
+        memory=memory,
+        user_id="alice",
+        announce_prompt="JUGE",
+        judge=judge,
+        connected_clients=lambda: ["c1"],
+    )
+    drive(
+        coordinator,
+        [
+            EventReceived(source="matrix", content="porte"),
+            OccurrenceReceived(content="sortir les poubelles", schedule_id="sch_1"),
+            window_timer(),
+            LlmOpened(),
+        ],
+    )
+
+    commands = handle(
+        coordinator, LlmFailed(cause=LlmFailureCause.ERROR, connection_id="s1")
+    )
+
+    # L'Événement ordinaire suit la politique existante (perdu, tracé) ;
+    # l'Occurrence est reportée, pas abandonnée.
+    assert [
+        trace
+        for trace in traces(commands)
+        if trace.kind == "EventQueueDropped"
+        and trace.payload.get("reason") == "judgment_aborted"
+    ]
+    deferred = [
+        trace
+        for trace in traces(commands)
+        if trace.kind == "OccurrenceDeferred"
+        and trace.payload.get("reason") == "announcement_aborted"
+    ]
+    assert [trace.payload["schedule_id"] for trace in deferred] == ["sch_1"]
+
+    # La relance ne porte que l'Occurrence : le juge n'est plus consulté.
+    calls_before = list(judge.calls)
+    commands = close_window(coordinator)
+    assert judge.calls == calls_before
+    command = announcement(commands)
+    assert command.text == PLANNED_REMINDER_TRIGGER
+    assert command.facts.splitlines() == [
+        "[ÉVÉNEMENTS]",
+        "- [planificateur] sortir les poubelles",
+    ]
+
+    drive(coordinator, [LlmOpened(), LlmAudio(data=b"rappel")])
+    assert memory.turns == [("event", "[planificateur] sortir les poubelles")]
+
+
+def test_a_silent_announcement_timeout_does_not_retry_the_occurrence():
+    coordinator, _judge, _presence = at_rest("c1")
+    drive(
+        coordinator,
+        [
+            OccurrenceReceived(content="appeler le plombier", schedule_id="sch_1"),
+            window_timer(),
+            LlmOpened(),
+        ],
+    )
+
+    commands = handle(coordinator, TimerFired(connection_id="s1"))
+
+    # ADR-0028 : une Annonce silencieuse est tracée une fois, sans relance.
+    assert [t.kind for t in traces(commands)].count("AnnouncementSilent") == 1
+    assert [t.kind for t in traces(commands)].count("OccurrenceDeferred") == 0
+    assert len(occurrence_drops(commands, OccurrenceDropReason.JUDGMENT_ABORTED)) == 1
+    assert StartIdleTimer not in [type(command) for command in commands]
+
+
+def test_a_mixed_lot_without_any_judge_announces_the_occurrence_only():
+    coordinator, _judge, _presence = at_rest("c1")
+
+    drive(
+        coordinator,
+        [
+            EventReceived(source="matrix", content="porte"),
+            OccurrenceReceived(content="sortir les poubelles", schedule_id="sch_1"),
+        ],
+    )
+    commands = close_window(coordinator)
+
+    failed = [
+        trace for trace in traces(commands) if trace.kind == "EventJudgmentFailed"
+    ]
+    assert len(failed) == 1
+    assert failed[0].payload["events"] == 1
+    command = announcement(commands)
+    assert command.text == PLANNED_REMINDER_TRIGGER
+    assert command.facts.splitlines() == [
+        "[ÉVÉNEMENTS]",
+        "- [planificateur] sortir les poubelles",
+    ]
+
+
+def test_a_failed_verdict_never_journals_the_silenced_ordinary_event():
+    memory = FakeMemory()
+    coordinator = Coordinator(
+        memory=memory,
+        user_id="alice",
+        announce_prompt="JUGE",
+        judge=FakeJudge(failed=True),
+        connected_clients=lambda: ["c1"],
+    )
+    drive(
+        coordinator,
+        [
+            EventReceived(source="matrix", content="porte"),
+            OccurrenceReceived(content="sortir les poubelles", schedule_id="sch_1"),
+            window_timer(),
+            LlmOpened(),
+            LlmAudio(data=b"rappel"),
+        ],
+    )
+
+    assert memory.turns == [
+        ("event", "[planificateur] sortir les poubelles"),
+    ]
+
+
+def test_an_occurrence_aborted_by_the_client_leaving_waits_for_the_next_one():
+    memory = FakeMemory()
+    presence = Presence("c1")
+    coordinator = Coordinator(
+        memory=memory,
+        user_id="alice",
+        announce_prompt="JUGE",
+        judge=FakeJudge(),
+        connected_clients=presence,
+    )
+    drive(
+        coordinator,
+        [
+            OccurrenceReceived(content="appeler le plombier", schedule_id="sch_1"),
+            window_timer(),
+            LlmOpened(),
+        ],
+    )
+
+    presence.disconnect("c1")
+    commands = handle(coordinator, ClientDisconnected(client_id="c1"))
+
+    # Le rappel n'est pas perdu ; sans auditeur, aucune fenêtre ne se réarme.
+    assert occurrence_drops(commands, OccurrenceDropReason.JUDGMENT_ABORTED) == []
+    assert StartIdleTimer not in [type(command) for command in commands]
+    assert coordinator.state is SessionState.IDLE
+
+    # Le prochain Client connecté reçoit le rappel, journalisé une fois.
+    presence.connect("c2")
+    commands = handle(coordinator, ClientRegistered(client_id="c2"))
+    assert StartIdleTimer in [type(command) for command in commands]
+    announcement(close_window(coordinator))
+    drive(coordinator, [LlmOpened(), LlmAudio(data=b"rappel")])
+    assert memory.turns == [
+        ("event", "[planificateur] appeler le plombier"),
+    ]

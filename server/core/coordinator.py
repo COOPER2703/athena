@@ -1770,10 +1770,46 @@ class Coordinator:
             )
         )
         self._state = SessionState.IDLE
-        # Un lot de jugement en vol n'a pas été Annoncé : sa perte est comptée
-        # un fait par une trace, sans quoi elle serait silencieuse (#40/#41).
-        # Le chemin d'annonce et la préemption l'ont déjà vidé.
-        for fact in self._judged_batch:
+        # Un lot de jugement en vol n'a pas été Annoncé. Les Événements
+        # ordinaires sont perdus et comptés un fait par une trace, sans quoi la
+        # perte serait silencieuse (#40/#41). Une **Occurrence**, elle, est un
+        # engagement de l'utilisateur : si l'Annonce n'est jamais devenue
+        # visible, le rappel retourne **intact en tête de File** et sera porté
+        # par la prochaine Annonce (#198). Deux fins font exception : le
+        # silence du modèle (`TIMEOUT`, « sans relance » — ADR-0028) et l'arrêt
+        # (`SHUTDOWN`, où la File est de toute façon jetée et tracée).
+        # Le chemin d'annonce et la préemption ont déjà vidé le lot.
+        aborted = self._judged_batch
+        occurrences = [
+            fact for fact in aborted if isinstance(fact, OccurrenceReceived)
+        ]
+        ordinary = [
+            fact for fact in aborted if isinstance(fact, EventReceived)
+        ]
+        if occurrences and not was_visible and reason not in (
+            SessionEndReason.TIMEOUT,
+            SessionEndReason.SHUTDOWN,
+        ):
+            self._event_queue = [*occurrences, *self._event_queue]
+            for fact in occurrences:
+                commands.append(
+                    self._trace(
+                        "OccurrenceDeferred",
+                        from_state=self._state,
+                        to_state=self._state,
+                        client_id=old_client_id,
+                        reason="announcement_aborted",
+                        cause=reason.name,
+                        extra={"schedule_id": fact.schedule_id},
+                    )
+                )
+            commands.extend(self._enforce_ceiling())
+        else:
+            for fact in occurrences:
+                commands.append(
+                    self._drop_trace(fact, EventDropReason.JUDGMENT_ABORTED)
+                )
+        for fact in ordinary:
             commands.append(
                 self._drop_trace(fact, EventDropReason.JUDGMENT_ABORTED)
             )

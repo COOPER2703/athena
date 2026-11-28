@@ -272,11 +272,22 @@ d'événements sous forme d'**Occurrences**. Son pump démarre et s'arrête avec
   ouvre l'Annonce **sans appeler le juge** : dans un lot mixte, le juge ne voit que les
   Événements ordinaires et un seul tour porte l'ensemble. Le contenu part comme fait sous
   `[ÉVÉNEMENTS]` ; il n'est jamais la phrase lue, et reste une donnée non fiable.
-- Une Annonce qui se termine avant d'être devenue visible est tracée `AnnouncementSilent`,
-  une seule fois, sans relance, et n'entre pas au Journal (rôle `event` seulement une fois
-  annoncée, donc exclue de la Consolidation). Traces : `ScheduleCreated`,
+- Un lot mixte ne produit qu'**une** Annonce : le juge ne reçoit que les Événements
+  ordinaires (`EventJudgmentFailed` les compte seuls), une Occurrence seule ne l'appelle
+  jamais, et un verdict `announce=false`, absent, en panne ou malformé ne la retire pas du
+  lot. Les faits annoncés suivent l'ordre d'arrivée, le dédoublonnage reste celui des
+  Événements ordinaires (une Occurrence n'est jamais dédupliquée, même identique à un
+  Événement) et le Journal reçoit **une fois** chaque fait annoncé, en rôle `event`.
+- Une Occurrence dont l'Annonce est interrompue **avant** de devenir visible (préemption,
+  panne du modèle, Client parti) retourne intacte en tête de File (`OccurrenceDeferred`,
+  raison `announcement_aborted`) et la prochaine Annonce la journalise une fois ; le silence
+  du modèle (`TIMEOUT`) et l'arrêt gardent la règle « sans relance » (`OccurrenceDropped`,
+  `judgment_aborted`). Une Annonce qui se termine avant d'être devenue visible est tracée
+  `AnnouncementSilent`, une seule fois, et n'entre pas au Journal (rôle `event` seulement
+  une fois annoncée, donc exclue de la Consolidation). Traces : `ScheduleCreated`,
   `OccurrenceEmitted`, `OccurrenceSkipped` (récurrente manquée au démarrage, avancée sans
-  rafale), `OccurrenceDeferred`, `OccurrenceDropped` (`too_large`, `capacity`, `shutdown`).
+  rafale), `OccurrenceDeferred`, `OccurrenceDropped` (`too_large`, `capacity`, `shutdown`,
+  `judgment_aborted`).
 
 
 - `ATHENA_SCHEDULE_DB` : `schedule.db` par défaut (chemin en lecture seule dans les
