@@ -641,7 +641,9 @@ def test_pushed_event_at_rest_judges_then_opens_an_announcement_connection() -> 
 
             await wait_until(lambda: gemini.of_type(OpenLiveConnection))
             opened = gemini.of_type(OpenLiveConnection)[0]
-            assert opened.instruction == "JUGE"
+            # La Session d'Annonce est une Session comme une autre : prompt
+            # d'Annonce puis contexte temporel.
+            assert opened.instruction.startswith("JUGE\n\n[CONTEXTE TEMPOREL]\n")
             assert opened.tools == ()
             # Le jugement est **texte** : les faits étiquetés arrivent au juge,
             # et seule la Connexion d'Annonce ouvre pour faire parler le verdict.

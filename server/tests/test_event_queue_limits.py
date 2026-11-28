@@ -10,7 +10,7 @@ transmis au juge**, pas un lot envoyé à la Connexion Live.
 
 from __future__ import annotations
 
-from harness import close_window, drive, handle, traces, visible_session, window_timer
+from harness import Presence, close_window, drive, handle, traces, visible_session, window_timer
 from testkit import FakeJudge
 from server.core import (
     EVENT_MAX_CHARS,
@@ -40,7 +40,14 @@ def drops(commands, reason):
 def at_rest(*, announce: bool = False) -> tuple[Coordinator, FakeJudge]:
     """Noyau au Repos avec un juge de test ; renvoie ``(noyau, juge)``."""
     judge = FakeJudge(announce=announce)
-    return Coordinator(announce_prompt="JUGE", judge=judge), judge
+    return (
+        Coordinator(
+            announce_prompt="JUGE",
+            judge=judge,
+            connected_clients=Presence("c1"),
+        ),
+        judge,
+    )
 
 
 def test_the_queue_is_capped_at_120_and_drops_the_oldest_each_time():

@@ -34,6 +34,12 @@ from server.core import (
 )
 
 
+NOW_CONTEXT = (
+    "[CONTEXTE TEMPOREL]\n"
+    "Nous sommes le jeudi 27 novembre 2026, il est 14:32:05 (Europe/Paris)."
+)
+
+
 def live_session(client_id="c1", speaking=True):
     events = [SessionRequested(client_id=client_id), LlmOpened()]
     if speaking:
@@ -42,11 +48,11 @@ def live_session(client_id="c1", speaking=True):
 
 
 def test_timer_is_armed_when_session_requested_even_before_any_speech():
-    coordinator = Coordinator()
+    coordinator = Coordinator(now_context=lambda: NOW_CONTEXT)
     commands = handle(coordinator, SessionRequested(client_id="c1"))
 
     assert effects(commands) == [
-        OpenLiveConnection(connection_id="s1"),
+        OpenLiveConnection(connection_id="s1", instruction=NOW_CONTEXT),
         StartIdleTimer(connection_id="s1", timeout=IDLE_TIMEOUT),
     ]
 
@@ -138,7 +144,7 @@ def test_barge_in_keeps_session_visible_without_ending_it():
 
 
 def test_second_session_request_replaces_the_first_before_opening_a_new_one():
-    coordinator = Coordinator()
+    coordinator = Coordinator(now_context=lambda: NOW_CONTEXT)
     drive(coordinator, live_session(client_id="c1"))
 
     commands = handle(coordinator, SessionRequested(client_id="c2"))
@@ -148,12 +154,14 @@ def test_second_session_request_replaces_the_first_before_opening_a_new_one():
         CancelIdleTimer(connection_id="s1"),
         CloseLiveConnection(connection_id="s1"),
         AnnounceSessionEnded(client_id="c1", reason=SessionEndReason.REPLACED),
-        OpenLiveConnection(connection_id="s2"),
+        OpenLiveConnection(connection_id="s2", instruction=NOW_CONTEXT),
         StartIdleTimer(connection_id="s2", timeout=IDLE_TIMEOUT),
     ]
     assert eff.index(
         AnnounceSessionEnded(client_id="c1", reason=SessionEndReason.REPLACED)
-    ) < eff.index(OpenLiveConnection(connection_id="s2"))
+    ) < eff.index(
+        OpenLiveConnection(connection_id="s2", instruction=NOW_CONTEXT)
+    )
     assert coordinator.connection_id == "s2"
     assert coordinator.state is SessionState.LIVE_CONNECTING
 
@@ -170,7 +178,7 @@ def test_replacement_trace_records_state_before_teardown():
 
 
 def test_replacing_a_never_visible_connection_announces_no_session():
-    coordinator = Coordinator()
+    coordinator = Coordinator(now_context=lambda: NOW_CONTEXT)
     drive(coordinator, [SessionRequested(client_id="c1"), LlmOpened()])
 
     commands = handle(coordinator, SessionRequested(client_id="c2"))
@@ -178,7 +186,7 @@ def test_replacing_a_never_visible_connection_announces_no_session():
     eff = effects(commands)
     assert AnnounceSessionEnded not in [type(command) for command in eff]
     assert AnnounceSessionStarted not in [type(command) for command in eff]
-    assert OpenLiveConnection(connection_id="s2") in eff
+    assert OpenLiveConnection(connection_id="s2", instruction=NOW_CONTEXT) in eff
 
 
 def test_replacement_never_leaves_two_live_connections():

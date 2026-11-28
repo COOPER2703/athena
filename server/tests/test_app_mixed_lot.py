@@ -18,7 +18,7 @@ from testkit import FakeJudge
 from protocol import Audio
 from server.core import (
     EVENT_WINDOW_TIMEOUT,
-    PLANNED_REMINDER_TRIGGER,
+    OCCURRENCE_TRIGGER,
     OccurrenceReceived,
 )
 from server_harness import running_server
@@ -65,7 +65,7 @@ def test_a_mixed_lot_produces_a_single_announcement_with_both_facts(
                     text = prompts[-1]
                     facts = "\n".join(prompts[:-1])
                     assert text == (
-                        f"La porte est ouverte\n\n{PLANNED_REMINDER_TRIGGER}"
+                        f"La porte est ouverte\n\n{OCCURRENCE_TRIGGER}"
                     )
                     assert "poubelles" not in text
                     assert "[matrix] porte ouverte" in facts

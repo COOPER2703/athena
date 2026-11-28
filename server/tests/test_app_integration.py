@@ -698,7 +698,10 @@ def test_a_failed_plugin_is_retried_and_its_tools_arrive_on_the_next_connection(
                 await ws_a.send(encode(SessionStart()))
                 await wait_until(lambda: bool(live.sessions))
                 assert live.declarations() == []
-                assert live.instruction() == ""
+                # Aucune instruction de plugin ; la section temporelle est
+                # toujours là, comme dans toute Session.
+                assert live.instruction().startswith("[CONTEXTE TEMPOREL]\n")
+                assert FIXTURE_INSTRUCTION not in live.instruction()
 
             # La déconnexion rend le noyau Idle, puis la retente de fond répare.
             await wait_until(
