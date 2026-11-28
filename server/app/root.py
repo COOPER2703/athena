@@ -1576,10 +1576,10 @@ def build_app(
     # Tool du noyau de fin de Session (#130) : enregistré avec les Tools du
     # noyau, donc avant les plugins. Une collision de nom reste fatale (ADR-0014).
     register_session_tools(plugins.tools)
-    # Planificateur (#194/#195) : création et lecture ; le pump est réveillé par
-    # ``on_change`` après chaque création réussie, pour qu'une échéance plus
-    # proche que celle attendue sonne à l'heure. Les règles s'interprètent dans
-    # le fuseau du Réglage, déjà validé par la configuration.
+    # Planificateur (#194/#195/#197) : les quatre Tools, et le réveil du pump
+    # après chaque écriture réussie, pour qu'une échéance plus proche que celle
+    # attendue sonne à l'heure. Les règles s'interprètent dans le fuseau du
+    # Réglage, déjà validé par la configuration.
     register_schedule_tools(
         plugins.tools,
         schedule_store,

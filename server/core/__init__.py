@@ -57,6 +57,7 @@ from server.core.events import (
     TimerFired,
 )
 from server.core.memory_tools import register_memory_tools
+from server.core.planificateur import Planificateur
 from server.core.plugins import (
     SERVER_PLATFORM,
     ConfigField,
@@ -85,6 +86,7 @@ from server.core.ports import (
     ToolSpec,
     TraceEntry,
     TraceSink,
+    Wakeup,
 )
 from server.core.schedule_rules import (
     MAX_CONTENT_CHARS,
@@ -95,7 +97,9 @@ from server.core.schedule_rules import (
 )
 from server.core.schedule_tools import (
     CREATE_SCHEDULE,
+    DELETE_SCHEDULE,
     LIST_SCHEDULES,
+    UPDATE_SCHEDULE,
     register_schedule_tools,
 )
 from server.core.session_tools import END_SESSION, register_session_tools
@@ -156,6 +160,7 @@ __all__ = [
     "OccurrenceDropReason",
     "OccurrenceReceived",
     "PLANNED_REMINDER_TRIGGER",
+    "Planificateur",
     "QueuedFact",
     "Role",
     "SendAudioToClient",
@@ -178,6 +183,7 @@ __all__ = [
     "Trace",
     "TraceEntry",
     "TraceSink",
+    "Wakeup",
     "local_now",
     "register_memory_tools",
     "register_session_tools",

@@ -10,8 +10,9 @@ Le répertoire parent n'est jamais créé : un déploiement sans ``/data`` doit
 écriture est protégée par un verrou et suivie d'un ``commit`` ; le plafond de
 200 Planifications est vérifié dans la même section critique que l'insertion.
 
-Comme les autres adaptateurs, ce module n'importe pas ``logging`` : la création
-passe par le ``TraceSink`` injecté, donc par le flux unique de traces.
+Comme les autres adaptateurs, ce module n'importe pas ``logging`` : création,
+modification et suppression passent par le ``TraceSink`` injecté, donc par le
+flux unique de traces.
 """
 
 from __future__ import annotations
@@ -72,9 +73,8 @@ class SqliteScheduleStore:
 
     La connexion est paresseuse : construire le store ne touche pas le disque,
     ce qui laisse une instance en Installation démarrer sans créer
-    ``schedule.db``. ``create`` est la seule écriture de cette tranche ; la
-    modification et la suppression (#197) s'ajouteront sans changer la forme
-    de ``Schedule``.
+    ``schedule.db``. ``create``, ``update`` et ``delete`` sont les seules
+    écritures, chacune sous le verrou et suivie d'un ``commit``.
     """
 
     def __init__(
@@ -207,6 +207,55 @@ class SqliteScheduleStore:
                 db.rollback()
                 raise
         return tuple(claimed)
+
+    def update(self, schedule: Schedule) -> bool:
+        """Remplace une Planification ; ``False`` si la ligne a disparu."""
+        rule_json = json.dumps(
+            rule_to_json(schedule.rule), ensure_ascii=False, separators=(",", ":")
+        )
+        with self._lock:
+            db = self._get_db()
+            cursor = db.execute(
+                "UPDATE schedules SET content = ?, rule_json = ?, "
+                "next_occurrence = ?, updated_at = ? WHERE id = ?",
+                (
+                    schedule.content,
+                    rule_json,
+                    schedule.next_occurrence,
+                    schedule.updated_at,
+                    schedule.id,
+                ),
+            )
+            changed = cursor.rowcount > 0
+            db.commit()
+        if not changed:
+            return False
+        emit(
+            self._trace_sink,
+            TRACE_SOURCE,
+            "ScheduleUpdated",
+            payload={"id": schedule.id, "kind": schedule.rule.kind},
+        )
+        return True
+
+    def delete(self, schedule_id: str) -> bool:
+        """Efface une Planification ; ``False`` si elle n'existait pas."""
+        with self._lock:
+            db = self._get_db()
+            cursor = db.execute(
+                "DELETE FROM schedules WHERE id = ?", (schedule_id,)
+            )
+            deleted = cursor.rowcount > 0
+            db.commit()
+        if not deleted:
+            return False
+        emit(
+            self._trace_sink,
+            TRACE_SOURCE,
+            "ScheduleDeleted",
+            payload={"id": schedule_id},
+        )
+        return True
 
     def _get_db(self) -> sqlite3.Connection:
         if self._db is None:
