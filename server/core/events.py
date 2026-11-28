@@ -134,6 +134,30 @@ class EventReceived:
     content: str
 
 
+#: Source unique d'une Occurrence du Planificateur dans le Canal (ADR-0028).
+OCCURRENCE_SOURCE = "planificateur"
+
+
+@dataclass(frozen=True, slots=True)
+class OccurrenceReceived:
+    """Une **Occurrence** émise par le Planificateur (ADR-0028).
+
+    Ce n'est pas un ``EventReceived`` : l'Occurrence saute le jugement et son
+    contenu est le rappel figé d'une Planification. Elle rejoint la **même**
+    File d'attente, sous la Source ``planificateur``, et n'est jamais
+    dédupliquée (deux Planifications identiques sont deux demandes réelles).
+    """
+
+    content: str
+    schedule_id: str = ""
+
+
+#: Un fait en attente dans la File : un Événement ordinaire ou une Occurrence.
+#: Les deux partagent les gardes de taille et le plafond, jamais la dédup ni le
+#: jugement (ADR-0028).
+QueuedFact = Union[EventReceived, OccurrenceReceived]
+
+
 Event = Union[
     ClientRegistered,
     SessionRequested,
@@ -152,4 +176,5 @@ Event = Union[
     ShutdownRequested,
     TimerFired,
     EventReceived,
+    OccurrenceReceived,
 ]
