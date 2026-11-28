@@ -198,6 +198,76 @@ def test_a_startup_recurring_miss_is_skipped_without_emission():
     asyncio.run(scenario())
 
 
+def test_a_failed_claim_traces_no_skip():
+    """Une transaction qui échoue n'a rien avancé : aucune Trace mensongère."""
+
+    class FailingClaimStore(ScriptedStore):
+        def claim_due(self, now_epoch, *, startup=False, timezone=None):
+            raise RuntimeError("base indisponible")
+
+    async def scenario() -> None:
+        missed = _schedule(
+            schedule_id="sch_tick",
+            next_occurrence=int(NOW.timestamp()) - 60,
+            rule=ScheduleRule(kind="interval", every_seconds=60),
+        )
+        traces: list[tuple[str, dict]] = []
+        planificateur = Planificateur(
+            store=FailingClaimStore([missed]),
+            now=lambda: NOW,
+            timezone=PARIS,
+            sleep=asyncio.sleep,
+            emit=lambda occurrence: None,
+            trace=lambda kind, payload: traces.append((kind, dict(payload))),
+            wake=ManualWakeup(),
+        )
+
+        results = await asyncio.gather(
+            asyncio.create_task(planificateur.run()), return_exceptions=True
+        )
+
+        assert isinstance(results[0], RuntimeError)
+        assert traces == []
+
+    asyncio.run(scenario())
+
+
+def test_a_failed_emission_traces_no_success():
+    """L'émission précède la Trace : un canal en panne ne dit pas « émis »."""
+
+    async def scenario() -> None:
+        due = _schedule(
+            schedule_id="sch_once",
+            next_occurrence=int(NOW.timestamp()) - 60,
+            rule=ScheduleRule(kind="once", at=int(NOW.timestamp()) - 60),
+        )
+        store = ScriptedStore([])
+        store.startup_results = [(due,)]
+        traces: list[tuple[str, dict]] = []
+
+        def broken_emit(occurrence: OccurrenceReceived) -> None:
+            raise RuntimeError("canal fermé")
+
+        planificateur = Planificateur(
+            store=store,
+            now=lambda: NOW,
+            timezone=PARIS,
+            sleep=asyncio.sleep,
+            emit=broken_emit,
+            trace=lambda kind, payload: traces.append((kind, dict(payload))),
+            wake=ManualWakeup(),
+        )
+
+        results = await asyncio.gather(
+            asyncio.create_task(planificateur.run()), return_exceptions=True
+        )
+
+        assert isinstance(results[0], RuntimeError)
+        assert [kind for kind, _ in traces] == []
+
+    asyncio.run(scenario())
+
+
 def test_a_future_recurring_schedule_is_untouched_at_startup():
     async def scenario() -> None:
         future = _schedule(

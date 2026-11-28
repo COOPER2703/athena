@@ -92,6 +92,13 @@ class Planificateur:
                 },
             )
         for schedule in claimed:
+            self._emit(
+                OccurrenceReceived(
+                    content=schedule.content, schedule_id=schedule.id
+                )
+            )
+            # Après l'émission : une Trace ne précède jamais un effet qui
+            # pourrait échouer (aucune réussite mensongère).
             self._trace(
                 "OccurrenceEmitted",
                 {
@@ -99,11 +106,6 @@ class Planificateur:
                     "kind": schedule.rule.kind,
                     "due": schedule.next_occurrence,
                 },
-            )
-            self._emit(
-                OccurrenceReceived(
-                    content=schedule.content, schedule_id=schedule.id
-                )
             )
 
     async def _wait(self) -> None:
