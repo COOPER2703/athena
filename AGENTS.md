@@ -277,6 +277,20 @@ d'événements sous forme d'**Occurrences**. Son pump démarre et s'arrête avec
   annoncée, donc exclue de la Consolidation). Traces : `ScheduleCreated`,
   `OccurrenceEmitted`, `OccurrenceSkipped` (récurrente manquée au démarrage, avancée sans
   rafale), `OccurrenceDeferred`, `OccurrenceDropped` (`too_large`, `capacity`, `shutdown`).
+- Occurrences manquées : le pump réconcilie **une fois** à son démarrage — démarrage du
+  processus avec une clé, ou activation à chaud de la première clé. Une **ponctuelle** due
+  est réclamée et annoncée **une seule fois**, même plusieurs heures en retard ; une
+  **récurrente** due est avancée au premier créneau strictement postérieur à maintenant,
+  **sans être rejouée** ni annoncée immédiatement ; une récurrente encore devant n'est pas
+  touchée. Le saut produit **une** Trace `OccurrenceSkipped` par Planification
+  (`schedule_id`, `kind`, `reason: "missed_slots"`, `due`, `now`), jamais une par créneau
+  manqué, et seulement après une réclamation réussie. Sans runtime (Installation), aucun
+  pump ne tourne : le rattrapage attend l'activation, aucune Annonce ne part.
+- Une récurrence par intervalle garde sa **phase** : après chaque émission, la suivante vaut
+  exactement `échéance précédente + every_seconds`, jamais `now + every_seconds`, donc une
+  boucle en retard de quelques secondes ne dérive pas. Si plusieurs périodes ont été ratées,
+  la suivante est le premier pas de la même phase strictement après maintenant ; aucun
+  créneau passé n'est jamais émis.
 
 
 - `ATHENA_SCHEDULE_DB` : `schedule.db` par défaut (chemin en lecture seule dans les
