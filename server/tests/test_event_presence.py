@@ -197,22 +197,19 @@ def test_the_queue_stays_bounded_and_traced_while_no_client_comes():
     assert facts[-1] == f"[m] fait-{EVENT_QUEUE_MAX}"
 
 
-def test_without_a_presence_seam_the_kernel_keeps_its_legacy_behaviour():
-    """``None`` = présence inconnue, réservé aux tests et à la compatibilité.
+def test_without_a_presence_seam_the_kernel_never_announces():
+    """``None`` = aucun Client connecté, pas « présence inconnue ».
 
-    ``build_app`` injecte **toujours** une vraie lecture ; le défaut ne doit
-    donc jamais devenir la règle de production.
+    Le noyau n'a qu'un comportement : sans auditeur lisible, la fenêtre ne
+    s'ouvre pas et le fait patiente, exactement comme avec une présence vide.
     """
     coordinator = Coordinator(announce_prompt="JUGE")
 
     commands = handle(coordinator, EventReceived(source="matrix", content="porte"))
 
-    assert effects(commands) == [
-        StartIdleTimer(
-            connection_id=EVENT_WINDOW_TIMER_ID, timeout=EVENT_WINDOW_TIMEOUT
-        )
-    ]
-    assert not deferred(commands)
+    assert effects(commands) == []
+    assert deferred(commands)
+    assert coordinator.state is SessionState.IDLE
 
 
 def test_an_announcement_deferred_for_lack_of_client_is_traced_with_the_batch_size():

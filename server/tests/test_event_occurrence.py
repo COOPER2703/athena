@@ -25,7 +25,7 @@ from testkit import FakeJudge
 from server.core import (
     EVENT_MAX_CHARS,
     EVENT_QUEUE_MAX,
-    PLANNED_REMINDER_TRIGGER,
+    OCCURRENCE_TRIGGER,
     ClientDisconnected,
     ClientRegistered,
     Coordinator,
@@ -88,7 +88,7 @@ def test_an_occurrence_at_rest_is_announced_without_calling_the_judge():
 
     assert judge.calls == []
     command = announcement(commands)
-    assert command.text == PLANNED_REMINDER_TRIGGER
+    assert command.text == OCCURRENCE_TRIGGER
     assert "[planificateur] appeler le plombier" in command.facts
     # Le contenu est un fait : il n'est jamais la phrase prononcée.
     assert "appeler le plombier" not in command.text
@@ -134,7 +134,7 @@ def test_a_mixed_lot_shows_the_judge_only_the_ordinary_events():
     assert judge.calls == [["[matrix] porte"]]
     command = announcement(commands)
     assert command.text.startswith("La porte est ouverte")
-    assert PLANNED_REMINDER_TRIGGER in command.text
+    assert OCCURRENCE_TRIGGER in command.text
     assert "[matrix] porte" in command.facts
     assert "[planificateur] sortir les poubelles" in command.facts
     assert len([c for c in commands if isinstance(c, OpenLiveConnection)]) == 1
@@ -155,7 +155,7 @@ def test_a_silent_verdict_drops_the_ordinary_event_but_keeps_the_occurrence():
 
     assert judge.calls == [["[matrix] porte"]]
     command = announcement(commands)
-    assert command.text == PLANNED_REMINDER_TRIGGER
+    assert command.text == OCCURRENCE_TRIGGER
     assert "[planificateur] sortir les poubelles" in command.facts
     assert "[matrix] porte" not in command.facts
     assert "EventJudged" in [trace.kind for trace in traces(commands)]
@@ -177,7 +177,7 @@ def test_a_failed_judgment_still_announces_the_occurrence():
     kinds = [trace.kind for trace in traces(commands)]
     assert "EventJudgmentFailed" in kinds
     command = announcement(commands)
-    assert command.text == PLANNED_REMINDER_TRIGGER
+    assert command.text == OCCURRENCE_TRIGGER
     assert "[planificateur] sortir les poubelles" in command.facts
     assert "[matrix] porte" not in command.facts
 
@@ -197,7 +197,7 @@ def test_a_malformed_verdict_still_announces_the_occurrence():
 
     assert "EventJudgmentFailed" in [trace.kind for trace in traces(commands)]
     command = announcement(commands)
-    assert command.text == PLANNED_REMINDER_TRIGGER
+    assert command.text == OCCURRENCE_TRIGGER
     assert "[planificateur] sortir les poubelles" in command.facts
     assert "porte" not in command.facts
 
@@ -212,7 +212,7 @@ def test_an_occurrence_is_announced_even_without_any_judge_injected():
     commands = close_window(coordinator)
 
     command = announcement(commands)
-    assert command.text == PLANNED_REMINDER_TRIGGER
+    assert command.text == OCCURRENCE_TRIGGER
     assert "[planificateur] appeler le plombier" in command.facts
 
 
@@ -234,7 +234,7 @@ def test_an_occurrence_waits_for_the_end_of_a_session_without_interrupting():
     assert StartIdleTimer in [type(command) for command in commands]
     commands = close_window(coordinator)
     assert judge.calls == []
-    assert announcement(commands).text == PLANNED_REMINDER_TRIGGER
+    assert announcement(commands).text == OCCURRENCE_TRIGGER
 
 
 def test_an_occurrence_without_a_client_is_deferred_and_announced_to_the_first_one():
@@ -258,7 +258,7 @@ def test_an_occurrence_without_a_client_is_deferred_and_announced_to_the_first_o
     commands = close_window(coordinator)
     assert judge.calls == []
     command = announcement(commands)
-    assert command.text == PLANNED_REMINDER_TRIGGER
+    assert command.text == OCCURRENCE_TRIGGER
     assert opened(commands).connection_id == coordinator.connection_id
 
 
@@ -472,7 +472,7 @@ def test_a_mixed_lot_announces_one_turn_with_the_judge_phrase_then_the_trigger()
     assert len([c for c in commands if isinstance(c, OpenLiveConnection)]) == 1
     command = announcement(commands)
     # Exactement le message du juge, puis la consigne neutre de rappel.
-    assert command.text == f"La porte est ouverte\n\n{PLANNED_REMINDER_TRIGGER}"
+    assert command.text == f"La porte est ouverte\n\n{OCCURRENCE_TRIGGER}"
     # Le contenu planifié n'est jamais lu mot pour mot : c'est un fait.
     assert "poubelles" not in command.text
     assert command.facts.splitlines() == [
@@ -504,7 +504,7 @@ def test_the_failed_judgment_trace_is_scoped_to_the_ordinary_events():
     assert len(failed) == 1
     assert failed[0].payload["events"] == 2
     command = announcement(commands)
-    assert command.text == PLANNED_REMINDER_TRIGGER
+    assert command.text == OCCURRENCE_TRIGGER
     assert command.facts.splitlines() == [
         "[ÉVÉNEMENTS]",
         "- [planificateur] sortir les poubelles",
@@ -525,7 +525,7 @@ def test_an_occurrence_only_lot_never_consults_the_judge():
     commands = close_window(coordinator)
 
     assert judge.calls == []
-    assert announcement(commands).text == PLANNED_REMINDER_TRIGGER
+    assert announcement(commands).text == OCCURRENCE_TRIGGER
 
 
 def test_the_journal_receives_each_announced_fact_once_in_arrival_order():
@@ -665,7 +665,7 @@ def test_a_mixed_lot_preempted_by_a_user_session_is_announced_and_journaled_once
     # Le juge revoit l'Événement ordinaire, l'Occurrence reste dans le lot.
     assert judge.calls == [["[matrix] porte"], ["[matrix] porte"]]
     assert announcement(commands).text == (
-        f"La porte est ouverte\n\n{PLANNED_REMINDER_TRIGGER}"
+        f"La porte est ouverte\n\n{OCCURRENCE_TRIGGER}"
     )
 
     drive(coordinator, [LlmOpened(), LlmAudio(data=b"rappel")])
@@ -673,6 +673,53 @@ def test_a_mixed_lot_preempted_by_a_user_session_is_announced_and_journaled_once
         ("event", "[matrix] porte"),
         ("event", "[planificateur] sortir les poubelles"),
     ]
+
+
+def test_a_preempted_occurrence_is_requeued_intact_and_traced_once():
+    """Une Occurrence interrompue avant visibilité est reportée, jamais perdue."""
+    judge = FakeJudge(message="La porte est ouverte")
+    coordinator = Coordinator(
+        memory=FakeMemory(),
+        user_id="alice",
+        announce_prompt="JUGE",
+        judge=judge,
+        connected_clients=lambda: ["c1"],
+    )
+    drive(
+        coordinator,
+        [
+            OccurrenceReceived(content="sortir les poubelles", schedule_id="sch_1"),
+            window_timer(),
+            LlmOpened(),
+        ],
+    )
+
+    commands = handle(coordinator, SessionRequested(client_id="c2"))
+
+    deferred = [
+        trace
+        for trace in traces(commands)
+        if trace.kind == "OccurrenceDeferred"
+        and trace.payload.get("reason") == "announcement_aborted"
+    ]
+    assert [trace.payload["schedule_id"] for trace in deferred] == ["sch_1"]
+    assert deferred[0].payload.get("cause") == "preempted"
+    # Aucun abandon : l'Occurrence est intacte en tête de File.
+    assert occurrence_drops(commands, OccurrenceDropReason.JUDGMENT_ABORTED) == []
+
+    # La Session utilisateur passe, puis la File ré-annonce une seule fois.
+    session = coordinator.connection_id
+    drive(coordinator, [LlmOpened(), LlmAudio(data=b"bonjour")])
+    handle(coordinator, LlmClosed(connection_id=session))
+    commands = close_window(coordinator)
+
+    assert announcement(commands).facts.splitlines() == [
+        "[ÉVÉNEMENTS]",
+        "- [planificateur] sortir les poubelles",
+    ]
+    assert [trace.kind for trace in traces(commands)].count(
+        "OccurrenceDeferred"
+    ) == 0
 
 
 def test_a_mixed_lot_lost_to_an_llm_failure_keeps_only_the_occurrence():
@@ -720,7 +767,7 @@ def test_a_mixed_lot_lost_to_an_llm_failure_keeps_only_the_occurrence():
     commands = close_window(coordinator)
     assert judge.calls == calls_before
     command = announcement(commands)
-    assert command.text == PLANNED_REMINDER_TRIGGER
+    assert command.text == OCCURRENCE_TRIGGER
     assert command.facts.splitlines() == [
         "[ÉVÉNEMENTS]",
         "- [planificateur] sortir les poubelles",
@@ -768,7 +815,7 @@ def test_a_mixed_lot_without_any_judge_announces_the_occurrence_only():
     assert len(failed) == 1
     assert failed[0].payload["events"] == 1
     command = announcement(commands)
-    assert command.text == PLANNED_REMINDER_TRIGGER
+    assert command.text == OCCURRENCE_TRIGGER
     assert command.facts.splitlines() == [
         "[ÉVÉNEMENTS]",
         "- [planificateur] sortir les poubelles",

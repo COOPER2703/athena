@@ -19,7 +19,7 @@ from server.adapters.console.contract import SECRETS_PATH
 from server.adapters.memory import SqliteMemoryStore
 from server.adapters.schedule import SqliteScheduleStore
 from server.core import (
-    PLANNED_REMINDER_TRIGGER,
+    OCCURRENCE_TRIGGER,
     Consolidation,
     ConsolidationPolicy,
 )
@@ -123,7 +123,7 @@ def test_a_one_shot_reminder_is_announced_at_the_planned_simulated_second(
                 assert message.data == b"rappel"
 
                 prompts = server.model.received_texts
-                assert prompts[-1] == PLANNED_REMINDER_TRIGGER
+                assert prompts[-1] == OCCURRENCE_TRIGGER
                 assert "appeler le plombier" not in prompts[-1]
                 facts = "\n".join(prompts[:-1])
                 assert "[planificateur] appeler le plombier" in facts
@@ -338,8 +338,90 @@ def test_a_one_shot_missed_before_startup_is_caught_up_once(tmp_path: Path) -> N
                 assert message.data == b"rappel"
 
             prompts = server.model.received_texts
-            assert prompts[-1] == PLANNED_REMINDER_TRIGGER
+            assert prompts[-1] == OCCURRENCE_TRIGGER
             assert "[planificateur] appeler le plombier" in "\n".join(prompts[:-1])
+
+    asyncio.run(scenario())
+
+
+def test_a_past_one_shot_waits_for_installation_then_is_caught_up_exactly_once(
+    tmp_path: Path,
+) -> None:
+    """Sans runtime : aucun pump, aucune Occurrence, aucune Annonce.
+
+    La première clé active le runtime et le pump : la ponctuelle déjà en base est
+    rattrapée **une seule fois**, puis effacée.
+    """
+
+    async def scenario() -> None:
+        clock = ManualWallClock(datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc))
+        due = int((clock.moment - timedelta(hours=2)).timestamp())
+        wakeup = ManualWakeup()
+
+        def prepare(paths) -> None:
+            _seed_schedule(
+                paths,
+                schedule_id="sch_past",
+                content="appeler le plombier",
+                next_occurrence=due,
+                rule=ScheduleRule(kind="once", at=due),
+            )
+
+        async with running_server(
+            tmp_path,
+            gemini_key="",
+            wall_clock=clock,
+            wakeup=wakeup,
+            prepare=prepare,
+            env={"ATHENA_TIMEZONE": "UTC"},
+        ) as server:
+            http = await server.install()
+            assert server.app.planificateur is None
+
+            # L'heure passe pendant l'Installation : rien ne part.
+            clock.advance(3600)
+            await asyncio.sleep(0)
+            assert _schedule_count(server) == 1
+            assert server.model.received_texts == []
+            assert [
+                entry
+                for entry in server.trace_log()
+                if entry["kind"] in ("OccurrenceEmitted", "OccurrenceQueued")
+            ] == []
+
+            async with http.put(
+                f"{server.url}{SECRETS_PATH}/GEMINI_API_KEY",
+                json={"value": "cle-gemini-de-test-rattrapage"},
+            ) as response:
+                assert response.status == 200, await response.text()
+
+            assert server.app.planificateur is not None
+            server.model.reply(
+                text="C'est l'heure d'appeler le plombier.", audio=b"rappel"
+            )
+
+            async with server.client() as client:
+                # Le pump né de l'activation rattrape la ponctuelle, une fois.
+                await server.wait_until(lambda: _schedule_count(server) == 0)
+                await server.wait_until(
+                    lambda: "event-window" in server.clock.scheduled
+                )
+                server.clock.advance(0)
+                message = await client.wait_message(Audio, timeout=2.0)
+                assert message.data == b"rappel"
+
+            emitted = [
+                entry
+                for entry in server.trace_log()
+                if entry["kind"] == "OccurrenceEmitted"
+                and entry["payload"].get("schedule_id") == "sch_past"
+            ]
+            assert len(emitted) == 1
+            assert emitted[0]["payload"] == {
+                "schedule_id": "sch_past",
+                "kind": "once",
+                "due": due,
+            }
 
     asyncio.run(scenario())
 
@@ -429,7 +511,7 @@ def test_a_recurring_miss_during_downtime_is_skipped_once_and_resumes(
                 message = await client.wait_message(Audio, timeout=2.0)
                 assert message.data == b"quotidien"
 
-            assert server.model.received_texts[-1] == PLANNED_REMINDER_TRIGGER
+            assert server.model.received_texts[-1] == OCCURRENCE_TRIGGER
             # Une seule Annonce, et la récurrence reste au prochain jour.
             assert _stored_next_occurrence(server, "sch_daily") == next_slot + 86_400
 

@@ -152,6 +152,38 @@ def test_a_once_rule_keeps_the_absolute_local_instant() -> None:
     ) == _utc(2026, 1, 2, 7, 30)
 
 
+def test_a_once_rule_honours_the_seconds_of_an_absolute_instant() -> None:
+    rule = parse_when(
+        {"kind": "once", "at": "2026-01-02T08:30:30"},
+        now=datetime(2026, 1, 1, 10, 0, tzinfo=PARIS),
+        timezone=PARIS,
+    )
+
+    # 08:30:30 Paris (hiver) = 07:30:30 UTC : la seconde n'est pas tronquée.
+    assert rule.at == _utc(2026, 1, 2, 7, 30, 30)
+
+
+def test_a_once_rule_a_few_seconds_ahead_in_the_same_minute_is_future() -> None:
+    rule = parse_when(
+        {"kind": "once", "at": "2026-01-01T10:00:30"},
+        now=datetime(2026, 1, 1, 10, 0, 5, tzinfo=PARIS),
+        timezone=PARIS,
+    )
+
+    assert rule.at == _utc(2026, 1, 1, 9, 0, 30)
+
+
+def test_a_once_rule_in_a_spring_forward_gap_skips_to_the_valid_instant() -> None:
+    """29 mars 2026 : 02:30 n'existe pas ; l'instant valide est 03:30 CEST."""
+    rule = parse_when(
+        {"kind": "once", "at": "2026-03-29T02:30:00"},
+        now=datetime(2026, 3, 28, 12, 0, tzinfo=PARIS),
+        timezone=PARIS,
+    )
+
+    assert rule.at == _utc(2026, 3, 29, 1, 30)
+
+
 def test_a_once_rule_with_a_relative_delay_is_frozen_at_creation() -> None:
     now = datetime(2026, 1, 1, 10, 0, 0, 500000, tzinfo=PARIS)
 

@@ -422,8 +422,8 @@ class ScheduleError(Exception):
     Le code appartient au vocabulaire du noyau :
     ``invalid_when``, ``not_future``, ``empty_content``, ``content_too_long``,
     ``interval_too_short``, ``empty_days``, ``too_many_schedules``. Le message
-    est lisible et destiné au modèle (anglais, comme les autres Tools du
-    noyau) ; le code sert aux tests et aux surfaces futures.
+    est lisible et destiné au modèle ; le code sert aux tests et aux surfaces
+    futures.
     """
 
     def __init__(self, code: str, message: str) -> None:
@@ -454,7 +454,7 @@ class ScheduleStore(Protocol):
         now_epoch: int,
         *,
         startup: bool = False,
-        timezone: str | ZoneInfo | None = None,
+        timezone: str | ZoneInfo,
     ) -> Sequence[Schedule]: ...
 
     def update(self, schedule: Schedule) -> bool:

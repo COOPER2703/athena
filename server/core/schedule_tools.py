@@ -31,6 +31,7 @@ from server.core.ports import (
 )
 from server.core.schedule_rules import (
     MAX_CONTENT_CHARS,
+    as_zone,
     next_occurrence,
     parse_when,
     rule_to_json,
@@ -141,10 +142,6 @@ def _content(value: object) -> str:
     return text
 
 
-def _zone(value: str | ZoneInfo) -> ZoneInfo:
-    return value if isinstance(value, ZoneInfo) else ZoneInfo(value)
-
-
 def _local_iso(epoch: int, zone: ZoneInfo) -> str:
     return datetime.fromtimestamp(epoch, zone).isoformat(timespec="seconds")
 
@@ -163,7 +160,7 @@ def register_schedule_tools(
     heures locales. Une création, une modification ou une suppression réussie
     réveille le Planificateur par ``on_change`` (aucun effet par défaut).
     """
-    zone = _zone(timezone)
+    zone = as_zone(timezone)
     wake = on_change if on_change is not None else lambda: None
 
     async def create_schedule(
@@ -296,25 +293,26 @@ def register_schedule_tools(
 _UPDATE_SPEC = ToolSpec(
     name=UPDATE_SCHEDULE,
     description=(
-        "Change an existing schedule, identified by the stable id returned by "
-        "create_schedule or list_schedules. Provide content, when, or both. "
-        "The content and/or rule is replaced and the next occurrence is "
-        "recomputed from now, so no slot of the previous rule is kept. The "
-        "same bounds as create_schedule apply. An unknown id returns "
-        "not_found instead of a confirmation."
+        "Modifie une Planification existante, identifiée par l'identifiant "
+        "stable rendu par create_schedule ou list_schedules. Fournir content, "
+        "when, ou les deux. Le contenu et/ou la règle sont remplacés et la "
+        "prochaine occurrence est recalculée depuis maintenant : aucun créneau "
+        "de l'ancienne règle n'est conservé. Les mêmes bornes que "
+        "create_schedule s'appliquent. Un identifiant inconnu rend not_found, "
+        "jamais une confirmation."
     ),
     parameters={
         "type": "object",
         "properties": {
             "id": {
                 "type": "string",
-                "description": "Stable schedule id (sch_...).",
+                "description": "Identifiant stable de la Planification (sch_...).",
             },
             "content": {
                 "type": "string",
                 "description": (
-                    "The replacement reminder, stated in the third person or "
-                    "as an infinitive, independent of the current context."
+                    "Le nouveau contenu de la Planification, à la troisième "
+                    "personne ou à l'infinitif, sans dépendre du contexte présent."
                 ),
             },
             "when": _WHEN_SCHEMA,
@@ -326,16 +324,17 @@ _UPDATE_SPEC = ToolSpec(
 _DELETE_SPEC = ToolSpec(
     name=DELETE_SCHEDULE,
     description=(
-        "Delete an existing schedule identified by its stable id. Returns "
-        "deleted on success and not_found when no schedule carries that id; "
-        "deleting twice is not a silent success."
+        "Supprime une Planification existante identifiée par son identifiant "
+        "stable. Rend deleted en cas de succès et not_found quand aucune "
+        "Planification ne porte cet identifiant ; une seconde suppression n'est "
+        "pas un succès silencieux."
     ),
     parameters={
         "type": "object",
         "properties": {
             "id": {
                 "type": "string",
-                "description": "Stable schedule id (sch_...).",
+                "description": "Identifiant stable de la Planification (sch_...).",
             }
         },
         "required": ["id"],

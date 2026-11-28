@@ -7,7 +7,8 @@ accepted
 Amende l'ADR-0007 : la fenêtre de jugement ne s'ouvre plus sans aucun Client connecté, et
 une **Occurrence** du Planificateur est annoncée sans passer par le juge. Amende l'ADR-0013 :
 l'instruction d'Annonce peut recevoir le contenu planifié comme **fait**, sans phrase fournie
-par un juge.
+par un juge. Précise la fenêtre d'une Occurrence seule (0 s), la section `[CONTEXTE TEMPOREL]`
+de l'Annonce et le sens d'`AnnouncementSilent`.
 
 ## Contexte
 
@@ -44,7 +45,9 @@ durable. La Consolidation planifie bien un traitement nocturne, mais elle n'éme
   interprétées dans le **fuseau local de l'instance**, exposé comme Réglage (défaut : fuseau
   système). Les heures absolues saisies sont donc locales.
 - Une Planification **ponctuelle est effacée** dès que son Occurrence est émise ; l'historique
-  est le Journal, pas le magasin.
+  est le Journal, pas le magasin. L'effacement suit l'émission : un arrêt entre les deux
+  réémet la ponctuelle (au pire un doublon, jamais une perte silencieuse) et une Annonce
+  restée muette ne la relance pas.
 
 ### L'Occurrence
 
@@ -104,6 +107,19 @@ durable. La Consolidation planifie bien un traitement nocturne, mais elle n'éme
   Le contrat de données doit cependant rester lisible par une surface future.
 - Sans runtime Gemini (Installation), rien ne s'annonce ; les Planifications restent persistées
   et suivent la règle des occurrences manquées.
+
+### Fenêtre d'Annonce
+
+- Une File qui ne porte **que** des Occurrences arme la fenêtre unique avec une échéance
+  immédiate (0 s) : rien n'est à regrouper avec un fait externe, et l'Annonce part à la
+  seconde prévue. Un lot **mixte** garde la fenêtre de regroupement de 5 s, pour que
+  l'Événement ordinaire et l'Occurrence ne produisent qu'un seul tour.
+- L'instruction d'une Annonce porte la section `[CONTEXTE TEMPOREL]` comme toute Session
+  automatique : l'heure locale est celle de l'instance au moment de l'ouverture.
+- `AnnouncementSilent` s'applique à **toute** Annonce qui se termine avant d'être devenue
+  visible (modèle muet, échec, arrêt), une seule fois, sans relance. Une Occurrence d'un
+  lot interrompu par une préemption, elle, est reportée (`OccurrenceDeferred`,
+  `announcement_aborted`, cause `preempted`) et reste en tête de File.
 
 ## Pourquoi
 

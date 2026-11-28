@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Callable, Mapping, Sequence
 
@@ -94,11 +95,11 @@ EVENT_MAX_CHARS = 4096
 # Occurrence arrivée dans une fenêtre ordinaire déjà ouverte y reste, pour que
 # le lot mixte ne produise qu'un seul tour.
 OCCURRENCE_WINDOW_TIMEOUT = 0.0
-# Phrase d'Annonce d'un rappel planifié : elle ne contient jamais le contenu de
+# Phrase d'Annonce d'une **Occurrence** : elle ne contient jamais le contenu de
 # la Planification, qui reste un fait sous ``[ÉVÉNEMENTS]``. Le modèle formule
-# le rappel lui-même (#81, ADR-0013 amendé).
-PLANNED_REMINDER_TRIGGER = (
-    "[RAPPEL PLANIFIÉ] L'utilisateur a demandé ce rappel : formule-le "
+# l'Occurrence lui-même (#81, ADR-0013 amendé).
+OCCURRENCE_TRIGGER = (
+    "[OCCURRENCE] Une Planification est arrivée à échéance : formule-la "
     "brièvement à partir des faits, sans réciter la source."
 )
 # Garde-fou d'un Tour texte (ADR-0024) : le Tour se referme de lui-même si le
@@ -107,10 +108,24 @@ PLANNED_REMINDER_TRIGGER = (
 TOUR_TIMEOUT = 30.0
 _MEMORY_HEADER = "[MÉMOIRE]"
 _EVENT_HEADER = "[ÉVÉNEMENTS]"
-#: En-tête de la section dynamique portant la date et l'heure locales. Le noyau
-#: ne compose pas l'heure lui-même : la racine lui injecte le texte rendu, et
-#: l'absence de couture laisse l'instruction strictement inchangée.
+# Section dynamique date/heure locale : la racine fournit le texte rendu (noyau
+# pur, aucun accès à l'horloge) ; sans couture, le noyau retombe sur un rendu
+# honnête en UTC pour que la section ne disparaisse jamais.
 NOW_CONTEXT_HEADER = "[CONTEXTE TEMPOREL]"
+
+
+def default_now_context() -> str:
+    """Rendu de repli de la section temporelle, en **UTC** à la seconde.
+
+    La racine injecte le rendu du fuseau de l'instance ; ce repli n'existe que
+    pour les compositions qui n'en injectent pas (tests du noyau, bancs). Il
+    n'utilise que ``datetime`` : ni ``os``, ni ``/etc/localtime``.
+    """
+    moment = datetime.now(timezone.utc)
+    return (
+        f"{NOW_CONTEXT_HEADER}\n"
+        f"Nous sommes le {moment:%Y-%m-%d}, il est {moment:%H:%M:%S} (UTC)."
+    )
 # Un contenu externe ne doit jamais pouvoir forger l'en-tête du bloc de faits
 # ni en ouvrir un second : ses occurrences sont neutralisées dans le rendu
 # destiné au modèle (#81). Le Journal et le dédoublonnage du Rappel gardent,
@@ -155,9 +170,11 @@ class OccurrenceDropReason(StrEnum):
 class Coordinator:
     """Pure, deterministic event -> command transition function.
 
-    Holds no direct I/O, no clock and imports no asyncio: it receives domain
-    events and awaits only the async ports injected by the composition root
-    (``MemoryStore`` today), then returns the commands to carry out.
+    Holds no direct I/O and imports no asyncio: it receives domain events and
+    awaits only the async ports injected by the composition root
+    (``MemoryStore`` today), then returns the commands to carry out. The only
+    ambient read is the fallback temporal renderer (UTC), used when the
+    composition injects no ``now_context``.
     """
 
     def __init__(
@@ -195,10 +212,9 @@ class Coordinator:
         self._now_context = now_context
         self._state = SessionState.IDLE
         # Présence des Clients (ADR-0028, ticket #193) : couture injectée, sans
-        # import d'adaptateur. ``None`` signifie « présence inconnue » et
-        # conserve l'ancien comportement (fenêtre ouverte sans auditeur) : c'est
-        # un défaut de compatibilité pour les tests du noyau, jamais la règle de
-        # production — ``build_app`` injecte **toujours** une vraie lecture.
+        # import d'adaptateur. Absente, la présence vaut **vide** : le noyau
+        # n'annonce jamais dans le vide, même dans un test qui oublie de
+        # l'injecter. ``build_app`` injecte toujours une vraie lecture.
         # Le callable rend les identifiants connectés, dans l'ordre de
         # préférence (le premier reçoit une Annonce si l'enregistré a disparu).
         self._connected_clients = connected_clients
@@ -296,21 +312,20 @@ class Coordinator:
             return "session_busy"
         return ""
 
-    def _connected_client_ids(self) -> Sequence[str] | None:
-        """Identifiants des Clients connectés, ou ``None`` si la présence est inconnue.
+    def _connected_client_ids(self) -> Sequence[str]:
+        """Identifiants des Clients réellement connectés, jamais ``None``.
 
-        ``None`` n'est rendu que par le défaut de test ; en production, la
-        racine de composition injecte toujours une lecture réelle (transport
-        plus Client Console éphémère).
+        Sans couture injectée, la présence est **vide** : le noyau ne suppose
+        jamais qu'un auditeur existe. ``build_app`` injecte toujours une vraie
+        lecture (transport plus Client Console éphémère).
         """
         if self._connected_clients is None:
-            return None
+            return ()
         return self._connected_clients()
 
     def _has_connected_client(self) -> bool:
         """Vrai dès qu'un Client peut réellement recevoir une Annonce."""
-        client_ids = self._connected_client_ids()
-        return client_ids is None or bool(client_ids)
+        return bool(self._connected_client_ids())
 
     def _announcement_target(self) -> str:
         """Client qui reçoit l'Annonce, vide si aucun Client n'est connecté.
@@ -318,29 +333,27 @@ class Coordinator:
         Le dernier Client enregistré ne fait pas foi : il peut être périmé
         après une déconnexion. On préfère l'enregistré s'il est **encore**
         connecté, sinon le premier Client connecté (ordre de préférence de la
-        couture), sinon personne. Avec une présence inconnue (défaut de test),
-        on garde l'ancien comportement : l'enregistré, même sans vérification.
+        couture), sinon personne — y compris quand la présence n'est pas
+        injectée.
         """
         client_ids = self._connected_client_ids()
-        if client_ids is None:
-            return self._registered_client_id
         for client_id in client_ids:
             if client_id == self._registered_client_id:
                 return client_id
         return client_ids[0] if client_ids else ""
 
     def _defer_for_lack_of_client(
-        self, count: int, *, occurrences: int = 0
+        self, ordinary_events: int, *, occurrences: int = 0
     ) -> list[Command]:
         """Trace un report faute de Client, sans consommer la File.
 
         Un nom de trace par nature (``EventDeferred`` pour les Événements,
-        ``OccurrenceDeferred`` pour les rappels planifiés) et une raison stable
+        ``OccurrenceDeferred`` pour les Occurrences) et une raison stable
         (``no_client``) pour que le Diagnostic explique un délai, que le report
         vienne de l'arrivée d'un fait au Repos ou de l'échéance de la fenêtre.
         """
         commands: list[Command] = []
-        if count:
+        if ordinary_events:
             commands.append(
                 self._trace(
                     "EventDeferred",
@@ -348,7 +361,7 @@ class Coordinator:
                     to_state=self._state,
                     client_id=self._registered_client_id,
                     reason="no_client",
-                    extra={"events": count},
+                    extra={"events": ordinary_events},
                 )
             )
         if occurrences:
@@ -446,9 +459,18 @@ class Coordinator:
                 extra={"source": event.source, "queued": len(self._event_queue)},
             )
         ]
-        # Au Repos sans Client, l'Événement patiente : la fenêtre ne s'ouvrira
-        # pas (``_open_window_if_needed``), et le report est tracé pour que le
-        # Diagnostic explique le délai (ADR-0028, story 25).
+        commands.extend(self._enqueue_fact(event))
+        return commands
+
+    def _enqueue_fact(self, fact: QueuedFact) -> list[Command]:
+        """Commun aux Événements et aux Occurrences : report et plafond.
+
+        Au Repos sans Client, le fait patiente : la fenêtre ne s'ouvrira pas
+        (``_open_window_if_needed``) et le report est tracé pour que le
+        Diagnostic explique le délai (ADR-0028, story 25). Le plafond de la File
+        est tenu à chaque arrivée, quels que soient les faits déjà en attente.
+        """
+        commands: list[Command] = []
         if self._state is SessionState.IDLE and not self._has_connected_client():
             ordinary, occurrences = self._queued_counts()
             commands.extend(
@@ -494,14 +516,7 @@ class Coordinator:
                 },
             )
         ]
-        if self._state is SessionState.IDLE and not self._has_connected_client():
-            ordinary, occurrences = self._queued_counts()
-            commands.extend(
-                self._defer_for_lack_of_client(
-                    ordinary, occurrences=occurrences
-                )
-            )
-        commands.extend(self._enforce_ceiling())
+        commands.extend(self._enqueue_fact(event))
         return commands
 
     def _queued_counts(self) -> tuple[int, int]:
@@ -777,14 +792,14 @@ class Coordinator:
             # d'arrivée complet, Occurrences comprises.
             announced: list[QueuedFact] = list(batch)
             text = (
-                f"{message}\n\n{PLANNED_REMINDER_TRIGGER}"
+                f"{message}\n\n{OCCURRENCE_TRIGGER}"
                 if occurrences
                 else message
             )
         else:
             # Seules les Occurrences parlent : jamais le contenu comme phrase.
             announced = occurrences
-            text = PLANNED_REMINDER_TRIGGER
+            text = OCCURRENCE_TRIGGER
         commands.extend(await self._start_announcement(announced, text))
         return commands
 
@@ -807,16 +822,15 @@ class Coordinator:
 
         La cible est un Client **réellement connecté** (ADR-0028) : si le
         dernier enregistré a disparu, le premier connecté reçoit l'Annonce.
-        Quand la présence est connue et qu'aucun Client n'est connecté au
-        moment d'ouvrir, la Connexion n'est pas ouverte : le lot retourne en
-        tête de File, intact, et le report est tracé. Une présence inconnue
-        (défaut de test) garde l'ancien comportement.
+        Quand aucun Client n'est connecté au moment d'ouvrir, la Connexion
+        n'est pas ouverte : le lot retourne en tête de File, intact, et le
+        report est tracé.
 
         ``batch`` ne porte que les faits **annoncés** : une Occurrence et les
         Événements retenus par le verdict. Le Journal n'écrit que ceux-là.
         """
         target = self._announcement_target()
-        if not target and self._connected_clients is not None:
+        if not target:
             self._event_queue = [*batch, *self._event_queue]
             return self._defer_for_lack_of_client(
                 sum(1 for fact in batch if isinstance(fact, EventReceived)),
@@ -1140,7 +1154,7 @@ class Coordinator:
         # préempte la Connexion Live par le chemin de fin existant et remet les
         # faits du lot en tête de la File, pour un re-jugement ultérieur — sans
         # perte silencieuse.
-        preempted: list[EventReceived] = []
+        preempted: list[QueuedFact] = []
         if self._window_open:
             commands.extend(self._cancel_window())
         if self._judging:
@@ -1156,6 +1170,22 @@ class Coordinator:
             # File reste tenu (les plus anciens — ici les préemptés — sont jetés
             # et tracés, comme à l'arrivée).
             self._event_queue = [*preempted, *self._event_queue]
+            # Une Occurrence interrompue avant d'être visible est reportée,
+            # jamais perdue en silence : une Trace par Occurrence, sans
+            # double-remise en File (le lot a déjà été vidé du jugement en vol).
+            for fact in preempted:
+                if isinstance(fact, OccurrenceReceived):
+                    commands.append(
+                        self._trace(
+                            "OccurrenceDeferred",
+                            from_state=original_state,
+                            to_state=original_state,
+                            client_id=event.client_id,
+                            reason="announcement_aborted",
+                            cause="preempted",
+                            extra={"schedule_id": fact.schedule_id},
+                        )
+                    )
             commands.extend(self._enforce_ceiling())
 
         self._session_counter += 1
@@ -1259,14 +1289,15 @@ class Coordinator:
         return self._plugins.instruction()
 
     def _now_context_section(self) -> str:
-        """Section dynamique date/heure, vide sans couture injectée.
+        """Section dynamique date/heure, toujours présente.
 
-        Le texte est rendu par la racine de composition : le noyau n'appelle
-        aucune horloge et aucune bibliothèque de fuseau. Une couture qui rend
-        une chaîne vide disparaît aussi, sans laisser de section fantôme.
+        Le texte est rendu par la racine de composition dans le fuseau de
+        l'instance. Sans couture injectée (tests du noyau, composition
+        minimale), le noyau rend un horodatage **UTC** honnête : la section ne
+        disparaît jamais d'une instruction de Session, de Tour ou d'Annonce.
         """
         if self._now_context is None:
-            return ""
+            return default_now_context()
         return self._now_context().strip()
 
     @staticmethod

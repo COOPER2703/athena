@@ -99,6 +99,15 @@ def test_the_four_tools_have_their_stable_names_and_parameters(
     assert delete.parameters["required"] == ["id"]
     assert set(delete.parameters["properties"]) == {"id"}
 
+    # Les noms restent anglais (contrat stable) ; les descriptions sont en
+    # français, comme les autres Tools du noyau.
+    assert "Planification" in update.description
+    assert "Supprime une Planification" in delete.description
+    for spec in registry.specs():
+        assert spec.description
+        assert "schedule," not in spec.description
+        assert "Delete an" not in spec.description
+
 
 def test_create_schedule_records_a_relative_reminder(tmp_path: Path) -> None:
     registry, _ = _registry(tmp_path)

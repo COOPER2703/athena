@@ -30,8 +30,8 @@ from server.app.config import (
     SettingsConfig,
     WebhookConfig,
     load_config,
+    system_timezone_name,
 )
-from server.core.settings import system_timezone_name
 
 
 def test_defaults_with_a_gemini_key() -> None:

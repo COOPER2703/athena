@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Mapping
 
-from server.app.config import SETTING_TARGETS
+from server.app.config import SETTING_TARGETS, system_timezone_name
 from server.core.settings import (
     SETTINGS,
     SURFACES,
@@ -20,7 +20,6 @@ from server.core.settings import (
     describe_settings,
     normalize_value,
     surface_url,
-    system_timezone_name,
     validate_settings_update,
 )
 

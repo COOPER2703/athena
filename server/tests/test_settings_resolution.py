@@ -11,13 +11,15 @@ Le ticket #174 les exposera derrière ``GET/PUT /api/settings``.
 
 from __future__ import annotations
 
+from server.app.config import system_timezone_name
 from server.core.settings import (
     SETTINGS,
     SettingSource,
+    SettingsView,
+    describe_settings,
     field_by_key,
     resolve_all,
     resolve_setting,
-    system_timezone_name,
 )
 
 
@@ -116,11 +118,28 @@ def test_every_field_exposes_its_environment_variable_and_default() -> None:
 
 
 def test_the_instance_timezone_defaults_to_the_system_zone() -> None:
-    timezone = _resolve("timezone")
+    """Le défaut contextuel vient de la racine, pas d'une résolution à l'import.
 
-    assert timezone.value == system_timezone_name()
-    assert timezone.source is SettingSource.DEFAULT
-    assert timezone.read_only is False
+    Le noyau déclare un défaut neutre (``UTC``) ; ``build_app`` injecte le
+    fuseau système comme défaut **contextuel**, et c'est lui que le GET rend.
+    """
+    name = system_timezone_name()
+    view = SettingsView(loaded={"timezone": name}, defaults={"timezone": name})
+
+    [state] = [
+        setting for setting in describe_settings(view, {})
+        if setting.key == "timezone"
+    ]
+
+    assert state.value == name
+    assert state.default == name
+    assert state.source is SettingSource.DEFAULT
+    assert state.read_only is False
+
+
+def test_the_declared_timezone_default_is_neutral() -> None:
+    """La table du noyau ne lit ni ``TZ`` ni ``/etc/localtime`` à l'import."""
+    assert field_by_key("timezone").default == "UTC"
 
 
 def test_the_instance_timezone_is_masked_by_the_environment() -> None:

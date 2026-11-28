@@ -22,7 +22,6 @@ from server.core.settings import (
     DEFAULT_RESTART_COMMAND,
     LOG_LEVELS,
     SETTINGS,
-    system_timezone_name,
 )
 
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-live-preview"
@@ -88,6 +87,42 @@ DEFAULT_RESTART_ON_APPLY = "0"
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"", "0", "false", "no", "off"}
+
+
+def system_timezone_name() -> str:
+    """Nom IANA du fuseau de la machine, sans jamais lever.
+
+    Trois essais, du plus explicite au plus sûr : la variable ``TZ`` quand elle
+    nomme un fuseau résolvable, le lien ``/etc/localtime`` quand il pointe dans
+    ``/usr/share/zoneinfo``, puis ``UTC``. Le résultat est toujours un nom que
+    ``zoneinfo.ZoneInfo`` sait ouvrir : un fuseau illisible ne doit pas empêcher
+    le serveur de démarrer.
+
+    Vit dans la couche application : le noyau déclare un défaut neutre et ne
+    lit jamais l'environnement ni le disque (ADR-0001).
+    """
+    candidate = os.environ.get("TZ", "").strip()
+    if candidate and _resolvable_zone(candidate):
+        return candidate
+    try:
+        resolved = Path("/etc/localtime").resolve()
+        parts = resolved.parts
+        if "zoneinfo" in parts:
+            index = parts.index("zoneinfo")
+            candidate = "/".join(parts[index + 1 :])
+            if candidate and _resolvable_zone(candidate):
+                return candidate
+    except OSError:
+        pass
+    return "UTC"
+
+
+def _resolvable_zone(name: str) -> bool:
+    try:
+        ZoneInfo(name)
+    except (KeyError, ValueError, OSError):
+        return False
+    return True
 
 
 def _coerce_bool(value: object, *, variable: str) -> bool:
@@ -555,7 +590,13 @@ def load_config(
     }
     for field in SETTINGS:
         section, attribute = SETTING_TARGETS[field.key]
-        value = merged.get(field.env, field.default)
+        value = merged.get(field.env)
+        if value is None:
+            # Absent : la section garde son défaut Pydantic, qui est aussi celui
+            # de la table — sauf pour un défaut **contextuel** que seule la
+            # couche application sait calculer (le fuseau système). Une valeur
+            # vide reste une valeur : elle est validée comme telle.
+            continue
         if section:
             sections[section][attribute] = value
         else:
