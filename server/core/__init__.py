@@ -89,7 +89,9 @@ from server.core.schedule_rules import (
 )
 from server.core.schedule_tools import (
     CREATE_SCHEDULE,
+    DELETE_SCHEDULE,
     LIST_SCHEDULES,
+    UPDATE_SCHEDULE,
     register_schedule_tools,
 )
 from server.core.session_tools import END_SESSION, register_session_tools

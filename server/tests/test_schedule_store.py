@@ -143,6 +143,89 @@ def test_the_store_never_creates_a_parent_directory(tmp_path: Path) -> None:
     assert not (tmp_path / "absent").exists()
 
 
+def test_updating_a_schedule_replaces_it_and_bumps_updated_at(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.create(
+        _schedule(
+            schedule_id="sch_edit",
+            next_occurrence=1_700_000_600,
+            rule=ScheduleRule(kind="interval", every_seconds=600),
+        )
+    )
+    replacement = Schedule(
+        id="sch_edit",
+        content="nouveau contenu",
+        rule=ScheduleRule(kind="daily", time_of_day="20:00"),
+        next_occurrence=1_700_100_000,
+        created_at=1_700_000_000,
+        updated_at=1_700_000_900,
+    )
+
+    assert store.update(replacement) is True
+
+    assert store.get("sch_edit") == replacement
+    assert store.list() == (replacement,)
+
+
+def test_updating_an_unknown_schedule_reports_false(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+
+    assert (
+        store.update(_schedule(schedule_id="sch_absent", next_occurrence=1_700_000_000))
+        is False
+    )
+    assert store.count() == 0
+
+
+def test_deleting_a_schedule_removes_it_and_is_not_silent_twice(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.create(_schedule(schedule_id="sch_gone", next_occurrence=1_700_000_000))
+
+    assert store.get("sch_gone") is not None
+    assert store.delete("sch_gone") is True
+    assert store.get("sch_gone") is None
+    assert store.count() == 0
+    assert store.delete("sch_gone") is False
+
+
+def test_updating_and_deleting_emit_one_trace_each(tmp_path: Path) -> None:
+    sink = RecordingTraceSink()
+    store = _store(tmp_path, sink=sink)
+    store.create(
+        _schedule(
+            schedule_id="sch_trace",
+            next_occurrence=1_700_000_000,
+            rule=ScheduleRule(kind="daily", time_of_day="08:00"),
+        )
+    )
+
+    store.update(
+        Schedule(
+            id="sch_trace",
+            content="contenu modifié",
+            rule=ScheduleRule(kind="weekly", time_of_day="09:00", days=(2, 4)),
+            next_occurrence=1_700_200_000,
+            created_at=1_700_000_000,
+            updated_at=1_700_000_500,
+        )
+    )
+    store.delete("sch_trace")
+
+    assert len(sink.of_kind("ScheduleCreated")) == 1
+    updated = sink.of_kind("ScheduleUpdated")
+    assert len(updated) == 1
+    assert updated[0].source == "schedule"
+    assert updated[0].payload == {"id": "sch_trace", "kind": "weekly"}
+    deleted = sink.of_kind("ScheduleDeleted")
+    assert len(deleted) == 1
+    assert deleted[0].source == "schedule"
+    assert deleted[0].payload == {"id": "sch_trace"}
+
+
 def test_creating_a_schedule_emits_a_trace(tmp_path: Path) -> None:
     sink = RecordingTraceSink()
     store = _store(tmp_path, sink=sink)

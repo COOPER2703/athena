@@ -1,4 +1,7 @@
-"""Tools du noyau ``create_schedule`` et ``list_schedules`` (ADR-0028).
+"""Tools du noyau de Planification (ADR-0028).
+
+``create_schedule`` et ``list_schedules`` ouvrent la tranche #194 ;
+``update_schedule`` et ``delete_schedule`` la complètent (#197).
 
 Le modèle remplit un schéma structuré ; il ne compose jamais de cron. Les
 erreurs de saisie et de domaine sont rendues comme un statut lisible, jamais
@@ -7,8 +10,9 @@ bugs du noyau. Le contenu d'une Planification reste une **donnée** figée : il
 n'est ni exécuté ni interprété ici.
 
 ``on_change`` est la couture de réveil du Planificateur (#195) : elle est
-appelée une fois après une création réussie, jamais après une lecture ou un
-refus. Sa valeur par défaut ne fait rien.
+appelée une fois après une création, une modification ou une suppression
+réussie, jamais après une lecture, un ``not_found`` ou un refus. Sa valeur par
+défaut ne fait rien.
 """
 
 from __future__ import annotations
@@ -35,6 +39,8 @@ from server.core.tools import ToolRegistry
 
 CREATE_SCHEDULE = "create_schedule"
 LIST_SCHEDULES = "list_schedules"
+UPDATE_SCHEDULE = "update_schedule"
+DELETE_SCHEDULE = "delete_schedule"
 
 _WHEN_SCHEMA: Mapping[str, object] = {
     "type": "object",
@@ -151,11 +157,11 @@ def register_schedule_tools(
     timezone: str | ZoneInfo,
     on_change: Callable[[], None] | None = None,
 ) -> ToolRegistry:
-    """Enregistre les deux Tools de Planification sur ``registry``.
+    """Enregistre les quatre Tools de Planification sur ``registry``.
 
     ``now`` rend un instant **aware** ; ``timezone`` fixe l'interprétation des
-    heures locales. Une création réussie réveille le Planificateur par
-    ``on_change`` (aucun effet par défaut).
+    heures locales. Une création, une modification ou une suppression réussie
+    réveille le Planificateur par ``on_change`` (aucun effet par défaut).
     """
     zone = _zone(timezone)
     wake = on_change if on_change is not None else lambda: None
@@ -211,6 +217,127 @@ def register_schedule_tools(
             ],
         }
 
+    async def update_schedule(
+        arguments: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        if not isinstance(arguments, Mapping):
+            return {"status": "error", "message": "arguments must be an object"}
+
+        schedule_id = _as_text(arguments.get("id"))
+        if not schedule_id:
+            return {"status": "error", "message": "id is required"}
+        has_content = "content" in arguments
+        has_when = "when" in arguments
+        if not has_content and not has_when:
+            return {
+                "status": "error",
+                "message": "at least one of content or when is required",
+            }
+
+        existing = store.get(schedule_id)
+        if existing is None:
+            return {"status": "not_found"}
+
+        moment = now()
+        try:
+            content = (
+                _content(arguments.get("content"))
+                if has_content
+                else existing.content
+            )
+            rule: ScheduleRule = (
+                parse_when(arguments.get("when"), now=moment, timezone=zone)
+                if has_when
+                else existing.rule
+            )
+            replacement = Schedule(
+                id=existing.id,
+                content=content,
+                rule=rule,
+                next_occurrence=next_occurrence(rule, now=moment, timezone=zone),
+                created_at=existing.created_at,
+                updated_at=int(moment.timestamp()),
+            )
+            changed = store.update(replacement)
+        except ScheduleError as error:
+            return {"status": "error", "message": error.message}
+        if not changed:
+            return {"status": "not_found"}
+
+        wake()
+        return {
+            "status": "updated",
+            "id": replacement.id,
+            "next_occurrence": _local_iso(replacement.next_occurrence, zone),
+        }
+
+    async def delete_schedule(
+        arguments: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        if not isinstance(arguments, Mapping):
+            return {"status": "error", "message": "arguments must be an object"}
+
+        schedule_id = _as_text(arguments.get("id"))
+        if not schedule_id:
+            return {"status": "error", "message": "id is required"}
+        if store.get(schedule_id) is None or not store.delete(schedule_id):
+            return {"status": "not_found"}
+
+        wake()
+        return {"status": "deleted", "id": schedule_id}
+
     registry.register(_CREATE_SPEC, create_schedule)
     registry.register(_LIST_SPEC, list_schedules)
+    registry.register(_UPDATE_SPEC, update_schedule)
+    registry.register(_DELETE_SPEC, delete_schedule)
     return registry
+
+
+_UPDATE_SPEC = ToolSpec(
+    name=UPDATE_SCHEDULE,
+    description=(
+        "Change an existing schedule, identified by the stable id returned by "
+        "create_schedule or list_schedules. Provide content, when, or both. "
+        "The content and/or rule is replaced and the next occurrence is "
+        "recomputed from now, so no slot of the previous rule is kept. The "
+        "same bounds as create_schedule apply. An unknown id returns "
+        "not_found instead of a confirmation."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "Stable schedule id (sch_...).",
+            },
+            "content": {
+                "type": "string",
+                "description": (
+                    "The replacement reminder, stated in the third person or "
+                    "as an infinitive, independent of the current context."
+                ),
+            },
+            "when": _WHEN_SCHEMA,
+        },
+        "required": ["id"],
+    },
+)
+
+_DELETE_SPEC = ToolSpec(
+    name=DELETE_SCHEDULE,
+    description=(
+        "Delete an existing schedule identified by its stable id. Returns "
+        "deleted on success and not_found when no schedule carries that id; "
+        "deleting twice is not a silent success."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "Stable schedule id (sch_...).",
+            }
+        },
+        "required": ["id"],
+    },
+)
