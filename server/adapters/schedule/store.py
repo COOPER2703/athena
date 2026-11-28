@@ -28,7 +28,7 @@ from server.adapters.trace import NullTraceSink, emit
 from server.core.ports import Schedule, ScheduleError, ScheduleRule, TraceSink
 from server.core.schedule_rules import (
     MAX_SCHEDULES,
-    next_occurrence,
+    advance_occurrence,
     rule_from_json,
     rule_to_json,
 )
@@ -164,7 +164,8 @@ class SqliteScheduleStore:
           strictement postérieur à ``now_epoch`` (règles de ``schedule_rules``)
           et rendue — sauf à ``startup=True``, où elle n'est pas rendue : un
           redémarrage ne rejoue pas les créneaux manqués (ADR-0028), le
-          Planificateur trace le saut.
+          Planificateur trace le saut. Une récurrence par intervalle garde sa
+          phase : son pas part de l'échéance précédente, jamais de ``now``.
 
         ``timezone`` est le fuseau de l'instance, indispensable aux règles
         quotidiennes et hebdomadaires ; ``None`` retombe sur UTC, ce qui suffit à
@@ -193,8 +194,11 @@ class SqliteScheduleStore:
                         )
                         claimed.append(schedule)
                         continue
-                    advanced = next_occurrence(
-                        schedule.rule, now=moment, timezone=zone
+                    advanced = advance_occurrence(
+                        schedule.rule,
+                        previous=schedule.next_occurrence,
+                        now=moment,
+                        timezone=zone,
                     )
                     db.execute(
                         "UPDATE schedules SET next_occurrence = ? WHERE id = ?",

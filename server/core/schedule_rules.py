@@ -222,6 +222,30 @@ def next_occurrence(
     raise ScheduleError("invalid_when", "no valid occurrence could be computed")
 
 
+def advance_occurrence(
+    rule: ScheduleRule, *, previous: int, now: datetime, timezone: ZoneInfo
+) -> int:
+    """Prochaine occurrence d'une récurrente après un créneau dû.
+
+    Elle est toujours **strictement postérieure** à ``now`` et ne rejoue jamais
+    un créneau passé. L'intervalle garde sa **phase** : le pas part de
+    ``previous``, jamais de ``now``, donc une boucle en retard de quelques
+    secondes ne dérive pas la récurrence et plusieurs périodes ratées sont
+    sautées d'un coup (``previous + n * every_seconds``). Les règles
+    quotidiennes et hebdomadaires reprennent au prochain créneau local valide.
+    """
+    moment = _aware(now)
+    if rule.kind == "interval":
+        every = rule.every_seconds
+        if every is None or every <= 0:
+            raise ValueError("interval rule without every_seconds")
+        now_epoch = _seconds(moment)
+        # Plus petit n >= 1 tel que previous + n * every > now.
+        steps = max(1, (now_epoch - previous) // every + 1)
+        return _epoch(previous + steps * every)
+    return next_occurrence(rule, now=moment, timezone=timezone)
+
+
 def rule_to_json(rule: ScheduleRule) -> dict[str, object]:
     """Forme canonique persistée : la ponctuelle porte son instant UTC."""
     if rule.kind == "once":
