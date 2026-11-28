@@ -389,7 +389,7 @@ class Schedule:
     ``next_occurrence`` est un instant UTC en secondes (epoch). ``created_at``
     et ``updated_at`` suivent la même unité. L'identifiant est stable sur
     disque (``sch_<uuid4 hex>``) : les Tools de modification et de suppression
-    (#197) s'y adressent, et ``list_schedules`` le rend au modèle.
+    s'y adressent, et ``list_schedules`` le rend au modèle.
     """
 
     id: str
@@ -421,9 +421,8 @@ class ScheduleStore(Protocol):
 
     Le noyau ne connaît ni SQL ni le disque. ``create`` applique le plafond de
     200 Planifications dans la même section critique que l'insertion ;
-    ``list`` rend les plus proches d'abord. La modification et la suppression
-    arrivent avec #197 : le port est conçu pour les accueillir sans changer la
-    forme de ``Schedule``.
+    ``list`` rend les plus proches d'abord ; ``update`` et ``delete`` rendent
+    ``False`` quand l'identifiant a disparu, sans jamais créer de ligne.
     """
 
     def create(self, schedule: Schedule) -> Schedule: ...
@@ -433,6 +432,18 @@ class ScheduleStore(Protocol):
     def get(self, schedule_id: str) -> Schedule | None: ...
 
     def count(self) -> int: ...
+
+    def update(self, schedule: Schedule) -> bool:
+        """Remplace contenu, règle et prochaine occurrence d'une ligne existante.
+
+        Rend ``False`` quand l'identifiant a disparu entre la lecture et
+        l'écriture (#197) ; aucune ligne n'est alors créée.
+        """
+        ...
+
+    def delete(self, schedule_id: str) -> bool:
+        """Efface la Planification, ``False`` si elle n'existait déjà plus."""
+        ...
 
 
 class MemoryStore(Protocol):

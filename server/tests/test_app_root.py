@@ -514,8 +514,12 @@ def test_build_app_wires_the_kernel_tools(tmp_path: Path) -> None:
         "end_session",
         "create_schedule",
         "list_schedules",
+        "update_schedule",
+        "delete_schedule",
     }
     assert app.tools.owner_of("end_session") == "core"
+    assert app.tools.owner_of("update_schedule") == "core"
+    assert app.tools.owner_of("delete_schedule") == "core"
     spec = next(spec for spec in app.tools.specs() if spec.name == END_SESSION)
     assert spec.parameters == {"type": "object", "properties": {}}
 
@@ -543,11 +547,29 @@ def test_build_app_lends_the_schedule_tools_the_dedicated_database(
     # La création fonctionne sans que l'application tourne : aucun pump n'est
     # nécessaire pour enregistrer une Planification (l'émission viendra #195).
 
-    # Une seconde composition sur la même base relit la Planification.
+    updated = asyncio.run(
+        app.tools.execute(
+            "update_schedule",
+            {"id": created["id"], "content": "sortir le verre"},
+        )
+    )
+    assert updated["status"] == "updated"
+
+    # Une seconde composition sur la même base relit la modification.
     restarted = build_app(config)
     listed = asyncio.run(restarted.tools.execute("list_schedules", {}))
 
     assert [item["id"] for item in listed["schedules"]] == [created["id"]]
+    assert listed["schedules"][0]["content"] == "sortir le verre"
+
+    deleted = asyncio.run(
+        restarted.tools.execute("delete_schedule", {"id": created["id"]})
+    )
+    assert deleted == {"status": "deleted", "id": created["id"]}
+    assert asyncio.run(restarted.tools.execute("list_schedules", {})) == {
+        "status": "ok",
+        "schedules": [],
+    }
 
 
 def test_save_memory_tool_call_reaches_the_store_and_the_model() -> None:
@@ -948,6 +970,8 @@ def test_build_app_announces_the_kernel_and_plugin_tools_on_registration(
                     "end_session",
                     "create_schedule",
                     "list_schedules",
+                    "update_schedule",
+                    "delete_schedule",
                     "fixture__echo",
                 ]
 
