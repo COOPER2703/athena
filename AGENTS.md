@@ -254,11 +254,11 @@ démarrage raté.
 
 Le **Planificateur** (ADR-0028) est un composant du noyau : il détient les **Planifications**
 (un contenu figé et une règle structurée : ponctuelle, intervalle, quotidienne ou
-hebdomadaire), les persiste dans une base **dédiée** et les fera entrer dans le Canal
-d'événements sous forme d'**Occurrences**. Le magasin, le calcul pur de la prochaine
-occurrence et les quatre Tools du noyau sont complets : `create_schedule(content, when)`,
-`list_schedules()`, `update_schedule(id, content?, when?)` et `delete_schedule(id)`. Le pump,
-l'émission et l'Annonce arrivent avec #195. Aucune surface Console n'écrit de Planification.
+hebdomadaire), les persiste dans une base **dédiée** et les fait entrer dans le Canal
+d'événements sous forme d'**Occurrences**. Son pump démarre et s'arrête avec le runtime Gemini
+(jamais pendant l'Installation). Les quatre Tools du noyau sont complets :
+`create_schedule(content, when)`, `list_schedules()`, `update_schedule(id, content?, when?)` et
+`delete_schedule(id)`. Aucune surface Console n'écrit de Planification.
 
 - `update_schedule` remplace le contenu et/ou la règle fournis, recalcule la prochaine
   occurrence depuis `now` avec la nouvelle règle (aucun créneau de l'ancienne règle ne
@@ -266,6 +266,18 @@ l'émission et l'Annonce arrivent avec #195. Aucune surface Console n'écrit de 
   `not_found` pour les deux, jamais une confirmation mensongère : une seconde suppression est
   un `not_found`. Une mise à jour invalide est refusée (`error`) sans écriture partielle.
   Les Traces distinguent `ScheduleCreated`, `ScheduleUpdated` et `ScheduleDeleted`.
+- À l'échéance, le pump émet une **Occurrence** dans le Canal unique (Source
+  `planificateur`) et efface la ponctuelle. Au Repos, elle rejoint la même File d'attente,
+  attend un Client **réellement connecté** (`OccurrenceDeferred`, raison `no_client`), puis
+  ouvre l'Annonce **sans appeler le juge** : dans un lot mixte, le juge ne voit que les
+  Événements ordinaires et un seul tour porte l'ensemble. Le contenu part comme fait sous
+  `[ÉVÉNEMENTS]` ; il n'est jamais la phrase lue, et reste une donnée non fiable.
+- Une Annonce qui se termine avant d'être devenue visible est tracée `AnnouncementSilent`,
+  une seule fois, sans relance, et n'entre pas au Journal (rôle `event` seulement une fois
+  annoncée, donc exclue de la Consolidation). Traces : `ScheduleCreated`,
+  `OccurrenceEmitted`, `OccurrenceSkipped` (récurrente manquée au démarrage, avancée sans
+  rafale), `OccurrenceDeferred`, `OccurrenceDropped` (`too_large`, `capacity`, `shutdown`).
+
 
 - `ATHENA_SCHEDULE_DB` : `schedule.db` par défaut (chemin en lecture seule dans les
   Réglages) ; base SQLite dédiée, `CREATE TABLE IF NOT EXISTS`, connexion paresseuse, aucun

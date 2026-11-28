@@ -44,6 +44,9 @@ from server.core.events import (
     LlmOpened,
     LlmToolCall,
     LlmTranscription,
+    OCCURRENCE_SOURCE,
+    OccurrenceReceived,
+    QueuedFact,
     Role,
     SessionRequested,
     ShutdownRequested,
@@ -84,6 +87,20 @@ EVENT_QUEUE_MAX = 120
 # Taille maximale d'un Événement : un contenu plus long est rejeté à l'arrivée
 # (jamais mis en File) et le rejet est tracé.
 EVENT_MAX_CHARS = 4096
+# Fenêtre d'une file qui ne contient **que** des Occurrences : elles sautent le
+# jugement et n'ont rien à regrouper avec un fait externe. Zéro seconde garde le
+# modèle de fenêtre unique (armement par ``handle``, échéance par l'horloge) tout
+# en annonçant à la seconde prévue, sans le délai de regroupement de 5 s. Une
+# Occurrence arrivée dans une fenêtre ordinaire déjà ouverte y reste, pour que
+# le lot mixte ne produise qu'un seul tour.
+OCCURRENCE_WINDOW_TIMEOUT = 0.0
+# Phrase d'Annonce d'un rappel planifié : elle ne contient jamais le contenu de
+# la Planification, qui reste un fait sous ``[ÉVÉNEMENTS]``. Le modèle formule
+# le rappel lui-même (#81, ADR-0013 amendé).
+PLANNED_REMINDER_TRIGGER = (
+    "[RAPPEL PLANIFIÉ] L'utilisateur a demandé ce rappel : formule-le "
+    "brièvement à partir des faits, sans réciter la source."
+)
 # Garde-fou d'un Tour texte (ADR-0024) : le Tour se referme de lui-même si le
 # modèle ne rend rien, pour que le noyau ne reste jamais occupé par une réponse
 # qui n'arrive pas. Un Tour qui répond se termine bien avant.
@@ -116,6 +133,20 @@ class EventDropReason(StrEnum):
 
     TOO_LARGE = "too_large"
     DUPLICATE = "duplicate"
+    CAPACITY = "capacity"
+    SHUTDOWN = "shutdown"
+    JUDGMENT_ABORTED = "judgment_aborted"
+
+
+class OccurrenceDropReason(StrEnum):
+    """Cause d'un abandon d'**Occurrence**, portée par ``OccurrenceDropped``.
+
+    Une Occurrence ne connaît pas la dédup (deux Planifications identiques sont
+    deux demandes réelles) : seules la taille, le plafond, l'arrêt et
+    l'interruption d'un jugement en vol peuvent l'abandonner.
+    """
+
+    TOO_LARGE = "too_large"
     CAPACITY = "capacity"
     SHUTDOWN = "shutdown"
     JUDGMENT_ABORTED = "judgment_aborted"
@@ -191,11 +222,16 @@ class Coordinator:
         # Identité du Client de référence (Annonce proactive) et File d'attente
         # d'Événements (état du noyau, pas une seconde file — ADR-0010).
         self._registered_client_id = ""
-        self._event_queue: list[EventReceived] = []
+        # File unique (ADR-0010) : Événements ordinaires et Occurrences du
+        # Planificateur y attendent le Repos, dans l'ordre d'arrivée. Les
+        # Occurrences ne sont jamais dédupliquées.
+        self._event_queue: list[QueuedFact] = []
         self._window_open = False
         # Le lot jugé, gardé jusqu'à l'Annonce pour ne le journaliser qu'au
         # moment où la Connexion de jugement devient visible (ticket #42).
-        self._judged_batch: list[EventReceived] = []
+        # Il ne porte que les faits **annoncés** : une Occurrence, et les
+        # Événements ordinaires que le verdict a retenus.
+        self._judged_batch: list[QueuedFact] = []
         # Tour d'annonce en cours : tant qu'il tient, les transcriptions de
         # l'assistant sont écrites au Journal en rôle ``event`` (la parole qui
         # annonce), pas en ``assistant``. Il se referme au premier tour
@@ -293,24 +329,40 @@ class Coordinator:
                 return client_id
         return client_ids[0] if client_ids else ""
 
-    def _defer_for_lack_of_client(self, count: int) -> list[Command]:
+    def _defer_for_lack_of_client(
+        self, count: int, *, occurrences: int = 0
+    ) -> list[Command]:
         """Trace un report faute de Client, sans consommer la File.
 
-        Un seul nom de trace (``EventDeferred``) et une raison stable
+        Un nom de trace par nature (``EventDeferred`` pour les Événements,
+        ``OccurrenceDeferred`` pour les rappels planifiés) et une raison stable
         (``no_client``) pour que le Diagnostic explique un délai, que le report
-        vienne de l'arrivée d'un Événement au Repos ou de l'échéance de la
-        fenêtre.
+        vienne de l'arrivée d'un fait au Repos ou de l'échéance de la fenêtre.
         """
-        return [
-            self._trace(
-                "EventDeferred",
-                from_state=self._state,
-                to_state=self._state,
-                client_id=self._registered_client_id,
-                reason="no_client",
-                extra={"events": count},
+        commands: list[Command] = []
+        if count:
+            commands.append(
+                self._trace(
+                    "EventDeferred",
+                    from_state=self._state,
+                    to_state=self._state,
+                    client_id=self._registered_client_id,
+                    reason="no_client",
+                    extra={"events": count},
+                )
             )
-        ]
+        if occurrences:
+            commands.append(
+                self._trace(
+                    "OccurrenceDeferred",
+                    from_state=self._state,
+                    to_state=self._state,
+                    client_id=self._registered_client_id,
+                    reason="no_client",
+                    extra={"occurrences": occurrences},
+                )
+            )
+        return commands
 
     async def handle(self, event: Event) -> list[Command]:
         commands = await self._dispatch(event)
@@ -354,6 +406,8 @@ class Coordinator:
             return self._on_shutdown_requested(event)
         if isinstance(event, TimerFired):
             return await self._on_timer_fired(event)
+        if isinstance(event, OccurrenceReceived):
+            return self._on_occurrence_received(event)
         if isinstance(event, EventReceived):
             return self._on_event_received(event)
         raise TypeError(f"Unsupported event: {type(event).__name__}")
@@ -396,8 +450,11 @@ class Coordinator:
         # pas (``_open_window_if_needed``), et le report est tracé pour que le
         # Diagnostic explique le délai (ADR-0028, story 25).
         if self._state is SessionState.IDLE and not self._has_connected_client():
+            ordinary, occurrences = self._queued_counts()
             commands.extend(
-                self._defer_for_lack_of_client(len(self._event_queue))
+                self._defer_for_lack_of_client(
+                    ordinary, occurrences=occurrences
+                )
             )
         commands.extend(self._enforce_ceiling())
         return commands
@@ -407,8 +464,80 @@ class Coordinator:
         commands: list[Command] = []
         while len(self._event_queue) > EVENT_QUEUE_MAX:
             dropped = self._event_queue.pop(0)
-            commands.append(self._event_drop_trace(dropped, EventDropReason.CAPACITY))
+            commands.append(self._drop_trace(dropped, EventDropReason.CAPACITY))
         return commands
+
+    def _on_occurrence_received(self, event: OccurrenceReceived) -> list[Command]:
+        """Une Occurrence du Planificateur rejoint la File unique (ADR-0028).
+
+        Mêmes gardes que tout fait — taille, plafond — mais **jamais** de dédup :
+        deux Planifications au contenu identique sont deux demandes réelles. Au
+        Repos sans Client, elle patiente et son report est tracé à part
+        (``OccurrenceDeferred``), pour que le Diagnostic distingue un rappel
+        différé d'un Événement externe différé.
+        """
+        if len(event.content) > EVENT_MAX_CHARS:
+            return [
+                self._drop_trace(event, OccurrenceDropReason.TOO_LARGE)
+            ]
+        self._event_queue.append(event)
+        commands: list[Command] = [
+            self._trace(
+                "OccurrenceQueued",
+                from_state=self._state,
+                to_state=self._state,
+                client_id=self._registered_client_id,
+                level="debug",
+                extra={
+                    "schedule_id": event.schedule_id,
+                    "queued": len(self._event_queue),
+                },
+            )
+        ]
+        if self._state is SessionState.IDLE and not self._has_connected_client():
+            ordinary, occurrences = self._queued_counts()
+            commands.extend(
+                self._defer_for_lack_of_client(
+                    ordinary, occurrences=occurrences
+                )
+            )
+        commands.extend(self._enforce_ceiling())
+        return commands
+
+    def _queued_counts(self) -> tuple[int, int]:
+        """Nombre d'Événements ordinaires et d'Occurrences en File."""
+        occurrences = sum(
+            1 for fact in self._event_queue if isinstance(fact, OccurrenceReceived)
+        )
+        return len(self._event_queue) - occurrences, occurrences
+
+    def _drop_trace(
+        self,
+        fact: QueuedFact,
+        reason: EventDropReason | OccurrenceDropReason,
+    ) -> Trace:
+        """Trace l'abandon d'un fait, avec le nom propre à son type.
+
+        Les Événements gardent ``EventQueueDropped`` (compatibilité des tests et
+        du Diagnostic) ; les Occurrences ont leur propre nom pour qu'un rappel
+        manqué ne se lise pas comme un Événement externe jeté.
+        """
+        if isinstance(fact, OccurrenceReceived):
+            return self._occurrence_drop_trace(fact, reason)
+        return self._event_drop_trace(fact, reason)
+
+    def _occurrence_drop_trace(
+        self, event: OccurrenceReceived, reason: EventDropReason | OccurrenceDropReason
+    ) -> Trace:
+        """Trace l'abandon d'une Occurrence avec sa cause stable."""
+        return self._trace(
+            "OccurrenceDropped",
+            from_state=self._state,
+            to_state=self._state,
+            client_id=self._registered_client_id,
+            reason=reason.value,
+            extra={"schedule_id": event.schedule_id},
+        )
 
     def _event_drop_trace(
         self, event: EventReceived, reason: EventDropReason
@@ -459,7 +588,10 @@ class Coordinator:
 
     def _is_duplicate(self, event: EventReceived) -> bool:
         """Doublon exact ``(source, contenu)`` déjà collecté dans la fenêtre."""
-        _, dropped = self._collapse([*self._event_queue, event])
+        ordinary = [
+            fact for fact in self._event_queue if isinstance(fact, EventReceived)
+        ]
+        _, dropped = self._collapse([*ordinary, event])
         return bool(dropped)
 
     def _collapse_window_duplicates(self) -> list[Command]:
@@ -468,10 +600,20 @@ class Coordinator:
         Les Événements accumulés hors Repos peuvent contenir des répétitions :
         à l'ouverture de la fenêtre, seule la première occurrence de chaque
         paire exacte ``(source, contenu)`` est conservée, dans l'ordre d'arrivée
-        ; chaque occurrence écartée est tracée (raison ``duplicate``).
+        ; chaque occurrence écartée est tracée (raison ``duplicate``). Les
+        Occurrences traversent ce nettoyage intactes : elles ne sont jamais
+        dédupliquées, même identiques.
         """
-        kept, dropped = self._collapse(self._event_queue)
-        self._event_queue = kept
+        ordinary = [
+            fact for fact in self._event_queue if isinstance(fact, EventReceived)
+        ]
+        kept, dropped = self._collapse(ordinary)
+        kept_ids = {id(fact) for fact in kept}
+        self._event_queue = [
+            fact
+            for fact in self._event_queue
+            if not isinstance(fact, EventReceived) or id(fact) in kept_ids
+        ]
         return [
             self._event_drop_trace(event, EventDropReason.DUPLICATE)
             for event in dropped
@@ -498,10 +640,21 @@ class Coordinator:
             return []
         self._window_open = True
         commands = self._collapse_window_duplicates()
+        # Une File qui ne porte que des Occurrences n'a rien à regrouper avec un
+        # fait externe : la fenêtre s'arme à zéro seconde pour annoncer à
+        # l'heure prévue. Un lot mixte garde la fenêtre de regroupement.
+        timeout = (
+            OCCURRENCE_WINDOW_TIMEOUT
+            if all(
+                isinstance(fact, OccurrenceReceived)
+                for fact in self._event_queue
+            )
+            else EVENT_WINDOW_TIMEOUT
+        )
         commands.append(
             StartIdleTimer(
                 connection_id=EVENT_WINDOW_TIMER_ID,
-                timeout=EVENT_WINDOW_TIMEOUT,
+                timeout=timeout,
             )
         )
         commands.append(
@@ -535,70 +688,108 @@ class Coordinator:
         ]
 
     async def _judge_batch(self) -> list[Command]:
-        """Juge le lot hors Session (modèle **texte**), puis décide d'annoncer.
+        """Juge les Événements du lot hors Session, puis annonce les faits.
 
         Le verdict ne vient jamais du modèle Live : un modèle Live vocal répond
         toujours à un tour utilisateur, il ne sait pas « se taire ». Un modèle
         texte rend ``announce``/``message`` ; la Connexion Live n'est ouverte que
-        pour faire parler l'Annonce. Un lot tu est simplement consommé : il
-        n'entre pas au Journal (ADR-0007). Sans juge injecté, on se tait (faute
-        fermée : dans le doute, ne pas déranger).
+        pour faire parler l'Annonce. Un lot d'Événements tu est simplement
+        consommé : il n'entre pas au Journal (ADR-0007). Sans juge injecté, on se
+        tait (faute fermée : dans le doute, ne pas déranger).
+
+        Les **Occurrences** du Planificateur sautent ce jugement (ADR-0028) :
+        le juge ne voit que les Événements ordinaires, et une Occurrence est
+        annoncée quoi qu'il décide — y compris sans juge, en panne, ou avec un
+        verdict muet ou malformé. Le lot mixte ne produit qu'**un seul** tour :
+        le message du juge (quand il y en a un) puis la consigne de formulation
+        du rappel. Le contenu planifié reste un fait, jamais la phrase lue.
         """
         batch = self._event_queue
         self._event_queue = []
         if not batch:
             return self._decision("EventJudge")
-        facts = [self._safe_fact(event) for event in batch]
-        verdict = (
-            await self._judge.judge(facts)
-            if self._judge is not None
-            else Judgment(announce=False, failed=True)
-        )
-        if verdict.failed:
-            # Verdict manquant (panne du juge, réponse malformée) : faute fermée,
-            # mais tracée **distinctement** d'un fait jugé banal, pour qu'une
-            # panne silencieuse (quota, réseau) ne se lise pas comme « tout est
-            # banal » (ADR-0012).
-            return [
-                self._trace(
-                    "EventJudgmentFailed",
-                    from_state=SessionState.IDLE,
-                    to_state=SessionState.IDLE,
-                    client_id=self._registered_client_id,
-                    extra={"events": len(batch)},
-                    level="error",
+        occurrences = [
+            fact for fact in batch if isinstance(fact, OccurrenceReceived)
+        ]
+        ordinary = [
+            fact for fact in batch if isinstance(fact, EventReceived)
+        ]
+
+        commands: list[Command] = []
+        message = ""
+        ordinary_announced = False
+        if ordinary:
+            facts = [self._safe_fact(event) for event in ordinary]
+            verdict = (
+                await self._judge.judge(facts)
+                if self._judge is not None
+                else Judgment(announce=False, failed=True)
+            )
+            if verdict.failed:
+                # Verdict manquant (panne du juge, réponse malformée) : faute
+                # fermée pour les Événements, tracée **distinctement** d'un fait
+                # jugé banal (ADR-0012). L'Occurrence, elle, reste annoncée.
+                commands.append(
+                    self._trace(
+                        "EventJudgmentFailed",
+                        from_state=SessionState.IDLE,
+                        to_state=SessionState.IDLE,
+                        client_id=self._registered_client_id,
+                        extra={"events": len(ordinary)},
+                        level="error",
+                    )
                 )
-            ]
-        if not verdict.announce:
-            return [
-                self._trace(
-                    "EventJudged",
-                    from_state=SessionState.IDLE,
-                    to_state=SessionState.IDLE,
-                    client_id=self._registered_client_id,
-                    extra={"events": len(batch), "announce": False},
+            elif not verdict.announce:
+                commands.append(
+                    self._trace(
+                        "EventJudged",
+                        from_state=SessionState.IDLE,
+                        to_state=SessionState.IDLE,
+                        client_id=self._registered_client_id,
+                        extra={"events": len(ordinary), "announce": False},
+                    )
                 )
-            ]
-        message = verdict.message.strip()
-        if not message:
-            # « Annonce » sans phrase : le verdict est malformé. Le lot ne doit
-            # jamais devenir le tour à prononcer — ce serait lire à voix haute
-            # le contenu externe, instructions comprises (#81). Faute fermée.
-            return [
-                self._trace(
-                    "EventJudgmentFailed",
-                    from_state=SessionState.IDLE,
-                    to_state=SessionState.IDLE,
-                    client_id=self._registered_client_id,
-                    reason="missing_message",
-                    extra={"events": len(batch)},
-                    level="error",
-                )
-            ]
-        return await self._start_announcement(batch, message)
+            else:
+                message = verdict.message.strip()
+                if message:
+                    ordinary_announced = True
+                else:
+                    # « Annonce » sans phrase : le verdict est malformé. Le lot
+                    # ne doit jamais devenir le tour à prononcer — ce serait
+                    # lire à voix haute le contenu externe (#81). Faute fermée.
+                    commands.append(
+                        self._trace(
+                            "EventJudgmentFailed",
+                            from_state=SessionState.IDLE,
+                            to_state=SessionState.IDLE,
+                            client_id=self._registered_client_id,
+                            reason="missing_message",
+                            extra={"events": len(ordinary)},
+                            level="error",
+                        )
+                    )
+
+        if not occurrences and not ordinary_announced:
+            return commands
+
+        if ordinary_announced:
+            # Le verdict retient tous les Événements : le tour porte l'ordre
+            # d'arrivée complet, Occurrences comprises.
+            announced: list[QueuedFact] = list(batch)
+            text = (
+                f"{message}\n\n{PLANNED_REMINDER_TRIGGER}"
+                if occurrences
+                else message
+            )
+        else:
+            # Seules les Occurrences parlent : jamais le contenu comme phrase.
+            announced = occurrences
+            text = PLANNED_REMINDER_TRIGGER
+        commands.extend(await self._start_announcement(announced, text))
+        return commands
 
     async def _start_announcement(
-        self, batch: list[EventReceived], message: str
+        self, batch: list[QueuedFact], message: str
     ) -> list[Command]:
         """Ouvre l'unique Connexion Live et lui fait prononcer l'Annonce.
 
@@ -608,12 +799,11 @@ class Coordinator:
         Événement a ouvert la Session. Elle s'en distingue sur un point, qui
         est **structurel** : la Connexion est ouverte sans aucun outil, pour
         qu'un Événement piégé ne puisse jamais déclencher une action (#81 ;
-        ADR-0020). Le message du juge est la phrase à
-        prononcer ; les faits assainis du lot sont transmis au Live comme
-        contexte (``facts``), sans être prononcés, pour qu'Athena puisse
-        détailler l'Événement à la demande. La Connexion est marquée ``auto`` :
-        son premier son devient une Session automatique annoncée au Client de
-        référence.
+        ADR-0020). Le message est la phrase à prononcer ; les faits assainis du
+        lot sont transmis au Live comme contexte (``facts``), sans être
+        prononcés, pour qu'Athena puisse détailler l'Événement à la demande. La
+        Connexion est marquée ``auto`` : son premier son devient une Session
+        automatique annoncée au Client de référence.
 
         La cible est un Client **réellement connecté** (ADR-0028) : si le
         dernier enregistré a disparu, le premier connecté reçoit l'Annonce.
@@ -621,11 +811,19 @@ class Coordinator:
         moment d'ouvrir, la Connexion n'est pas ouverte : le lot retourne en
         tête de File, intact, et le report est tracé. Une présence inconnue
         (défaut de test) garde l'ancien comportement.
+
+        ``batch`` ne porte que les faits **annoncés** : une Occurrence et les
+        Événements retenus par le verdict. Le Journal n'écrit que ceux-là.
         """
         target = self._announcement_target()
         if not target and self._connected_clients is not None:
             self._event_queue = [*batch, *self._event_queue]
-            return self._defer_for_lack_of_client(len(batch))
+            return self._defer_for_lack_of_client(
+                sum(1 for fact in batch if isinstance(fact, EventReceived)),
+                occurrences=sum(
+                    1 for fact in batch if isinstance(fact, OccurrenceReceived)
+                ),
+            )
         self._judged_batch = batch
         self._session_counter += 1
         self._connection_id = f"s{self._session_counter}"
@@ -679,17 +877,31 @@ class Coordinator:
                 from_state=SessionState.IDLE,
                 to_state=self._state,
                 client_id=self._client_id,
-                extra={"events": len(batch), "announce": True},
+                extra={
+                    "events": len(batch),
+                    "announce": True,
+                    "occurrences": sum(
+                        1
+                        for fact in batch
+                        if isinstance(fact, OccurrenceReceived)
+                    ),
+                },
             ),
         ]
 
     @staticmethod
-    def _format_fact(event: EventReceived) -> str:
-        """Étiquette un fait par sa Source, forme ``[source] contenu``."""
+    def _format_fact(event: QueuedFact) -> str:
+        """Étiquette un fait par sa Source, forme ``[source] contenu``.
+
+        Une Occurrence porte la Source unique ``planificateur`` : c'est la même
+        forme brute pour le Journal et le dédoublonnage du Rappel.
+        """
+        if isinstance(event, OccurrenceReceived):
+            return f"[{OCCURRENCE_SOURCE}] {event.content}"
         return f"[{event.source}] {event.content}"
 
     @staticmethod
-    def _safe_fact(event: EventReceived) -> str:
+    def _safe_fact(event: QueuedFact) -> str:
         """Fait rendu pour le modèle : une ligne, sans en-tête forgeable.
 
         ``_format_fact`` reste la forme brute du Journal et du dédoublonnage du
@@ -698,9 +910,15 @@ class Coordinator:
         ``[ÉVÉNEMENTS]`` sont retirées : un contenu ne peut ni fabriquer un
         second fait, ni simuler un nouveau bloc, ni fermer l'étiquette de Source
         (#81). La règle d'aplatissement et de neutralisation est partagée avec
-        le juge (``server.core.untrusted``).
+        le juge (``server.core.untrusted``). Une Occurrence suit la même règle :
+        un contenu de Planification reste une donnée, jamais une instruction.
         """
-        source = flatten_untrusted(event.source).replace("]", ")")
+        raw_source = (
+            OCCURRENCE_SOURCE
+            if isinstance(event, OccurrenceReceived)
+            else event.source
+        )
+        source = flatten_untrusted(raw_source).replace("]", ")")
         content = sanitize_untrusted(
             event.content,
             forbidden=_EVENT_HEADER_TOKEN,
@@ -709,7 +927,7 @@ class Coordinator:
         return f"[{source}] {content}"
 
     @classmethod
-    def _render_batch(cls, batch: list[EventReceived]) -> str:
+    def _render_batch(cls, batch: list[QueuedFact]) -> str:
         """Un fait par ligne, étiqueté par Source (ordre d'arrivée, FIFO)."""
         lines = [f"- {cls._safe_fact(event)}" for event in batch]
         return "\n".join([_EVENT_HEADER, *lines])
@@ -1413,9 +1631,12 @@ class Coordinator:
         else:
             commands = self._decision("ShutdownRequested")
         # La File d'attente d'Événements est éphémère : à l'arrêt, les faits non
-        # jugés sont perdus et tracés un par un, jamais jugés (ADR-0007).
+        # jugés sont perdus et tracés un par un, jamais jugés (ADR-0007). Une
+        # Occurrence abandonnée garde son propre nom de trace (ADR-0028).
         for queued in self._event_queue:
-            commands.append(self._event_drop_trace(queued, EventDropReason.SHUTDOWN))
+            commands.append(
+                self._drop_trace(queued, EventDropReason.SHUTDOWN)
+            )
         self._event_queue = []
         self._window_open = False
         return commands
@@ -1448,7 +1669,10 @@ class Coordinator:
         if self._state is not SessionState.IDLE:
             return self._decision("EventWindowFired")
         if not self._has_connected_client():
-            return self._defer_for_lack_of_client(len(self._event_queue))
+            ordinary, occurrences = self._queued_counts()
+            return self._defer_for_lack_of_client(
+                ordinary, occurrences=occurrences
+            )
         return await self._judge_batch()
 
     def _rearm_timer(self) -> StartIdleTimer:
@@ -1551,7 +1775,23 @@ class Coordinator:
         # Le chemin d'annonce et la préemption l'ont déjà vidé.
         for fact in self._judged_batch:
             commands.append(
-                self._event_drop_trace(fact, EventDropReason.JUDGMENT_ABORTED)
+                self._drop_trace(fact, EventDropReason.JUDGMENT_ABORTED)
+            )
+        # Une Connexion d'annonce qui se termine avant d'être devenue visible
+        # n'a jamais parlé : le silence est tracé une fois, sans relance
+        # (ADR-0028). Le lot n'est pas au Journal — il n'a jamais été annoncé.
+        if not was_visible and self._judging:
+            commands.append(
+                self._trace(
+                    "AnnouncementSilent",
+                    from_state=from_state,
+                    to_state=SessionState.IDLE,
+                    client_id=old_client_id,
+                    reason=reason.name,
+                    cause=cause,
+                    connection_id=old_connection_id,
+                    session_id=old_session_id,
+                )
             )
         self._reset()
         return commands

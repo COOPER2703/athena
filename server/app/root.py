@@ -43,6 +43,7 @@ from server.app.config import (
     parse_dotenv,
 )
 from server.app.health import database_sizes
+from server.app.schedule_wakeup import AsyncioWakeup
 from server.app.secrets import SecretResolver
 from server.app.thread import ThreadView
 from server.app.trace import build_trace_sink, install_logging_bridge
@@ -85,6 +86,7 @@ from server.core.events import (
     EventReceived,
     LlmOpened,
     LlmTranscription,
+    OccurrenceReceived,
     SessionRequested,
     ShutdownRequested,
     TourCanceled,
@@ -92,6 +94,7 @@ from server.core.events import (
 )
 from server.core.health import HealthState, health_snapshot
 from server.core.memory_tools import register_memory_tools
+from server.core.planificateur import Planificateur
 from server.core.plugins import PluginRegistry
 from server.core.ports import (
     AuthService,
@@ -100,6 +103,7 @@ from server.core.ports import (
     InstallationStatus,
     MemoryStore,
     MissingSecretError,
+    ScheduleStore,
     SecretStore,
     SecretValidator,
     SessionControl,
@@ -109,6 +113,7 @@ from server.core.ports import (
     TourDestination,
     TraceEntry,
     TraceSink,
+    Wakeup,
 )
 from server.core.session_tools import register_session_tools
 from server.core.schedule_tools import register_schedule_tools
@@ -348,6 +353,7 @@ class ExecutionRuntime:
     webhook: WebhookServer | None
     judge: EventJudge | None
     scheduler: ConsolidationScheduler | None
+    planificateur: Planificateur | None = None
 
 
 class RuntimeFactory:
@@ -371,6 +377,10 @@ class RuntimeFactory:
         trace_sink: TraceSink,
         memory: MemoryStore,
         health: HealthState,
+        schedule_store: ScheduleStore,
+        wakeup: Wakeup,
+        occurrence_cell: list[Callable[[OccurrenceReceived], None]],
+        schedule_now: Callable[[], datetime],
         live_connect: LiveConnect | None = None,
     ) -> None:
         self._config = config
@@ -380,6 +390,10 @@ class RuntimeFactory:
         self._trace_sink = trace_sink
         self._memory = memory
         self._health = health
+        self._schedule_store = schedule_store
+        self._wakeup = wakeup
+        self._occurrence_cell = occurrence_cell
+        self._schedule_now = schedule_now
         self._live_connect = live_connect
         # Clé chargée au démarrage : vide en Installation, la clé d'origine
         # sinon. ``App`` la remplace après une activation réussie.
@@ -391,6 +405,17 @@ class RuntimeFactory:
             _optional_secret(self._secrets, GEMINI_SECRET)
             or self._config.gemini.api_key
         ).strip()
+
+    def _emit_occurrence(self, occurrence: OccurrenceReceived) -> None:
+        """Dépose une Occurrence dans le Canal unique, via la cellule de l'App.
+
+        La fabrique peut être construite avant ``App`` : la cellule n'est
+        remplie qu'après, et le pump ne tourne qu'une fois ``App.run`` lancé.
+        Une cellule vide (aucune App, test de construction) ignore l'émission
+        plutôt que de lever dans la tâche de fond.
+        """
+        if self._occurrence_cell:
+            self._occurrence_cell[0](occurrence)
 
     def build(self) -> ExecutionRuntime | None:
         """Construit les surfaces, ou ``None`` tant qu'aucune clé n'existe."""
@@ -452,6 +477,17 @@ class RuntimeFactory:
                 self._health, trace_sink, report
             ),
         )
+        planificateur = Planificateur(
+            store=self._schedule_store,
+            now=self._schedule_now,
+            timezone=ZoneInfo(config.schedule.timezone),
+            sleep=asyncio.sleep,
+            emit=self._emit_occurrence,
+            trace=lambda kind, payload: emit(
+                trace_sink, "planificateur", kind, payload=payload
+            ),
+            wake=self._wakeup,
+        )
         return ExecutionRuntime(
             api_key=api_key,
             transport=transport,
@@ -459,6 +495,7 @@ class RuntimeFactory:
             webhook=webhook,
             judge=judge,
             scheduler=scheduler,
+            planificateur=planificateur,
         )
 
 
@@ -542,6 +579,7 @@ class App:
         recall_window_turns: int = 3,
         recall_max_distance: float = 0.6,
         scheduler: ConsolidationScheduler | None = None,
+        planificateur: Planificateur | None = None,
         webhook: WebhookServer | None = None,
         console: ConsoleServer | None = None,
         runtime_factory: RuntimeFactory | None = None,
@@ -563,6 +601,9 @@ class App:
         self._trace_sink = trace_sink
         self._memory = memory
         self._scheduler = scheduler
+        # Planificateur (ADR-0028) : sa pompe naît avec le runtime Gemini, jamais
+        # pendant l'Installation. ``None`` = aucune émission, aucun réveil.
+        self._planificateur = planificateur
         self._webhook = webhook
         self._console = console
         # Destination des Tours (ADR-0024) : l'adaptateur Console l'implémente,
@@ -631,6 +672,11 @@ class App:
     @property
     def scheduler(self) -> ConsolidationScheduler | None:
         return self._scheduler
+
+    @property
+    def planificateur(self) -> Planificateur | None:
+        """Pompe du Planificateur, ``None`` pendant l'Installation."""
+        return self._planificateur
 
     @property
     def tools(self) -> ToolRegistry | None:
@@ -792,6 +838,10 @@ class App:
         if self._scheduler is not None:
             # Background task: never on the event-handling path (ADR-0009).
             self._pumps.append(asyncio.create_task(self._scheduler.run()))
+        if self._planificateur is not None:
+            # Pump du Planificateur : même propriété que la Consolidation, une
+            # seule boucle, annulée par le ``finally`` ci-dessous (ADR-0028).
+            self._pumps.append(asyncio.create_task(self._planificateur.run()))
         if self._has_pending_plugins():
             # Une panne de plateforme se répare seule : la retente tourne en
             # tâche de fond et les Tools arrivent à la Connexion Live suivante.
@@ -874,6 +924,7 @@ class App:
         self._gemini = runtime.gemini
         self._webhook = runtime.webhook
         self._scheduler = runtime.scheduler
+        self._planificateur = runtime.planificateur
         self._coordinator.set_judge(runtime.judge)
         if runtime.transport is not None:
             self._pumps.append(
@@ -885,6 +936,10 @@ class App:
             )
         if runtime.scheduler is not None:
             self._pumps.append(asyncio.create_task(runtime.scheduler.run()))
+        if runtime.planificateur is not None:
+            self._pumps.append(
+                asyncio.create_task(runtime.planificateur.run())
+            )
 
     async def _warmup_memory(self) -> None:
         warmup = getattr(self._memory, "warmup", None)
@@ -946,6 +1001,15 @@ class App:
         le noyau seul décide où et quand le juger.
         """
         self._events.put_nowait(EventReceived(source=source, content=content))
+
+    def push_occurrence(self, occurrence: OccurrenceReceived) -> None:
+        """Dépose une Occurrence du Planificateur dans le **même** Canal.
+
+        Couture ``emit`` du Planificateur (ADR-0028) : le noyau l'enfile comme
+        tout fait, la juge au Repos sans passer par le juge, et attend un Client
+        connecté. Aucune seconde file.
+        """
+        self._events.put_nowait(occurrence)
 
     def submit_tour(self, tour_id: str, text: str) -> None:
         """Dépose un Tour texte dans le Canal (couture ``TourControl``, ADR-0024).
@@ -1303,6 +1367,7 @@ def build_app(
     auth_now: Callable[[], float] | None = None,
     monotonic: Callable[[], float] | None = None,
     wall_clock: Callable[[], datetime] | None = None,
+    wakeup: Wakeup | None = None,
     restart: Callable[[], None] | None = None,
 ) -> App:
     """Construit explicitement : config → trace → adaptateurs → Coordinator.
@@ -1324,7 +1389,10 @@ def build_app(
     sans relancer le processus. ``restart`` remplace la sortie propre demandée
     par l'application des Réglages : le harnais observe le redémarrage sans
     tuer pytest. ``wall_clock`` est l'horloge murale du contexte temporel
-    (défaut : ``datetime.now(UTC)``) : un test fige l'heure sans attendre.
+    (défaut : ``datetime.now(UTC)``) : un test fige l'heure sans attendre ; le
+    Planificateur et ``create_schedule`` lisent la même horloge, donc un rappel
+    « dans N » se crée et sonne dans le temps simulé. ``wakeup`` remplace le
+    réveil asyncio du pump (seam de test) sans changer le Canal.
     """
     # Magasin de réglages et de Secrets (ADR-0025) : base dédiée à côté de la
     # mémoire et de l'auth. Il précède le flux de traces — il porte
@@ -1371,6 +1439,24 @@ def build_app(
         store=_stored_setting_values(settings_store),
         process_env=process_env,
     )
+
+    # Horloge murale unique (#192) : le contexte temporel, ``create_schedule`` et
+    # le pump du Planificateur lisent la **même** heure. Un test qui fige
+    # l'horloge voit donc le rappel se créer et sonner dans le temps simulé.
+    wall_clock = (
+        wall_clock
+        if wall_clock is not None
+        else (lambda: datetime.now(timezone.utc))
+    )
+    timezone_name = config.schedule.timezone
+    schedule_zone = ZoneInfo(timezone_name)
+
+    def schedule_now() -> datetime:
+        """Instant courant dans le fuseau du Réglage, toujours aware."""
+        moment = wall_clock()
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return moment.astimezone(schedule_zone)
 
     console_trace_buffer = (
         TraceBuffer(config.console.trace_buffer) if config.console.enabled else None
@@ -1437,6 +1523,14 @@ def build_app(
     schedule_store = SqliteScheduleStore(
         db_path=config.schedule.db_path, trace_sink=trace_sink
     )
+    # Réveil du pump : partagé par les Tools (``on_change``) et la boucle, pour
+    # qu'une Planification plus proche sonne à l'heure sans attendre l'ancienne
+    # échéance. Un test peut l'injecter pour piloter l'attente sans temps réel.
+    schedule_wakeup = wakeup if wakeup is not None else AsyncioWakeup()
+    # Cellule d'émission : remplie avec ``App.push_occurrence`` après la
+    # construction de l'App, comme ``app_cell``. La fabrique et l'App se
+    # construisent dans cet ordre sans que le Planificateur connaisse l'App.
+    occurrence_cell: list[Callable[[OccurrenceReceived], None]] = []
 
     # Une seule fabrique construit les surfaces d'exécution : au démarrage
     # quand une clé existe déjà, et à la fin de l'Installation sinon (story 12).
@@ -1449,6 +1543,10 @@ def build_app(
         trace_sink=trace_sink,
         memory=memory,
         health=health,
+        schedule_store=schedule_store,
+        wakeup=schedule_wakeup,
+        occurrence_cell=occurrence_cell,
+        schedule_now=schedule_now,
         live_connect=live_connect,
     )
     boot_runtime = runtime_factory.build() if gemini_enabled else None
@@ -1457,12 +1555,14 @@ def build_app(
         gemini: GeminiLiveAdapter | None = None
         judge: GeminiEventJudge | None = None
         scheduler: ConsolidationScheduler | None = None
+        planificateur: Planificateur | None = None
         webhook: WebhookAdapter | None = None
     else:
         transport = boot_runtime.transport
         gemini = boot_runtime.gemini
         judge = boot_runtime.judge
         scheduler = boot_runtime.scheduler
+        planificateur = boot_runtime.planificateur
         webhook = boot_runtime.webhook
 
     # Les Tools du noyau entrent au propriétaire ``core`` ; les plugins activés
@@ -1476,16 +1576,16 @@ def build_app(
     # Tool du noyau de fin de Session (#130) : enregistré avec les Tools du
     # noyau, donc avant les plugins. Une collision de nom reste fatale (ADR-0014).
     register_session_tools(plugins.tools)
-    # Planificateur (#194, #197) : création, lecture, modification et
-    # suppression ; le réveil du pump sera injecté par #195 via ``on_change``.
-    # Les règles s'interprètent dans le fuseau du Réglage, déjà validé par la
-    # configuration.
-    schedule_zone = ZoneInfo(config.schedule.timezone)
+    # Planificateur (#194/#195/#197) : les quatre Tools, et le réveil du pump
+    # après chaque écriture réussie, pour qu'une échéance plus proche que celle
+    # attendue sonne à l'heure. Les règles s'interprètent dans le fuseau du
+    # Réglage, déjà validé par la configuration.
     register_schedule_tools(
         plugins.tools,
         schedule_store,
-        now=lambda: datetime.now(schedule_zone),
+        now=schedule_now,
         timezone=schedule_zone,
+        on_change=schedule_wakeup.notify,
     )
     plugin_loader = PluginLoader(
         directory=config.plugins.directory,
@@ -1587,13 +1687,6 @@ def build_app(
     # Contexte temporel : la racine rend la section à chaque ouverture de
     # Session, Tour ou Annonce, dans le fuseau du Réglage. Le noyau ne reçoit
     # qu'une callable, jamais une horloge ni ``zoneinfo`` (pureté du noyau).
-    wall_clock = (
-        wall_clock
-        if wall_clock is not None
-        else (lambda: datetime.now(timezone.utc))
-    )
-    timezone_name = config.schedule.timezone
-
     def render_now_context() -> str:
         return format_now_context(wall_clock(), timezone_name)
 
@@ -1617,6 +1710,7 @@ def build_app(
         recall_window_turns=config.memory.recall_window_turns,
         recall_max_distance=config.memory.recall_max_distance,
         scheduler=scheduler,
+        planificateur=planificateur,
         webhook=webhook,
         console=console,
         tour_destination=console.tour_destination if console is not None else None,
@@ -1652,6 +1746,8 @@ def build_app(
     # première clé Gemini active les surfaces d'exécution sur place.
     restart_cell.append(app.request_shutdown)
     app_cell.append(app)
+    # Le Planificateur dépose ses Occurrences dans le Canal unique de l'App.
+    occurrence_cell.append(app.push_occurrence)
     return app
 
 

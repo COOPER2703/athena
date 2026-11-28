@@ -20,12 +20,15 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from datetime import datetime
 from typing import Sequence
+from zoneinfo import ZoneInfo
 
 from server.adapters.trace import NullTraceSink, emit
 from server.core.ports import Schedule, ScheduleError, ScheduleRule, TraceSink
 from server.core.schedule_rules import (
     MAX_SCHEDULES,
+    next_occurrence,
     rule_from_json,
     rule_to_json,
 )
@@ -59,6 +62,10 @@ def _from_row(row: tuple[object, ...]) -> Schedule:
         created_at=int(row[4]),  # type: ignore[arg-type]
         updated_at=int(row[5]),  # type: ignore[arg-type]
     )
+
+
+def _zone(value: str | ZoneInfo) -> ZoneInfo:
+    return value if isinstance(value, ZoneInfo) else ZoneInfo(value)
 
 
 class SqliteScheduleStore:
@@ -137,6 +144,69 @@ class SqliteScheduleStore:
         with self._lock:
             row = self._get_db().execute("SELECT COUNT(*) FROM schedules").fetchone()
         return 0 if row is None else int(row[0])
+
+    def claim_due(
+        self,
+        now_epoch: int,
+        *,
+        startup: bool = False,
+        timezone: str | ZoneInfo | None = None,
+    ) -> Sequence[Schedule]:
+        """Réclame les Planifications dues, en **une** transaction.
+
+        Les lignes dont ``next_occurrence <= now_epoch`` sont relues dans l'ordre
+        de leur échéance, puis :
+
+        - une **ponctuelle** est effacée et rendue telle qu'elle était à
+          l'échéance (le Planificateur émet son contenu réellement dû) ; un
+          démarrage la rattrape aussi, une fois, même très en retard ;
+        - une **récurrente** est avancée au prochain créneau valide
+          strictement postérieur à ``now_epoch`` (règles de ``schedule_rules``)
+          et rendue — sauf à ``startup=True``, où elle n'est pas rendue : un
+          redémarrage ne rejoue pas les créneaux manqués (ADR-0028), le
+          Planificateur trace le saut.
+
+        ``timezone`` est le fuseau de l'instance, indispensable aux règles
+        quotidiennes et hebdomadaires ; ``None`` retombe sur UTC, ce qui suffit à
+        une lecture de test et ne concerne jamais une occurrence récurrente
+        locale en production (le Planificateur injecte toujours le Réglage).
+        Tout échec annule la transaction entière : aucune moitié de lot n'est
+        écrite.
+        """
+        zone = ZoneInfo("UTC") if timezone is None else _zone(timezone)
+        moment = datetime.fromtimestamp(now_epoch, tz=zone)
+        claimed: list[Schedule] = []
+        with self._lock:
+            db = self._get_db()
+            rows = db.execute(
+                "SELECT id, content, rule_json, next_occurrence, created_at, "
+                "updated_at FROM schedules WHERE next_occurrence <= ? "
+                "ORDER BY next_occurrence ASC, id ASC",
+                (now_epoch,),
+            ).fetchall()
+            due = [_from_row(row) for row in rows]
+            try:
+                for schedule in due:
+                    if schedule.rule.kind == "once":
+                        db.execute(
+                            "DELETE FROM schedules WHERE id = ?", (schedule.id,)
+                        )
+                        claimed.append(schedule)
+                        continue
+                    advanced = next_occurrence(
+                        schedule.rule, now=moment, timezone=zone
+                    )
+                    db.execute(
+                        "UPDATE schedules SET next_occurrence = ? WHERE id = ?",
+                        (advanced, schedule.id),
+                    )
+                    if not startup:
+                        claimed.append(schedule)
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        return tuple(claimed)
 
     def update(self, schedule: Schedule) -> bool:
         """Remplace une Planification ; ``False`` si la ligne a disparu."""

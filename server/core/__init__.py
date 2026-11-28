@@ -27,8 +27,11 @@ from server.core.coordinator import (
     EVENT_WINDOW_TIMER_ID,
     EVENT_WINDOW_TIMEOUT,
     IDLE_TIMEOUT,
+    OCCURRENCE_WINDOW_TIMEOUT,
+    PLANNED_REMINDER_TRIGGER,
     Coordinator,
     EventDropReason,
+    OccurrenceDropReason,
 )
 from server.core.events import (
     ClientAudio,
@@ -45,12 +48,16 @@ from server.core.events import (
     LlmOpened,
     LlmToolCall,
     LlmTranscription,
+    OCCURRENCE_SOURCE,
+    OccurrenceReceived,
+    QueuedFact,
     Role,
     SessionRequested,
     ShutdownRequested,
     TimerFired,
 )
 from server.core.memory_tools import register_memory_tools
+from server.core.planificateur import Planificateur
 from server.core.plugins import (
     SERVER_PLATFORM,
     ConfigField,
@@ -79,6 +86,7 @@ from server.core.ports import (
     ToolSpec,
     TraceEntry,
     TraceSink,
+    Wakeup,
 )
 from server.core.schedule_rules import (
     MAX_CONTENT_CHARS,
@@ -147,6 +155,13 @@ __all__ = [
     "PluginContext",
     "PluginManifest",
     "PluginRegistry",
+    "OCCURRENCE_SOURCE",
+    "OCCURRENCE_WINDOW_TIMEOUT",
+    "OccurrenceDropReason",
+    "OccurrenceReceived",
+    "PLANNED_REMINDER_TRIGGER",
+    "Planificateur",
+    "QueuedFact",
     "Role",
     "SendAudioToClient",
     "SendAudioToLlm",
@@ -168,6 +183,7 @@ __all__ = [
     "Trace",
     "TraceEntry",
     "TraceSink",
+    "Wakeup",
     "local_now",
     "register_memory_tools",
     "register_session_tools",
