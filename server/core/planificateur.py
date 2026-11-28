@@ -23,7 +23,7 @@ from typing import Awaitable, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 from server.core.events import OccurrenceReceived
-from server.core.ports import ScheduleStore, Wakeup
+from server.core.ports import Schedule, ScheduleStore, Wakeup
 
 #: Trace d'une Planification sortie du magasin, source ``planificateur``.
 TRACE_SOURCE = "planificateur"
@@ -67,23 +67,30 @@ class Planificateur:
     async def _reconcile(self, *, startup: bool) -> None:
         """Réclame et émet ; au démarrage, trace les récurrentes non rejouées."""
         now_epoch = self._now_epoch()
+        missed: list[Schedule] = []
         if startup:
-            for schedule in self._store.list():
-                if (
-                    schedule.next_occurrence <= now_epoch
-                    and schedule.rule.kind != "once"
-                ):
-                    self._trace(
-                        "OccurrenceSkipped",
-                        {
-                            "schedule_id": schedule.id,
-                            "kind": schedule.rule.kind,
-                            "due": schedule.next_occurrence,
-                        },
-                    )
+            missed = [
+                schedule
+                for schedule in self._store.list()
+                if schedule.next_occurrence <= now_epoch
+                and schedule.rule.kind != "once"
+            ]
         claimed = self._store.claim_due(
             now_epoch, startup=startup, timezone=self._timezone
         )
+        # La Trace de saut suit la réclamation : une transaction annulée n'a
+        # jamais avancé la Planification, donc rien n'a été réellement sauté.
+        for schedule in missed:
+            self._trace(
+                "OccurrenceSkipped",
+                {
+                    "schedule_id": schedule.id,
+                    "kind": schedule.rule.kind,
+                    "reason": "missed_slots",
+                    "due": schedule.next_occurrence,
+                    "now": now_epoch,
+                },
+            )
         for schedule in claimed:
             self._trace(
                 "OccurrenceEmitted",
