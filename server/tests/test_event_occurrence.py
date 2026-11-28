@@ -26,6 +26,7 @@ from server.core import (
     EVENT_MAX_CHARS,
     EVENT_QUEUE_MAX,
     PLANNED_REMINDER_TRIGGER,
+    ClientDisconnected,
     ClientRegistered,
     Coordinator,
     EventReceived,
@@ -796,4 +797,42 @@ def test_a_failed_verdict_never_journals_the_silenced_ordinary_event():
 
     assert memory.turns == [
         ("event", "[planificateur] sortir les poubelles"),
+    ]
+
+
+def test_an_occurrence_aborted_by_the_client_leaving_waits_for_the_next_one():
+    memory = FakeMemory()
+    presence = Presence("c1")
+    coordinator = Coordinator(
+        memory=memory,
+        user_id="alice",
+        announce_prompt="JUGE",
+        judge=FakeJudge(),
+        connected_clients=presence,
+    )
+    drive(
+        coordinator,
+        [
+            OccurrenceReceived(content="appeler le plombier", schedule_id="sch_1"),
+            window_timer(),
+            LlmOpened(),
+        ],
+    )
+
+    presence.disconnect("c1")
+    commands = handle(coordinator, ClientDisconnected(client_id="c1"))
+
+    # Le rappel n'est pas perdu ; sans auditeur, aucune fenêtre ne se réarme.
+    assert occurrence_drops(commands, OccurrenceDropReason.JUDGMENT_ABORTED) == []
+    assert StartIdleTimer not in [type(command) for command in commands]
+    assert coordinator.state is SessionState.IDLE
+
+    # Le prochain Client connecté reçoit le rappel, journalisé une fois.
+    presence.connect("c2")
+    commands = handle(coordinator, ClientRegistered(client_id="c2"))
+    assert StartIdleTimer in [type(command) for command in commands]
+    announcement(close_window(coordinator))
+    drive(coordinator, [LlmOpened(), LlmAudio(data=b"rappel")])
+    assert memory.turns == [
+        ("event", "[planificateur] appeler le plombier"),
     ]
