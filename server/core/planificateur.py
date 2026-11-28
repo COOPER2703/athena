@@ -8,7 +8,9 @@ choses, en boucle :
 1. au démarrage, réclamer les échéances manquées — une ponctuelle est rattrapée
    une fois, une récurrente est avancée sans être rejouée et son saut est tracé ;
 2. réclamer les échéances dues et émettre une **Occurrence** par Planification,
-   puis tracer ``OccurrenceEmitted`` ;
+   puis tracer ``OccurrenceEmitted`` ; une ponctuelle est **effacée après** son
+   émission (jamais avant), donc un crash entre les deux produit au pire un
+   doublon, jamais une perte silencieuse ;
 3. attendre la prochaine échéance, ou un réveil (création d'une Planification
    plus proche) — jamais un sommeil réel dans les tests.
 
@@ -22,11 +24,11 @@ from datetime import datetime
 from typing import Awaitable, Callable, Mapping
 from zoneinfo import ZoneInfo
 
-from server.core.events import OccurrenceReceived
+from server.core.events import OCCURRENCE_SOURCE, OccurrenceReceived
 from server.core.ports import Schedule, ScheduleStore, Wakeup
 
-#: Trace d'une Planification sortie du magasin, source ``planificateur``.
-TRACE_SOURCE = "planificateur"
+#: Trace d'une Planification sortie du magasin, même Source que l'Occurrence.
+TRACE_SOURCE = OCCURRENCE_SOURCE
 #: Sans ``Wakeup`` injecté ni Planification en attente, la boucle relit le
 #: magasin à ce rythme. La production fournit toujours un ``Wakeup`` : le cas ne
 #: concerne que les tests de la couture basse.
@@ -97,6 +99,10 @@ class Planificateur:
                     content=schedule.content, schedule_id=schedule.id
                 )
             )
+            # Une ponctuelle s'efface **après** l'émission : un crash entre les
+            # deux la fait réémettre (au pire un doublon), il ne la perd pas.
+            if schedule.rule.kind == "once":
+                self._store.delete(schedule.id)
             # Après l'émission : une Trace ne précède jamais un effet qui
             # pourrait échouer (aucune réussite mensongère).
             self._trace(

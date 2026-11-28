@@ -2,8 +2,9 @@
 
 Couture basse du ``ScheduleStore`` : ``claim_due`` rend, dans **une** section
 critique, les Planifications dont l'échéance est atteinte. Une ponctuelle est
-effacée et rendue telle qu'elle était à l'échéance ; une récurrente est avancée
-au prochain créneau valide et rendue. Au démarrage, une récurrente en retard est
+rendue telle qu'elle était à l'échéance, **sans être supprimée** (le
+Planificateur l'efface après l'émission) ; une récurrente est avancée au
+prochain créneau valide et rendue. Au démarrage, une récurrente en retard est
 avancée **sans** être rendue (pas de rafale), tandis qu'une ponctuelle est
 rattrapée une fois. Une récurrence par intervalle garde sa phase et un créneau
 local sauté ou doublé par le changement d'heure n'est jamais rejoué.
@@ -53,7 +54,14 @@ NOW = _epoch("2026-06-01T12:00:00+00:00")
 PARIS = ZoneInfo("Europe/Paris")
 
 
-def test_a_due_one_shot_is_returned_as_it_was_and_deleted(tmp_path: Path) -> None:
+def test_a_due_one_shot_is_returned_as_it_was_and_left_in_the_store(
+    tmp_path: Path,
+) -> None:
+    """``claim_due`` ne supprime plus la ponctuelle : la pompe le fait après émission.
+
+    Séparer réclamation et suppression rend le crash entre émission et
+    suppression **au pire** un doublon, jamais une perte silencieuse.
+    """
     store = _store(tmp_path)
     due = _schedule(schedule_id="sch_due", next_occurrence=NOW - 60)
     later = _schedule(schedule_id="sch_later", next_occurrence=NOW + 600)
@@ -63,8 +71,23 @@ def test_a_due_one_shot_is_returned_as_it_was_and_deleted(tmp_path: Path) -> Non
     claimed = store.claim_due(NOW, timezone=PARIS)
 
     assert claimed == (due,)
-    assert store.get("sch_due") is None
+    assert store.get("sch_due") == due
     assert store.get("sch_later") == later
+
+
+def test_a_claimed_one_shot_is_claimed_again_until_the_pump_deletes_it(
+    tmp_path: Path,
+) -> None:
+    """Au pire un doublon après un crash, jamais une perte silencieuse."""
+    store = _store(tmp_path)
+    due = _schedule(schedule_id="sch_due", next_occurrence=NOW - 60)
+    store.create(due)
+
+    assert store.claim_due(NOW, timezone=PARIS) == (due,)
+    assert store.claim_due(NOW, timezone=PARIS) == (due,)
+
+    assert store.delete(due.id) is True
+    assert store.claim_due(NOW, timezone=PARIS) == ()
 
 
 def test_nothing_due_claims_nothing(tmp_path: Path) -> None:
@@ -209,7 +232,7 @@ def test_at_startup_a_missed_one_shot_is_caught_up_once(tmp_path: Path) -> None:
     claimed = store.claim_due(NOW, timezone=PARIS, startup=True)
 
     assert claimed == (missed,)
-    assert store.get("sch_once") is None
+    assert store.get("sch_once") == missed
 
 
 def test_a_daily_slot_skipped_by_spring_forward_advances_without_duplicate(
@@ -351,7 +374,7 @@ def test_at_startup_a_future_recurring_schedule_is_left_untouched(
     assert store.get("sch_future") == future
 
 
-def test_a_failure_in_the_middle_rolls_back_the_whole_claim(
+def test_a_failure_in_the_middle_rolls_back_the_recurring_advance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = _store(tmp_path)
@@ -372,8 +395,9 @@ def test_a_failure_in_the_middle_rolls_back_the_whole_claim(
     with pytest.raises(RuntimeError):
         store.claim_due(NOW, timezone=PARIS)
 
-    # La suppression de la ponctuelle n'a pas été validée : la transaction est
-    # entièrement annulée.
+    # L'avancement de la récurrente n'a pas été validé : la transaction est
+    # entièrement annulée. La ponctuelle n'est de toute façon jamais supprimée
+    # par la réclamation.
     assert store.get("sch_once") == once
     assert store.get("sch_tick") == recurring
 

@@ -29,6 +29,7 @@ from server.core.ports import Schedule, ScheduleError, ScheduleRule, TraceSink
 from server.core.schedule_rules import (
     MAX_SCHEDULES,
     advance_occurrence,
+    as_zone,
     rule_from_json,
     rule_to_json,
 )
@@ -62,10 +63,6 @@ def _from_row(row: tuple[object, ...]) -> Schedule:
         created_at=int(row[4]),  # type: ignore[arg-type]
         updated_at=int(row[5]),  # type: ignore[arg-type]
     )
-
-
-def _zone(value: str | ZoneInfo) -> ZoneInfo:
-    return value if isinstance(value, ZoneInfo) else ZoneInfo(value)
 
 
 class SqliteScheduleStore:
@@ -150,16 +147,18 @@ class SqliteScheduleStore:
         now_epoch: int,
         *,
         startup: bool = False,
-        timezone: str | ZoneInfo | None = None,
+        timezone: str | ZoneInfo,
     ) -> Sequence[Schedule]:
         """Réclame les Planifications dues, en **une** transaction.
 
         Les lignes dont ``next_occurrence <= now_epoch`` sont relues dans l'ordre
         de leur échéance, puis :
 
-        - une **ponctuelle** est effacée et rendue telle qu'elle était à
-          l'échéance (le Planificateur émet son contenu réellement dû) ; un
-          démarrage la rattrape aussi, une fois, même très en retard ;
+        - une **ponctuelle** est rendue telle qu'elle était à l'échéance, **sans
+          être supprimée** ; le Planificateur l'efface après une émission
+          réussie (au pire un doublon si le processus meurt entre les deux,
+          jamais une perte silencieuse) ; un démarrage la rattrape aussi, une
+          fois, même très en retard ;
         - une **récurrente** est avancée au prochain créneau valide
           strictement postérieur à ``now_epoch`` (règles de ``schedule_rules``)
           et rendue — sauf à ``startup=True``, où elle n'est pas rendue : un
@@ -168,13 +167,11 @@ class SqliteScheduleStore:
           phase : son pas part de l'échéance précédente, jamais de ``now``.
 
         ``timezone`` est le fuseau de l'instance, indispensable aux règles
-        quotidiennes et hebdomadaires ; ``None`` retombe sur UTC, ce qui suffit à
-        une lecture de test et ne concerne jamais une occurrence récurrente
-        locale en production (le Planificateur injecte toujours le Réglage).
-        Tout échec annule la transaction entière : aucune moitié de lot n'est
-        écrite.
+        quotidiennes et hebdomadaires ; il est **obligatoire**, sans repli
+        silencieux sur UTC. Tout échec annule la transaction entière : aucune
+        moitié de lot n'est écrite.
         """
-        zone = ZoneInfo("UTC") if timezone is None else _zone(timezone)
+        zone = as_zone(timezone)
         moment = datetime.fromtimestamp(now_epoch, tz=zone)
         claimed: list[Schedule] = []
         with self._lock:
@@ -189,9 +186,6 @@ class SqliteScheduleStore:
             try:
                 for schedule in due:
                     if schedule.rule.kind == "once":
-                        db.execute(
-                            "DELETE FROM schedules WHERE id = ?", (schedule.id,)
-                        )
                         claimed.append(schedule)
                         continue
                     advanced = advance_occurrence(

@@ -47,11 +47,19 @@ class ScriptedStore:
         self.claims: list[tuple[int, bool, str | None]] = []
         self.claim_results: list[tuple[Schedule, ...]] = []
         self.startup_results: list[tuple[Schedule, ...]] = []
+        self.deleted: list[str] = []
 
     def list(self) -> tuple[Schedule, ...]:
         return tuple(self.schedules)
 
-    def claim_due(self, now_epoch, *, startup=False, timezone=None):
+    def delete(self, schedule_id: str) -> bool:
+        self.deleted.append(schedule_id)
+        self.schedules = [
+            schedule for schedule in self.schedules if schedule.id != schedule_id
+        ]
+        return True
+
+    def claim_due(self, now_epoch, *, startup=False, timezone):
         self.claims.append((now_epoch, startup, timezone))
         if startup:
             # Le vrai magasin avance les récurrentes dues : la couture les
@@ -141,6 +149,8 @@ def test_a_due_schedule_is_emitted_and_traced_at_the_injected_instant():
                 "kind": "once",
                 "due": int(NOW.timestamp()) - 5,
             }
+            # La ponctuelle est effacée **après** l'émission, explicitement.
+            assert store.deleted == ["sch_1"]
             # Le fuseau du Réglage part avec la réclamation.
             assert store.claims[0] == (int(NOW.timestamp()), True, PARIS)
             assert store.claims[1] == (int(NOW.timestamp()), False, PARIS)
@@ -202,7 +212,7 @@ def test_a_failed_claim_traces_no_skip():
     """Une transaction qui échoue n'a rien avancé : aucune Trace mensongère."""
 
     class FailingClaimStore(ScriptedStore):
-        def claim_due(self, now_epoch, *, startup=False, timezone=None):
+        def claim_due(self, now_epoch, *, startup=False, timezone):
             raise RuntimeError("base indisponible")
 
     async def scenario() -> None:
@@ -264,6 +274,8 @@ def test_a_failed_emission_traces_no_success():
 
         assert isinstance(results[0], RuntimeError)
         assert [kind for kind, _ in traces] == []
+        # Une émission ratée ne supprime rien : la ponctuelle sera réessayée.
+        assert store.deleted == []
 
     asyncio.run(scenario())
 
@@ -336,6 +348,39 @@ def test_a_once_due_at_startup_is_caught_up_once_without_a_skip_trace():
                 kind for kind, _ in traces if kind == "OccurrenceSkipped"
             ] == []
             assert [kind for kind, _ in traces] == ["OccurrenceEmitted"]
+            assert store.deleted == ["sch_once"]
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_a_recurring_occurrence_is_never_deleted_by_the_pump():
+    async def scenario() -> None:
+        due = _schedule(
+            schedule_id="sch_tick",
+            next_occurrence=int(NOW.timestamp()) - 5,
+            rule=ScheduleRule(kind="interval", every_seconds=60),
+        )
+        store = ScriptedStore()
+        store.claim_results = [(due,)]
+        emitted: list[OccurrenceReceived] = []
+        wakeup = ManualWakeup()
+        planificateur = Planificateur(
+            store=store,
+            now=lambda: NOW,
+            timezone=PARIS,
+            sleep=asyncio.sleep,
+            emit=emitted.append,
+            trace=lambda kind, payload: None,
+            wake=wakeup,
+        )
+
+        task = await _run_until_first_wait(planificateur, wakeup)
+        try:
+            assert [occurrence.schedule_id for occurrence in emitted] == ["sch_tick"]
+            assert store.deleted == []
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

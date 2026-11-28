@@ -20,8 +20,8 @@ est figée en ``at`` (epoch UTC) au moment de la création.
 Changement d'heure (heure locale de l'instance) : un créneau local inexistant
 est sauté au prochain créneau valide de la même règle ; un créneau local doublé
 n'est calculé qu'une fois (première occurrence, ``fold=0``). Une ponctuelle
-absolue sur une heure inexistante est refusée : il n'existe aucun instant
-raisonnable à choisir à sa place.
+absolue sur une heure inexistante est normalisée au prochain instant valide
+(02:30 devient 03:30), jamais refusée.
 """
 
 from __future__ import annotations
@@ -49,6 +49,11 @@ def _invalid(message: str) -> ScheduleError:
     return ScheduleError("invalid_when", message)
 
 
+def as_zone(value: str | ZoneInfo) -> ZoneInfo:
+    """Fuseau d'instance, déjà résolu ou nom IANA : **une** seule conversion."""
+    return value if isinstance(value, ZoneInfo) else ZoneInfo(value)
+
+
 def _aware(now: datetime) -> datetime:
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
@@ -69,9 +74,11 @@ def _as_time(value: object) -> tuple[int, int]:
     return int(hour), int(minute)
 
 
-def _local_slot(day: date, hour: int, minute: int, tz: ZoneInfo) -> int | None:
+def _local_slot(
+    day: date, hour: int, minute: int, second: int, tz: ZoneInfo
+) -> int | None:
     """Instant UTC du créneau local, ou ``None`` s'il n'existe pas (DST)."""
-    naive = datetime.combine(day, time(hour, minute))
+    naive = datetime.combine(day, time(hour, minute, second))
     candidate = naive.replace(tzinfo=tz, fold=0)
     resolved = candidate.astimezone(timezone.utc).astimezone(tz)
     # Un créneau inexistant revient sur un autre mur local (02:30 -> 03:30).
@@ -81,6 +88,12 @@ def _local_slot(day: date, hour: int, minute: int, tz: ZoneInfo) -> int | None:
 
 
 def _local_absolute(value: object, tz: ZoneInfo) -> int:
+    """Instant UTC d'un ``at`` local, seconde comprise.
+
+    Un instant local **inexistant** (passage à l'heure d'été) n'est pas refusé :
+    il est normalisé au prochain créneau valide par le même passage UTC que les
+    récurrences (02:30 -> 03:30), comme l'exige l'ADR-0028.
+    """
     if not isinstance(value, str) or not _AT_RE.match(value):
         raise _invalid(
             "when.at must be a local instant formatted as YYYY-MM-DDTHH:MM:SS"
@@ -89,10 +102,12 @@ def _local_absolute(value: object, tz: ZoneInfo) -> int:
         naive = datetime.strptime(value, "%Y-%m-%dT%H:%M:%S")
     except ValueError:
         raise _invalid("when.at is not a valid calendar instant") from None
-    slot = _local_slot(naive.date(), naive.hour, naive.minute, tz)
-    if slot is None:
-        raise _invalid("when.at does not exist in the instance timezone")
-    return slot
+    slot = _local_slot(naive.date(), naive.hour, naive.minute, naive.second, tz)
+    if slot is not None:
+        return slot
+    # Heure locale inexistante : le passage par UTC rend l'instant réel qui
+    # suit le saut (02:30 CET devient 03:30 CEST).
+    return int(naive.replace(tzinfo=tz, fold=0).timestamp())
 
 
 def _epoch(value: int) -> int:
@@ -216,7 +231,7 @@ def next_occurrence(
         day = local.date() + timedelta(days=offset)
         if day.isoweekday() not in selected:
             continue
-        slot = _local_slot(day, hour, minute, timezone)
+        slot = _local_slot(day, hour, minute, 0, timezone)
         if slot is not None and slot > now_ts:
             return slot
     raise ScheduleError("invalid_when", "no valid occurrence could be computed")
