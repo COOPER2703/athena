@@ -122,6 +122,19 @@ def _as_text(value: object) -> str:
     return str(value).strip()
 
 
+def _content(value: object) -> str:
+    """Valide le contenu d'une Planification, avec un code stable."""
+    text = _as_text(value)
+    if not text:
+        raise ScheduleError("empty_content", "content is required")
+    if len(text) > MAX_CONTENT_CHARS:
+        raise ScheduleError(
+            "content_too_long",
+            f"content must be at most {MAX_CONTENT_CHARS} characters",
+        )
+    return text
+
+
 def _zone(value: str | ZoneInfo) -> ZoneInfo:
     return value if isinstance(value, ZoneInfo) else ZoneInfo(value)
 
@@ -152,19 +165,10 @@ def register_schedule_tools(
     ) -> Mapping[str, object]:
         if not isinstance(arguments, Mapping):
             return {"status": "error", "message": "arguments must be an object"}
-        content = _as_text(arguments.get("content"))
-        if not content:
-            return {"status": "error", "message": "content is required"}
-        if len(content) > MAX_CONTENT_CHARS:
-            return {
-                "status": "error",
-                "message": (
-                    f"content must be at most {MAX_CONTENT_CHARS} characters"
-                ),
-            }
 
         moment = now()
         try:
+            content = _content(arguments.get("content"))
             rule: ScheduleRule = parse_when(
                 arguments.get("when"), now=moment, timezone=zone
             )
