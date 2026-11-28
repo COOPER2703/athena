@@ -17,6 +17,7 @@ from server.app.config import (
     AuthConfig,
     ConsoleConfig,
     GeminiConfig,
+    ScheduleConfig,
 )
 from server.app.root import (
     App,
@@ -511,10 +512,42 @@ def test_build_app_wires_the_kernel_tools(tmp_path: Path) -> None:
         "save_memory",
         "forget_memory",
         "end_session",
+        "create_schedule",
+        "list_schedules",
     }
     assert app.tools.owner_of("end_session") == "core"
     spec = next(spec for spec in app.tools.specs() if spec.name == END_SESSION)
     assert spec.parameters == {"type": "object", "properties": {}}
+
+
+def test_build_app_lends_the_schedule_tools_the_dedicated_database(
+    tmp_path: Path,
+) -> None:
+    schedule_db = tmp_path / "schedule.db"
+    config = AppConfig(
+        gemini=GeminiConfig(api_key="test-key"),
+        log_dir=str(tmp_path),
+        schedule=ScheduleConfig(db_path=str(schedule_db)),
+    )
+
+    app = build_app(config)
+    created = asyncio.run(
+        app.tools.execute(
+            "create_schedule",
+            {"content": "sortir les poubelles", "when": {"kind": "daily", "time": "20:00"}},
+        )
+    )
+
+    assert created["status"] == "ok"
+    assert schedule_db.is_file()
+    # La création fonctionne sans que l'application tourne : aucun pump n'est
+    # nécessaire pour enregistrer une Planification (l'émission viendra #195).
+
+    # Une seconde composition sur la même base relit la Planification.
+    restarted = build_app(config)
+    listed = asyncio.run(restarted.tools.execute("list_schedules", {}))
+
+    assert [item["id"] for item in listed["schedules"]] == [created["id"]]
 
 
 def test_save_memory_tool_call_reaches_the_store_and_the_model() -> None:
@@ -913,6 +946,8 @@ def test_build_app_announces_the_kernel_and_plugin_tools_on_registration(
                     "save_memory",
                     "forget_memory",
                     "end_session",
+                    "create_schedule",
+                    "list_schedules",
                     "fixture__echo",
                 ]
 

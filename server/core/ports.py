@@ -360,6 +360,81 @@ class SessionControl(Protocol):
         """Le navigateur a fermé : le Client Console meurt avec sa Session."""
 
 
+@dataclass(frozen=True, slots=True)
+class ScheduleRule:
+    """Règle temporelle d'une Planification (ADR-0028).
+
+    Une seule forme à la fois, jamais une expression cron :
+
+    - ``once`` : ``at`` porte l'instant UTC (epoch secondes) ;
+    - ``interval`` : ``every_seconds`` est la période, au moins 60 s ;
+    - ``daily`` : ``time_of_day`` est une heure locale ``HH:MM`` ;
+    - ``weekly`` : ``time_of_day`` et ``days`` (1 = lundi … 7 = dimanche).
+
+    Le noyau valide ces invariants avant de construire une règle ; la
+    dataclass reste un porteur de données sérialisable en JSON.
+    """
+
+    kind: str
+    at: int | None = None
+    every_seconds: int | None = None
+    time_of_day: str | None = None
+    days: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class Schedule:
+    """Une Planification persistée : contenu figé et règle structurée.
+
+    ``next_occurrence`` est un instant UTC en secondes (epoch). ``created_at``
+    et ``updated_at`` suivent la même unité. L'identifiant est stable sur
+    disque (``sch_<uuid4 hex>``) : les Tools de modification et de suppression
+    (#197) s'y adressent, et ``list_schedules`` le rend au modèle.
+    """
+
+    id: str
+    content: str
+    rule: ScheduleRule
+    next_occurrence: int
+    created_at: int
+    updated_at: int
+
+
+class ScheduleError(Exception):
+    """Échec d'une opération de Planification, porteur d'un code stable.
+
+    Le code appartient au vocabulaire du noyau :
+    ``invalid_when``, ``not_future``, ``empty_content``, ``content_too_long``,
+    ``interval_too_short``, ``empty_days``, ``too_many_schedules``. Le message
+    est lisible et destiné au modèle (anglais, comme les autres Tools du
+    noyau) ; le code sert aux tests et aux surfaces futures.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+class ScheduleStore(Protocol):
+    """Port du magasin de Planifications, derrière une base dédiée (ADR-0028).
+
+    Le noyau ne connaît ni SQL ni le disque. ``create`` applique le plafond de
+    200 Planifications dans la même section critique que l'insertion ;
+    ``list`` rend les plus proches d'abord. La modification et la suppression
+    arrivent avec #197 : le port est conçu pour les accueillir sans changer la
+    forme de ``Schedule``.
+    """
+
+    def create(self, schedule: Schedule) -> Schedule: ...
+
+    def list(self) -> Sequence[Schedule]: ...
+
+    def get(self, schedule_id: str) -> Schedule | None: ...
+
+    def count(self) -> int: ...
+
+
 class MemoryStore(Protocol):
     """Async memory port injected into the pure kernel (D2).
 

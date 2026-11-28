@@ -125,6 +125,7 @@ def test_get_settings_reports_the_effective_value_default_and_source(
             for key in (
                 "auth_db",
                 "settings_db",
+                "schedule_db",
                 "master_key_file",
                 "plugins_dir",
                 "plugins_state",

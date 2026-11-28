@@ -153,6 +153,7 @@ dans un `env_file` versionné du dépôt.
 | `ATHENA_AUTH_DB` | `/data/auth.db` |
 | `ATHENA_MEMORY_DB` | `/data/athena_memory.db` |
 | `ATHENA_SETTINGS_DB` | `/data/settings.db` |
+| `ATHENA_SCHEDULE_DB` | `/data/schedule.db` |
 | `ATHENA_MASTER_KEY_FILE` | `/data/master.key` |
 | `ATHENA_LOG_DIR` | `/logs` |
 | `ATHENA_PLUGINS_STATE` | `/data/plugins.json` |
@@ -181,7 +182,7 @@ possible mais c'est alors une décision explicite, à documenter dans l'inventai
 
 | Chemin hôte | Chemin conteneur | Propriétaire | Contenu |
 | --- | --- | --- | --- |
-| `/srv/athena/data` | `/data` | `1000:1000`, `0750` | `auth.db`, `athena_memory.db`, `settings.db`, `master.key` (`0600`), `plugins.json` |
+| `/srv/athena/data` | `/data` | `1000:1000`, `0750` | `auth.db`, `athena_memory.db`, `settings.db`, `schedule.db`, `master.key` (`0600`), `plugins.json` |
 | `/srv/athena/logs` | `/logs` | `1000:1000`, `0750` | `server.log` + `.1`…`.3` (rotation 5 Mio) |
 
 Invariants :
@@ -226,6 +227,7 @@ Secrets illisibles (signalé par `secrets_unreadable`, sans réinitialisation si
 sqlite3 /srv/athena/data/auth.db ".backup '/backup/auth.db'"
 sqlite3 /srv/athena/data/athena_memory.db ".backup '/backup/athena_memory.db'"
 sqlite3 /srv/athena/data/settings.db ".backup '/backup/settings.db'"
+sqlite3 /srv/athena/data/schedule.db ".backup '/backup/schedule.db'"
 cp /srv/athena/data/master.key /backup/master.key
 chmod 600 /backup/master.key
 ```

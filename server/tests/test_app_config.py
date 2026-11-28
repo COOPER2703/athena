@@ -394,6 +394,7 @@ def test_schedule_defaults_to_the_system_zone_and_its_own_database() -> None:
     assert cfg.schedule.timezone == system_timezone_name()
     assert cfg.schedule.db_path == DEFAULT_SCHEDULE_DB
     assert cfg.schedule.db_path != cfg.memory.db_path
+    assert cfg.schedule.db_path != cfg.auth.db_path
     assert cfg.schedule.db_path != cfg.settings.db_path
 
 
@@ -411,12 +412,17 @@ def test_schedule_reads_and_strips_its_environment() -> None:
     assert cfg.schedule.db_path == "var/schedule.db"
 
 
-def test_an_unknown_timezone_is_refused_by_the_configuration() -> None:
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"ATHENA_SCHEDULE_DB": "   "},
+        {"ATHENA_TIMEZONE": "   "},
+        {"ATHENA_TIMEZONE": "Mars/Olympus"},
+    ],
+)
+def test_invalid_schedule_config_is_a_validation_error(overrides) -> None:
     with pytest.raises(ValidationError):
-        load_config(
-            env={"GEMINI_API_KEY": "k", "ATHENA_TIMEZONE": "Mars/Olympus"},
-            env_file=None,
-        )
+        load_config(env={"GEMINI_API_KEY": "k", **overrides}, env_file=None)
 
 
 def test_settings_paths_default_next_to_the_other_databases() -> None:

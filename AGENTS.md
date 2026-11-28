@@ -42,9 +42,9 @@ Le **Diagnostic** lit `GET /api/status` et le WebSocket `/api/stream`. L'instant
 plus de `session`, `clients`, `plugins` et `config` : `installation` (`account_exists`,
 `gemini_configured`, `complete`, `secrets_unreadable`, `surfaces` réellement ouvertes),
 `restart_required`, et `health` (version, uptime monotone, dernière Consolidation, taille des
-bases mémoire/auth/réglages — `0` si absente, `-wal`/`-shm` compris —, dernière erreur sans son
-payload, taille et capacité du Tampon de traces). Ces champs sont des lectures **sans
-secret** et restent renseignés pendant l'Installation : aucun n'exige un Compte ni une clé.
+bases mémoire/auth/réglages/planifications — `0` si absente, `-wal`/`-shm` compris —, dernière
+erreur sans son payload, taille et capacité du Tampon de traces). Ces champs sont des lectures
+**sans secret** et restent renseignés pendant l'Installation : aucun n'exige un Compte ni une clé.
 Pendant une conversation vocale, `clients` contient en plus le **Client Console** (nom
 `Console (<navigateur>)`, plateforme `web`) et `session.console` vaut `true` : le front sait
 que la Session en cours est celle qu'il héberge.
@@ -249,6 +249,31 @@ démarrage raté.
   rien n'est rechargé à chaud. La réponse signale `restart_required`.
 - Aucune installation ni désinstallation : le store de Plugins reste hors périmètre, et
   la Console ne propose aucun bouton d'installation.
+
+### Planificateur
+
+Le **Planificateur** (ADR-0028) est un composant du noyau : il détient les **Planifications**
+(un contenu figé et une règle structurée : ponctuelle, intervalle, quotidienne ou
+hebdomadaire), les persiste dans une base **dédiée** et les fera entrer dans le Canal
+d'événements sous forme d'**Occurrences**. Cette tranche (#194) livre le magasin, le calcul
+pur de la prochaine occurrence et deux Tools du noyau : `create_schedule(content, when)` et
+`list_schedules()`. Le pump, l'émission et l'Annonce arrivent avec #195 ; `update_schedule` et
+`delete_schedule` avec #197. Aucune surface Console n'écrit de Planification.
+
+- `ATHENA_SCHEDULE_DB` : `schedule.db` par défaut (chemin en lecture seule dans les
+  Réglages) ; base SQLite dédiée, `CREATE TABLE IF NOT EXISTS`, connexion paresseuse, aucun
+  répertoire parent créé. L'Image la place dans `/data`.
+- Le fuseau d'interprétation est le Réglage `timezone` (`ATHENA_TIMEZONE`, nom IANA, défaut :
+  fuseau du processus) ; les instants sont stockés en UTC à la seconde.
+- `when` accepte exactement : `{kind:"once", delay_seconds}` ou `{kind:"once", at:""}`
+  (heure locale `YYYY-MM-DDTHH:MM:SS`), `{kind:"interval", every_seconds}`,
+  `{kind:"daily", time:"HH:MM"}` et `{kind:"weekly", days:[1..7], time:"HH:MM"}`.
+- Bornes du noyau : 200 Planifications, intervalle ≥ 60 s, contenu ≤ 4096 caractères,
+  ponctuelle strictement future. Le contenu est une **donnée** : jamais exécuté, jamais lu
+  mot pour mot comme instruction.
+- Le Diagnostic publie la taille de la base `schedule` sous le libellé « Planifications ».
+- Changement d'heure : un créneau local inexistant est sauté, un créneau doublé n'est
+  calculé qu'une fois.
 
 ### Recherche web
 
