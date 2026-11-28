@@ -34,6 +34,7 @@ from server.core import (
     LlmTranscription,
     MemoryHit,
     MemoryStore,
+    NOW_CONTEXT_HEADER,
     OpenLiveConnection,
     Role,
     SendAudioToClient,
@@ -55,7 +56,7 @@ from server.core import (
 
 
 def test_tap_then_athena_speaks_makes_session_visible():
-    coordinator = Coordinator()
+    coordinator = Coordinator(now_context=lambda: NOW_CONTEXT)
     commands = drive(
         coordinator,
         [
@@ -69,7 +70,7 @@ def test_tap_then_athena_speaks_makes_session_visible():
     )
 
     assert effects(commands) == [
-        OpenLiveConnection(connection_id="s1"),
+        OpenLiveConnection(connection_id="s1", instruction=NOW_CONTEXT),
         StartIdleTimer(connection_id="s1", timeout=IDLE_TIMEOUT),
         SendAudioToLlm(connection_id="s1", data=b"mic"),
         StartIdleTimer(connection_id="s1", timeout=IDLE_TIMEOUT),
@@ -83,7 +84,7 @@ def test_tap_then_athena_speaks_makes_session_visible():
 
 
 def test_assistant_transcription_can_make_session_visible():
-    coordinator = Coordinator()
+    coordinator = Coordinator(now_context=lambda: NOW_CONTEXT)
     commands = drive(
         coordinator,
         [
@@ -95,7 +96,7 @@ def test_assistant_transcription_can_make_session_visible():
     )
 
     assert effects(commands) == [
-        OpenLiveConnection(connection_id="s1"),
+        OpenLiveConnection(connection_id="s1", instruction=NOW_CONTEXT),
         StartIdleTimer(connection_id="s1", timeout=IDLE_TIMEOUT),
         AnnounceSessionStarted(client_id="c1", auto=False),
         StartIdleTimer(connection_id="s1", timeout=IDLE_TIMEOUT),
@@ -119,7 +120,7 @@ def test_user_transcription_does_not_make_session_visible():
 
 
 def test_silent_live_connection_never_announces_a_session():
-    coordinator = Coordinator()
+    coordinator = Coordinator(now_context=lambda: NOW_CONTEXT)
     commands = drive(
         coordinator,
         [
@@ -132,7 +133,7 @@ def test_silent_live_connection_never_announces_a_session():
     assert AnnounceSessionStarted not in [type(c) for c in commands]
     assert AnnounceSessionEnded not in [type(c) for c in commands]
     assert effects(commands) == [
-        OpenLiveConnection(connection_id="s1"),
+        OpenLiveConnection(connection_id="s1", instruction=NOW_CONTEXT),
         StartIdleTimer(connection_id="s1", timeout=IDLE_TIMEOUT),
         CancelIdleTimer(connection_id="s1"),
         CloseLiveConnection(connection_id="s1"),
@@ -336,31 +337,79 @@ def _activation(commands):
 def test_session_requested_activates_memory_context_into_the_instruction():
     memory = FakeMemory(context="FAIT ÉPINGLÉ")
     coordinator = Coordinator(
-        memory=memory, user_id="alice", system_prompt="SYSTÈME"
+        memory=memory,
+        user_id="alice",
+        system_prompt="SYSTÈME",
+        now_context=lambda: NOW_CONTEXT,
     )
 
     commands = asyncio.run(coordinator.handle(SessionRequested(client_id="c1")))
 
     opened = _opened(commands)
-    assert opened.instruction == "SYSTÈME\n\nFAIT ÉPINGLÉ"
+    assert opened.instruction == "SYSTÈME\n\n" + NOW_CONTEXT + "\n\nFAIT ÉPINGLÉ"
     assert opened.tools == ()
     assert memory.users == ["alice"]
 
 
 def test_session_requested_without_memory_uses_the_prompt_alone():
-    coordinator = Coordinator(system_prompt="SYSTÈME")
+    coordinator = Coordinator(
+        system_prompt="SYSTÈME", now_context=lambda: NOW_CONTEXT
+    )
 
     commands = asyncio.run(coordinator.handle(SessionRequested(client_id="c1")))
 
-    assert _opened(commands).instruction == "SYSTÈME"
+    assert _opened(commands).instruction == "SYSTÈME\n\n" + NOW_CONTEXT
 
 
-def test_session_requested_without_any_context_has_empty_instruction():
+def test_session_requested_without_any_context_still_carries_the_time_section():
     coordinator = Coordinator()
 
     commands = asyncio.run(coordinator.handle(SessionRequested(client_id="c1")))
 
-    assert _opened(commands).instruction == ""
+    instruction = _opened(commands).instruction
+    assert instruction.startswith(NOW_CONTEXT_HEADER + "\n")
+    assert "(UTC)" in instruction
+
+
+NOW_CONTEXT = (
+    "[CONTEXTE TEMPOREL]\n"
+    "Nous sommes le jeudi 27 novembre 2026, il est 14:32:05 (Europe/Paris)."
+)
+
+
+def test_session_requested_carries_the_current_time_context():
+    coordinator = Coordinator(
+        system_prompt="SYSTÈME", now_context=lambda: NOW_CONTEXT
+    )
+
+    commands = asyncio.run(coordinator.handle(SessionRequested(client_id="c1")))
+
+    assert _opened(commands).instruction == "SYSTÈME\n\n" + NOW_CONTEXT
+
+
+def test_without_a_time_context_seam_the_default_utc_section_is_present():
+    """``now_context`` absent ne supprime plus la section : repli UTC honnête."""
+    coordinator = Coordinator(system_prompt="SYSTÈME")
+
+    commands = asyncio.run(coordinator.handle(SessionRequested(client_id="c1")))
+
+    instruction = _opened(commands).instruction
+    assert instruction.startswith("SYSTÈME\n\n" + NOW_CONTEXT_HEADER + "\n")
+    assert "UTC" in instruction.split("\n\n", 1)[1]
+
+
+def test_a_text_turn_carries_the_current_time_context():
+    from server.core.events import TourRequested
+
+    coordinator = Coordinator(
+        system_prompt="SYSTÈME", now_context=lambda: NOW_CONTEXT
+    )
+
+    commands = asyncio.run(
+        coordinator.handle(TourRequested(tour_id="t1", text="salut"))
+    )
+
+    assert _opened(commands).instruction == "SYSTÈME\n\n" + NOW_CONTEXT
 
 
 def test_activation_is_traced_with_a_context_summary():

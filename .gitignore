@@ -9,6 +9,7 @@ __pycache__/
 athena_memory.db
 auth.db
 settings.db
+schedule.db
 master.key
 node_modules/
 web/dist/

@@ -27,6 +27,7 @@ from dataclasses import dataclass, field as dc_field
 from enum import StrEnum
 from typing import Mapping, Sequence
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 # La clé Gemini est le seul Secret que l'Installation exige (ADR-0026). Les
 # Secrets de plugin suivent la même convention ``ATHENA_PLUGIN_…`` (ADR-0014),
@@ -66,8 +67,9 @@ class SettingField:
     """Un réglage déclaré : nom stable, variable d'environnement, défaut.
 
     ``kind`` borne le formulaire et la validation (``string``, ``int``,
-    ``float``, ``bool``, ``hours``) ; ``minimum``, ``maximum`` et ``choices``
-    sont exposés à l'interface pour qu'elle n'ait pas à redire les bornes.
+    ``float``, ``bool``, ``hours``, ``timezone``) ; ``minimum``, ``maximum``
+    et ``choices`` sont exposés à l'interface pour qu'elle n'ait pas à redire
+    les bornes.
     """
 
     key: str
@@ -135,12 +137,17 @@ class SettingsView:
     ``AppConfig`` construite) ; ``applied_store`` ne retient que les champs du
     magasin qui ont réellement pris effet. La source se déduit de ces couches,
     jamais d'une relecture de l'environnement en cours de route.
+
+    ``defaults`` porte les défauts **contextuels** que la racine connaît seule
+    (le fuseau système, par exemple) : le noyau, lui, déclare un défaut neutre
+    sans lire l'horloge ni le disque.
     """
 
     loaded: Mapping[str, str]
     applied_store: Mapping[str, str] = dc_field(default_factory=dict)
     process_env: Mapping[str, str] = dc_field(default_factory=dict)
     dotenv: Mapping[str, str] = dc_field(default_factory=dict)
+    defaults: Mapping[str, str] = dc_field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +179,15 @@ class SettingsUpdate:
 
     writes: Mapping[str, str]
     removals: tuple[str, ...]
+
+
+def _resolvable_zone(name: str) -> bool:
+    """Vrai si ``zoneinfo`` sait ouvrir ce nom : validation en mémoire seule."""
+    try:
+        ZoneInfo(name)
+    except (KeyError, ValueError, OSError):
+        return False
+    return True
 
 
 # Table déclarative des réglages. Les défauts reprennent ceux du chargeur de
@@ -269,8 +285,14 @@ SETTINGS: tuple[SettingField, ...] = (
     ),
     # Observabilité
     SettingField("log_level", "LOG_LEVEL", "INFO", choices=LOG_LEVELS),
+    # Instance : le fuseau décide de l'heure locale des prompts et des règles
+    # du Planificateur ; la base des Planifications reste protégée comme les
+    # autres chemins. Le défaut est neutre ici : la racine injecte le fuseau
+    # système comme défaut contextuel (le noyau ne lit ni ``TZ`` ni le disque).
+    SettingField("timezone", "ATHENA_TIMEZONE", "UTC", "timezone"),
     # Chemins en lecture seule : une valeur fausse est destructrice ou coupe
     # l'accès sans recours depuis l'interface.
+    SettingField("schedule_db", "ATHENA_SCHEDULE_DB", "schedule.db", editable=False),
     SettingField("memory_db", "ATHENA_MEMORY_DB", "athena_memory.db", editable=False),
     SettingField("auth_db", "ATHENA_AUTH_DB", "auth.db", editable=False),
     SettingField("settings_db", "ATHENA_SETTINGS_DB", "settings.db", editable=False),
@@ -347,17 +369,18 @@ def describe_settings(
     """
     states: list[SettingState] = []
     for field in SETTINGS:
-        value = view.loaded.get(field.key, field.default)
+        default = view.defaults.get(field.key, field.default)
+        value = view.loaded.get(field.key, default)
         source = _source(field, view)
         read_only = not field.editable or source is SettingSource.ENV
-        pending = _pending(field, value, source, view, store)
+        pending = _pending(field, value, source, view, store, default)
         states.append(
             SettingState(
                 key=field.key,
                 env=field.env,
                 kind=field.kind,
                 value=value,
-                default=field.default,
+                default=default,
                 source=source,
                 editable=field.editable,
                 read_only=read_only,
@@ -409,6 +432,16 @@ def normalize_value(field: SettingField, raw: object) -> tuple[str | None, str |
                 "des virgules."
             )
         return ",".join(str(hour) for hour in hours), None
+    if field.kind == "timezone":
+        if not text:
+            return None, (
+                "Un nom de fuseau IANA est attendu, par exemple Europe/Paris."
+            )
+        if not _resolvable_zone(text):
+            return None, (
+                "Nom de fuseau IANA inconnu : attendu par exemple Europe/Paris."
+            )
+        return text, None
     if not text:
         return None, "Une valeur est attendue."
     if len(text) > _MAX_STRING_LENGTH:
@@ -544,18 +577,23 @@ def _pending(
     source: SettingSource,
     view: SettingsView,
     store: Mapping[str, str],
+    default: str,
 ) -> bool:
     """Écart entre le magasin et la configuration chargée au démarrage.
 
     Un champ masqué par l'environnement ou structurellement en lecture seule
     n'attend rien : le magasin n'a aucun effet sur lui. Une valeur effacée
-    après le démarrage attend aussi, puisqu'elle reviendra au défaut.
+    après le démarrage attend aussi, puisqu'elle reviendra au défaut. Une
+    entrée du magasin **égale au défaut contextuel** est déjà un retour au
+    défaut : elle n'attend rien de plus.
     """
     if source is SettingSource.ENV or not field.editable:
         return False
     stored = store.get(field.key)
     if stored is None:
         return field.key in view.applied_store
+    if _same(field, stored, default):
+        return not _same(field, value, default)
     return not _same(field, stored, value)
 
 

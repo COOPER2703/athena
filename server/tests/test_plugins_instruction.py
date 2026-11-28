@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Mapping
 
-from harness import close_window, drive, handle, opened
+from harness import Presence, close_window, drive, handle, opened
 from testkit import FakeJudge
 from server.core import (
     Coordinator,
@@ -15,6 +15,14 @@ from server.core import (
 from server.core.plugins import PluginBinding, PluginRegistry, ToolBinding
 
 PLUGIN_INSTRUCTION = "Utilise hass__turn_on pour allumer la maison."
+NOW_CONTEXT = (
+    "[CONTEXTE TEMPOREL]\n"
+    "Nous sommes le jeudi 27 novembre 2026, il est 14:32:05 (Europe/Paris)."
+)
+
+
+def _now() -> str:
+    return NOW_CONTEXT
 
 
 class FakeMemory:
@@ -70,12 +78,15 @@ def test_ordinary_session_instruction_carries_the_plugin_instruction() -> None:
         user_id="alice",
         system_prompt="SYSTÈME",
         plugins=_plugin_registry(),
+        now_context=_now,
     )
 
     commands = drive(coordinator, [SessionRequested(client_id="c1")])
 
     live = opened(commands)
-    assert live.instruction == "SYSTÈME\n\n" + PLUGIN_INSTRUCTION + "\n\nMÉMOIRE"
+    assert live.instruction == (
+        "SYSTÈME\n\n" + PLUGIN_INSTRUCTION + "\n\n" + NOW_CONTEXT + "\n\nMÉMOIRE"
+    )
     # Les Tools du plugin sont déclarés sur la même Connexion que son
     # instruction : l'un ne va jamais sans l'autre.
     assert [spec.name for spec in live.tools] == ["hass__turn_on"]
@@ -89,6 +100,8 @@ def test_announcement_instruction_carries_the_plugin_instruction_too() -> None:
         announce_prompt="ANNONCE",
         judge=FakeJudge(),
         plugins=_plugin_registry(),
+        now_context=_now,
+        connected_clients=Presence("c1"),
     )
     handle(coordinator, EventReceived(source="matrix", content="porte ouverte"))
 
@@ -96,7 +109,11 @@ def test_announcement_instruction_carries_the_plugin_instruction_too() -> None:
 
     live = opened(commands)
     assert live.instruction == (
-        "SYSTÈME\n\n" + PLUGIN_INSTRUCTION + "\n\nANNONCE\n\nMÉMOIRE"
+        "SYSTÈME\n\n"
+        + PLUGIN_INSTRUCTION
+        + "\n\nANNONCE\n\n"
+        + NOW_CONTEXT
+        + "\n\nMÉMOIRE"
     )
     # L'instruction de plugin reste dans le prompt, mais les Tools du plugin ne
     # sont **pas** déclarés : une Session d'Annonce n'a aucun outil (#81).
@@ -114,12 +131,16 @@ def test_two_plugin_instructions_are_composed_in_a_deterministic_order() -> None
 
     def instruction(registry: PluginRegistry) -> str:
         commands = drive(
-            Coordinator(system_prompt="SYSTÈME", plugins=registry),
+            Coordinator(
+                system_prompt="SYSTÈME", plugins=registry, now_context=_now
+            ),
             [SessionRequested(client_id="c1")],
         )
         return opened(commands).instruction
 
-    expected = "SYSTÈME\n\nInstruction alpha.\n\nInstruction zeta."
+    expected = (
+        "SYSTÈME\n\nInstruction alpha.\n\nInstruction zeta.\n\n" + NOW_CONTEXT
+    )
     assert instruction(alpha_then_zeta) == expected
     # L'ordre d'arrivée des bindings ne change jamais le prompt : seul le nom
     # du plugin compte.
@@ -131,25 +152,31 @@ def test_a_plugin_without_instruction_still_serves_its_tools() -> None:
     registry.add(_binding("hass", "hass__turn_on", ""))
 
     commands = drive(
-        Coordinator(system_prompt="SYSTÈME", plugins=registry),
+        Coordinator(
+            system_prompt="SYSTÈME", plugins=registry, now_context=_now
+        ),
         [SessionRequested(client_id="c1")],
     )
 
     live = opened(commands)
-    assert live.instruction == "SYSTÈME"
+    assert live.instruction == "SYSTÈME\n\n" + NOW_CONTEXT
     assert [spec.name for spec in live.tools] == ["hass__turn_on"]
 
 
 def test_disabled_plugin_removes_its_tools_and_its_instruction_together() -> None:
-    enabled = Coordinator(system_prompt="SYSTÈME", plugins=_plugin_registry())
-    disabled = Coordinator(system_prompt="SYSTÈME", plugins=PluginRegistry())
+    enabled = Coordinator(
+        system_prompt="SYSTÈME", plugins=_plugin_registry(), now_context=_now
+    )
+    disabled = Coordinator(
+        system_prompt="SYSTÈME", plugins=PluginRegistry(), now_context=_now
+    )
 
     enabled_live = opened(drive(enabled, [SessionRequested(client_id="c1")]))
     disabled_live = opened(drive(disabled, [SessionRequested(client_id="c1")]))
 
     assert PLUGIN_INSTRUCTION in enabled_live.instruction
     assert enabled_live.tools
-    assert disabled_live.instruction == "SYSTÈME"
+    assert disabled_live.instruction == "SYSTÈME\n\n" + NOW_CONTEXT
     assert disabled_live.tools == ()
 
 
@@ -157,7 +184,12 @@ def test_without_plugins_the_instruction_is_the_same_as_before() -> None:
     memory = FakeMemory("MÉMOIRE")
     before = opened(
         drive(
-            Coordinator(memory=memory, user_id="alice", system_prompt="SYSTÈME"),
+            Coordinator(
+                memory=memory,
+                user_id="alice",
+                system_prompt="SYSTÈME",
+                now_context=_now,
+            ),
             [SessionRequested(client_id="c1")],
         )
     )
@@ -168,12 +200,13 @@ def test_without_plugins_the_instruction_is_the_same_as_before() -> None:
                 user_id="alice",
                 system_prompt="SYSTÈME",
                 plugins=PluginRegistry(),
+                now_context=_now,
             ),
             [SessionRequested(client_id="c1")],
         )
     )
 
-    assert before.instruction == "SYSTÈME\n\nMÉMOIRE"
+    assert before.instruction == "SYSTÈME\n\n" + NOW_CONTEXT + "\n\nMÉMOIRE"
     assert empty_registry.instruction == before.instruction
     assert empty_registry.tools == before.tools == ()
 

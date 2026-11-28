@@ -4,6 +4,7 @@ import os
 from enum import StrEnum
 from pathlib import Path
 from typing import Mapping
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -74,6 +75,9 @@ DEFAULT_PLUGINS_STATE = "plugins.json"
 # chemin de la clé peut pointer vers un répertoire de credentials systemd.
 DEFAULT_SETTINGS_DB = "settings.db"
 DEFAULT_MASTER_KEY_FILE = "master.key"
+# Base des Planifications (ADR-0028) : dédiée, à côté de la mémoire et de
+# l'auth, sauvegardable indépendamment. Elle survit aux redémarrages.
+DEFAULT_SCHEDULE_DB = "schedule.db"
 # Redémarrage automatique après application des Réglages (ADR-0025). Désactivé
 # par défaut : un serveur lancé à la main ne doit pas s'arrêter sans
 # superviseur. Activé, le processus sort proprement et son superviseur le
@@ -83,6 +87,42 @@ DEFAULT_RESTART_ON_APPLY = "0"
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"", "0", "false", "no", "off"}
+
+
+def system_timezone_name() -> str:
+    """Nom IANA du fuseau de la machine, sans jamais lever.
+
+    Trois essais, du plus explicite au plus sûr : la variable ``TZ`` quand elle
+    nomme un fuseau résolvable, le lien ``/etc/localtime`` quand il pointe dans
+    ``/usr/share/zoneinfo``, puis ``UTC``. Le résultat est toujours un nom que
+    ``zoneinfo.ZoneInfo`` sait ouvrir : un fuseau illisible ne doit pas empêcher
+    le serveur de démarrer.
+
+    Vit dans la couche application : le noyau déclare un défaut neutre et ne
+    lit jamais l'environnement ni le disque (ADR-0001).
+    """
+    candidate = os.environ.get("TZ", "").strip()
+    if candidate and _resolvable_zone(candidate):
+        return candidate
+    try:
+        resolved = Path("/etc/localtime").resolve()
+        parts = resolved.parts
+        if "zoneinfo" in parts:
+            index = parts.index("zoneinfo")
+            candidate = "/".join(parts[index + 1 :])
+            if candidate and _resolvable_zone(candidate):
+                return candidate
+    except OSError:
+        pass
+    return "UTC"
+
+
+def _resolvable_zone(name: str) -> bool:
+    try:
+        ZoneInfo(name)
+    except (KeyError, ValueError, OSError):
+        return False
+    return True
 
 
 def _coerce_bool(value: object, *, variable: str) -> bool:
@@ -332,6 +372,40 @@ class SettingsConfig(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
+class ScheduleConfig(BaseModel):
+    """Fuseau de l'instance et base des Planifications (ADR-0028).
+
+    ``timezone`` est un nom IANA résolvable : il décide de l'heure locale
+    injectée dans les prompts comme de l'interprétation des règles quotidiennes
+    et hebdomadaires. Un nom inconnu fait échouer le démarrage en le nommant,
+    plutôt que de laisser le Planificateur calculer dans un fuseau deviné.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    timezone: str = Field(default_factory=system_timezone_name)
+    db_path: str = Field(default=DEFAULT_SCHEDULE_DB, min_length=1)
+
+    @field_validator("timezone", mode="before")
+    @classmethod
+    def _validate_timezone(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        name = value.strip()
+        try:
+            ZoneInfo(name)
+        except (KeyError, ValueError, OSError) as error:
+            raise ValueError(
+                f"Unknown IANA timezone for ATHENA_TIMEZONE: {name!r}"
+            ) from error
+        return name
+
+    @field_validator("db_path", mode="before")
+    @classmethod
+    def _strip_path(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
 class AppConfig(BaseModel):
     """Configuration validée au démarrage, injectée par constructeur."""
 
@@ -345,6 +419,7 @@ class AppConfig(BaseModel):
     auth: AuthConfig = Field(default_factory=AuthConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
     settings: SettingsConfig = Field(default_factory=SettingsConfig)
+    schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     log_level: LogLevel = LogLevel.INFO
     log_dir: str = Field(default=DEFAULT_LOG_DIR, min_length=1)
     debug_decisions: bool = False
@@ -415,6 +490,8 @@ SETTING_TARGETS: dict[str, tuple[str, str]] = {
     "auth_db": ("auth", "db_path"),
     "settings_db": ("settings", "db_path"),
     "master_key_file": ("settings", "master_key_file"),
+    "timezone": ("schedule", "timezone"),
+    "schedule_db": ("schedule", "db_path"),
     "plugins_dir": ("plugins", "directory"),
     "plugins_state": ("plugins", "state_path"),
     "embed_model": ("memory", "embed_model"),
@@ -509,10 +586,17 @@ def load_config(
         "auth": {},
         "plugins": {},
         "settings": {},
+        "schedule": {},
     }
     for field in SETTINGS:
         section, attribute = SETTING_TARGETS[field.key]
-        value = merged.get(field.env, field.default)
+        value = merged.get(field.env)
+        if value is None:
+            # Absent : la section garde son défaut Pydantic, qui est aussi celui
+            # de la table — sauf pour un défaut **contextuel** que seule la
+            # couche application sait calculer (le fuseau système). Une valeur
+            # vide reste une valeur : elle est validée comme telle.
+            continue
         if section:
             sections[section][attribute] = value
         else:

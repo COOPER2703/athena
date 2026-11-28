@@ -116,6 +116,7 @@ ENV PATH="/opt/venv/bin:${PATH}" \
     ATHENA_AUTH_DB=/data/auth.db \
     ATHENA_MEMORY_DB=/data/athena_memory.db \
     ATHENA_SETTINGS_DB=/data/settings.db \
+    ATHENA_SCHEDULE_DB=/data/schedule.db \
     ATHENA_MASTER_KEY_FILE=/data/master.key \
     ATHENA_LOG_DIR=/logs \
     ATHENA_PLUGINS_STATE=/data/plugins.json

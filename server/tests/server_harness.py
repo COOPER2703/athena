@@ -43,7 +43,9 @@ API publique
     après un redémarrage. ``restart_on_apply``, ``restart_command`` et
     ``restart`` règlent l'application des Réglages : la callable injectée
     remplace la sortie du processus, pour qu'un test observe le redémarrage
-    sans tuer pytest. Le serveur est arrêté proprement à la sortie du bloc, et
+    sans tuer pytest. ``wall_clock`` fige l'horloge murale du contexte temporel
+    (date, heure locale, fuseau) sans attendre. Le serveur est arrêté
+    proprement à la sortie du bloc, et
     le logging racine est restauré.
 
 ``AthenaServer`` (ce que rend la fixture)
@@ -115,6 +117,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from datetime import datetime
 from typing import Any, AsyncIterator, Callable, Mapping
 
 import aiohttp
@@ -138,6 +141,7 @@ from server.app.config import (
     GeminiConfig,
     MemoryConfig,
     PluginsConfig,
+    ScheduleConfig,
     ServerConfig,
     SettingsConfig,
     WebhookConfig,
@@ -145,7 +149,13 @@ from server.app.config import (
 )
 from server.app.root import App, build_app
 from server.core.events import TimerFired
-from server.core.ports import SecretResolver, SecretStore, SecretValidator
+from server.core.ports import (
+    EventJudge,
+    SecretResolver,
+    SecretStore,
+    SecretValidator,
+    Wakeup,
+)
 
 # Logs du harnais : même niveau que la configuration par défaut.
 _LOG_LEVEL = "INFO"
@@ -664,6 +674,7 @@ class ServerPaths:
     memory_db: Path
     auth_db: Path
     settings_db: Path
+    schedule_db: Path
     master_key: Path
     plugins_dir: Path
     plugins_state: Path
@@ -1173,6 +1184,7 @@ def _paths(root: Path, static_dir: Path | None) -> ServerPaths:
         memory_db=root / "memory.db",
         auth_db=root / "auth.db",
         settings_db=root / "settings.db",
+        schedule_db=root / "schedule.db",
         master_key=root / "master.key",
         plugins_dir=root / "plugins",
         plugins_state=root / "plugins.json",
@@ -1216,6 +1228,7 @@ def _config(
             db_path=str(paths.settings_db),
             master_key_file=str(paths.master_key),
         ),
+        schedule=ScheduleConfig(db_path=str(paths.schedule_db)),
         log_dir=str(paths.log_dir),
         log_level=_LOG_LEVEL,
         restart_on_apply=restart_on_apply,
@@ -1282,11 +1295,14 @@ async def running_server(
     webhook: bool = False,
     secret_validator: SecretValidator | None = None,
     model: FakeLiveModel | None = None,
+    judge: EventJudge | None = None,
     console_port: int | None = None,
     transport_port: int | None = None,
     restart_on_apply: bool = False,
     restart_command: str = "docker restart athena",
     restart: Callable[[], None] | None = None,
+    wall_clock: Callable[[], datetime] | None = None,
+    wakeup: Wakeup | None = None,
 ) -> AsyncIterator[AthenaServer]:
     """Démarre le serveur complet sur des ports éphémères et l'arrête à la sortie.
 
@@ -1298,6 +1314,9 @@ async def running_server(
 
     ``model`` remplace le faux modèle : un scénario navigateur y branche un
     script qui répond seul, sans qu'un test Python ait à appeler ``reply``.
+    ``judge`` remplace le juge texte par un verdict déterministe, sans réseau :
+    la racine de composition reste celle de ``build_app``, seul le juge change,
+    par le même chemin que l'activation à chaud (``set_judge``).
     ``console_port`` et ``transport_port`` figent les deux ports, pour qu'un
     superviseur relance le serveur à la même adresse après une sortie propre.
 
@@ -1355,7 +1374,14 @@ async def running_server(
         auth_now=clock,
         monotonic=clock,
         restart=restart,
+        wall_clock=wall_clock,
+        wakeup=wakeup,
     )
+    if judge is not None:
+        # Le juge est adopté avant le démarrage, par la couture publique du
+        # noyau (``set_judge``), exactement comme l'activation à chaud : aucun
+        # adaptateur n'est remplacé, seule la décision de parler est fixée.
+        app._coordinator.set_judge(judge)
     runner = asyncio.create_task(app.run())
     server = AthenaServer(
         app=app,

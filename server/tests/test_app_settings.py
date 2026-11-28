@@ -24,6 +24,7 @@ from server.adapters.console.contract import (
     SECRETS_PATH,
     SETTINGS_PATH,
 )
+from server.app.config import system_timezone_name
 from server_harness import running_server
 
 GEMINI_KEY = "cle-gemini-reglages-6f21"
@@ -103,6 +104,13 @@ def test_get_settings_reports_the_effective_value_default_and_source(
             assert log_level["value"] == "INFO"
             assert log_level["source"] == "default"
             assert log_level["read_only"] is False
+
+            # Le défaut contextuel du fuseau est le fuseau système, injecté par
+            # la racine : la valeur effective et sa source le prouvent.
+            timezone = settings["fields"]["timezone"]
+            assert timezone["source"] == "default"
+            assert timezone["value"] == system_timezone_name()
+            assert timezone["default"] == system_timezone_name()
             assert set(log_level["choices"]) == {
                 "DEBUG",
                 "INFO",
@@ -125,6 +133,7 @@ def test_get_settings_reports_the_effective_value_default_and_source(
             for key in (
                 "auth_db",
                 "settings_db",
+                "schedule_db",
                 "master_key_file",
                 "plugins_dir",
                 "plugins_state",
@@ -349,6 +358,81 @@ def test_the_environment_masks_a_field_and_the_put_refuses_it(
             status, accepted = await _put_settings(http, server, values)
             assert status == 200, accepted
             assert accepted["pending"] == []
+
+    asyncio.run(scenario())
+
+
+def test_an_invalid_timezone_is_refused_without_writing_the_other_fields(
+    tmp_path: Path,
+) -> None:
+    """Le fuseau invalide est refusé par champ ; aucun autre champ n'est écrit."""
+
+    async def scenario() -> None:
+        async with running_server(tmp_path) as server:
+            http = await server.install()
+            before = await _get_settings(http, server)
+            values = _editable_values(before)
+            values.update({"timezone": "Mars/Olympus", "voice": "Puck"})
+
+            status, body = await _put_settings(http, server, values)
+
+            assert status == 400
+            assert body["error"] == "invalid_settings"
+            assert "timezone" in body["fields"]
+            after = await _get_settings(http, server)
+            assert after["pending"] == []
+            assert after["fields"]["voice"]["value"] == before["fields"]["voice"]["value"]
+
+    asyncio.run(scenario())
+
+
+def test_the_timezone_setting_is_read_only_when_the_environment_masks_it(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with running_server(
+            tmp_path, env={"ATHENA_TIMEZONE": "Asia/Tokyo"}
+        ) as server:
+            http = await server.install()
+            before = await _get_settings(http, server)
+            timezone = before["fields"]["timezone"]
+            assert timezone["value"] == "Asia/Tokyo"
+            assert timezone["source"] == "env"
+            assert timezone["read_only"] is True
+
+            values = _editable_values(before)
+            assert "timezone" not in values
+            values["timezone"] = "Europe/Paris"
+            status, body = await _put_settings(http, server, values)
+
+            assert status == 400
+            assert "timezone" in body["fields"]
+            assert "environnement" in body["fields"]["timezone"]
+
+    asyncio.run(scenario())
+
+
+def test_a_timezone_change_waits_for_a_restart(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with running_server(tmp_path) as server:
+            http = await server.install()
+            before = await _get_settings(http, server)
+            target = (
+                "Europe/Paris"
+                if before["fields"]["timezone"]["default"] != "Europe/Paris"
+                else "Asia/Tokyo"
+            )
+            values = _editable_values(before)
+            values["timezone"] = target
+
+            status, accepted = await _put_settings(http, server, values)
+
+            assert status == 200, accepted
+            assert accepted["restart_required"] is True
+            assert [item["key"] for item in accepted["pending"]] == ["timezone"]
+            after = await _get_settings(http, server)
+            assert after["fields"]["timezone"]["pending_value"] == target
+            assert after["fields"]["timezone"]["value"] == before["fields"]["timezone"]["value"]
 
     asyncio.run(scenario())
 

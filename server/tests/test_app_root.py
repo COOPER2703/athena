@@ -5,6 +5,7 @@ import json
 import logging
 import socket
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable, TypeVar
 
 from protocol import SessionEndReason
@@ -16,10 +17,12 @@ from server.app.config import (
     AuthConfig,
     ConsoleConfig,
     GeminiConfig,
+    ScheduleConfig,
 )
 from server.app.root import (
     App,
     build_app,
+    connected_client_ids,
     load_announce_prompt,
     load_judge_prompt,
     load_system_prompt,
@@ -38,6 +41,7 @@ from server.core.commands import (
 )
 from server.core.events import (
     ClientAudio,
+    ClientDisconnected,
     ClientRegistered,
     Event,
     LlmAudio,
@@ -98,6 +102,12 @@ class FakeAdapter:
         self.tool_results.append((connection_id, tool_id, name, result))
 
     async def feed(self, event: Event) -> None:
+        # Comme le vrai transport : les Clients branchés se lisent sur
+        # ``clients``, que la racine consulte pour la présence (ADR-0028).
+        if isinstance(event, ClientRegistered):
+            self.clients[event.client_id] = object()
+        elif isinstance(event, ClientDisconnected):
+            self.clients.pop(event.client_id, None)
         await self.events.put(event)
 
     def of_type(self, command_type: type[_CommandT]) -> list[_CommandT]:
@@ -502,10 +512,64 @@ def test_build_app_wires_the_kernel_tools(tmp_path: Path) -> None:
         "save_memory",
         "forget_memory",
         "end_session",
+        "create_schedule",
+        "list_schedules",
+        "update_schedule",
+        "delete_schedule",
     }
     assert app.tools.owner_of("end_session") == "core"
+    assert app.tools.owner_of("update_schedule") == "core"
+    assert app.tools.owner_of("delete_schedule") == "core"
     spec = next(spec for spec in app.tools.specs() if spec.name == END_SESSION)
     assert spec.parameters == {"type": "object", "properties": {}}
+
+
+def test_build_app_lends_the_schedule_tools_the_dedicated_database(
+    tmp_path: Path,
+) -> None:
+    schedule_db = tmp_path / "schedule.db"
+    config = AppConfig(
+        gemini=GeminiConfig(api_key="test-key"),
+        log_dir=str(tmp_path),
+        schedule=ScheduleConfig(db_path=str(schedule_db)),
+    )
+
+    app = build_app(config)
+    created = asyncio.run(
+        app.tools.execute(
+            "create_schedule",
+            {"content": "sortir les poubelles", "when": {"kind": "daily", "time": "20:00"}},
+        )
+    )
+
+    assert created["status"] == "ok"
+    assert schedule_db.is_file()
+    # La création fonctionne sans que l'application tourne : aucun pump n'est
+    # nécessaire pour enregistrer une Planification (l'émission viendra #195).
+
+    updated = asyncio.run(
+        app.tools.execute(
+            "update_schedule",
+            {"id": created["id"], "content": "sortir le verre"},
+        )
+    )
+    assert updated["status"] == "updated"
+
+    # Une seconde composition sur la même base relit la modification.
+    restarted = build_app(config)
+    listed = asyncio.run(restarted.tools.execute("list_schedules", {}))
+
+    assert [item["id"] for item in listed["schedules"]] == [created["id"]]
+    assert listed["schedules"][0]["content"] == "sortir le verre"
+
+    deleted = asyncio.run(
+        restarted.tools.execute("delete_schedule", {"id": created["id"]})
+    )
+    assert deleted == {"status": "deleted", "id": created["id"]}
+    assert asyncio.run(restarted.tools.execute("list_schedules", {})) == {
+        "status": "ok",
+        "schedules": [],
+    }
 
 
 def test_save_memory_tool_call_reaches_the_store_and_the_model() -> None:
@@ -577,7 +641,9 @@ def test_pushed_event_at_rest_judges_then_opens_an_announcement_connection() -> 
 
             await wait_until(lambda: gemini.of_type(OpenLiveConnection))
             opened = gemini.of_type(OpenLiveConnection)[0]
-            assert opened.instruction == "JUGE"
+            # La Session d'Annonce est une Session comme une autre : prompt
+            # d'Annonce puis contexte temporel.
+            assert opened.instruction.startswith("JUGE\n\n[CONTEXTE TEMPOREL]\n")
             assert opened.tools == ()
             # Le jugement est **texte** : les faits étiquetés arrivent au juge,
             # et seule la Connexion d'Annonce ouvre pour faire parler le verdict.
@@ -588,6 +654,81 @@ def test_pushed_event_at_rest_judges_then_opens_an_announcement_connection() -> 
             assert announcement.connection_id == opened.connection_id
             assert announcement.text == "La porte est ouverte"
             assert clock.scheduled[-1] == (opened.connection_id, ANNOUNCE_TIMEOUT)
+
+            app.request_shutdown()
+            await asyncio.wait_for(runner, 1.0)
+        finally:
+            if not runner.done():
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+class _ConsoleSurface:
+    """Surface du Client Console : seule ``alive`` est lue par la présence."""
+
+    def __init__(self, alive: bool = True) -> None:
+        self.alive_now = alive
+
+    def alive(self) -> bool:
+        return self.alive_now
+
+
+def test_connected_client_ids_lists_transport_clients_then_the_live_console_client():
+    transport = FakeAdapter()
+    transport.clients = {"desktop": object(), "phone": object()}
+    console = SimpleNamespace(
+        client_id="console", surface=_ConsoleSurface(alive=True)
+    )
+
+    # Ordre de préférence : Clients du transport (ordre de connexion) puis le
+    # Client Console éphémère, tant que sa surface vit.
+    assert list(connected_client_ids(transport, console)) == [
+        "desktop",
+        "phone",
+        "console",
+    ]
+    console.surface.alive_now = False
+    assert list(connected_client_ids(transport, console)) == ["desktop", "phone"]
+    assert list(connected_client_ids(None, None)) == []
+
+
+def test_pushed_event_without_a_client_waits_then_judges_on_the_first_registration() -> None:
+    """La couture de présence est injectée par ``App`` (donc par ``build_app``).
+
+    Sans Client connecté, aucune fenêtre ne s'arme et l'Événement patiente dans
+    la File, tracé ; le premier Client enregistré ouvre la fenêtre sans qu'un
+    nouvel Événement soit poussé.
+    """
+
+    async def scenario() -> None:
+        judge = FakeJudge(message="La porte est ouverte")
+        transport, gemini, clock, sink, app = _build(
+            announce_prompt="JUGE", judge=judge
+        )
+        runner = asyncio.create_task(app.run())
+        try:
+            await wait_until(lambda: transport.started)
+
+            app.push_event("matrix", "porte ouverte")
+            await wait_until(
+                lambda: any(entry.kind == "EventDeferred" for entry in sink.entries)
+            )
+            assert (EVENT_WINDOW_TIMER_ID, EVENT_WINDOW_TIMEOUT) not in clock.scheduled
+            assert not gemini.of_type(OpenLiveConnection)
+            assert judge.calls == []
+
+            await transport.feed(ClientRegistered(client_id="c1"))
+            await wait_until(
+                lambda: (EVENT_WINDOW_TIMER_ID, EVENT_WINDOW_TIMEOUT)
+                in clock.scheduled
+            )
+            assert judge.calls == []
+
+            await clock.fire(EVENT_WINDOW_TIMER_ID)
+            await wait_until(lambda: gemini.of_type(OpenLiveConnection))
+            assert judge.calls[-1] == ["[matrix] porte ouverte"]
 
             app.request_shutdown()
             await asyncio.wait_for(runner, 1.0)
@@ -829,6 +970,10 @@ def test_build_app_announces_the_kernel_and_plugin_tools_on_registration(
                     "save_memory",
                     "forget_memory",
                     "end_session",
+                    "create_schedule",
+                    "list_schedules",
+                    "update_schedule",
+                    "delete_schedule",
                     "fixture__echo",
                 ]
 

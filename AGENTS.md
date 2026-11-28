@@ -42,9 +42,9 @@ Le **Diagnostic** lit `GET /api/status` et le WebSocket `/api/stream`. L'instant
 plus de `session`, `clients`, `plugins` et `config` : `installation` (`account_exists`,
 `gemini_configured`, `complete`, `secrets_unreadable`, `surfaces` réellement ouvertes),
 `restart_required`, et `health` (version, uptime monotone, dernière Consolidation, taille des
-bases mémoire/auth/réglages — `0` si absente, `-wal`/`-shm` compris —, dernière erreur sans son
-payload, taille et capacité du Tampon de traces). Ces champs sont des lectures **sans
-secret** et restent renseignés pendant l'Installation : aucun n'exige un Compte ni une clé.
+bases mémoire/auth/réglages/planifications — `0` si absente, `-wal`/`-shm` compris —, dernière
+erreur sans son payload, taille et capacité du Tampon de traces). Ces champs sont des lectures
+**sans secret** et restent renseignés pendant l'Installation : aucun n'exige un Compte ni une clé.
 Pendant une conversation vocale, `clients` contient en plus le **Client Console** (nom
 `Console (<navigateur>)`, plateforme `web`) et `session.console` vaut `true` : le front sait
 que la Session en cours est celle qu'il héberge.
@@ -149,6 +149,12 @@ n'est réinitialisé en silence.
 - Précédence : **environnement du processus > magasin > `.env` > défauts**, avec la source
   de chaque champ (`server/core/settings.py`). L'environnement masque un champ en lecture
   seule ; les chemins des bases, des Plugins et des journaux sont en lecture seule.
+- `timezone` est un Réglage d'instance (nom IANA, `ATHENA_TIMEZONE`) : défaut = fuseau
+  système, modifiable dans la Console, en lecture seule quand l'environnement le masque.
+  Chaque instruction de Session, de Tour et d'Annonce porte une section
+  `[CONTEXTE TEMPOREL]` composée à l'ouverture (date, heure locale à la seconde, fuseau) ;
+  le prompt statique n'est pas modifié. La base des Planifications, `ATHENA_SCHEDULE_DB`
+  (`schedule.db`), est un chemin en lecture seule.
 - Sans clé Gemini, le serveur démarre en **Installation** : transport des Clients, Webhook
   et Gemini ne sont pas démarrés ; la Console, les Réglages et le Diagnostic répondent.
   `GEMINI_API_KEY` n'est plus obligatoire au démarrage.
@@ -158,6 +164,30 @@ n'est réinitialisé en silence.
   la Conversation répond immédiatement. Une clé **remplacée** après installation, elle,
   attend un redémarrage (`restart_required` vrai) : la Connexion Live garde celle chargée
   au démarrage, et la Conversation reste utilisable avec l'ancienne jusque-là.
+
+### Événements et Annonces
+
+Le **Canal d'événements** est unique (Webhook, plugins, Console, Planificateur) et la **File
+d'attente d'Événements** est bornée (`EVENT_QUEUE_MAX`, 120) : au-delà, les plus anciens sont
+jetés et chaque abandon est tracé (`EventQueueDropped`).
+
+Une **Annonce** — Session automatique ouverte pour prononcer un fait — n'est jamais adressée
+dans le vide. Règle unique, valable pour **toutes** les Annonces (pas seulement celles du
+Planificateur, ADR-0028) :
+
+- la fenêtre de jugement ne s'ouvre **pas** tant qu'aucun Client n'est réellement connecté ;
+  les Événements patientent dans la File, dans l'ordre d'arrivée ;
+- le premier Client enregistré rouvre la fenêtre sans attendre un nouvel Événement ;
+- si le dernier Client disparaît pendant que la fenêtre court, l'échéance ne juge pas : la
+  File reste intacte et le report est tracé (`EventDeferred`, raison `no_client`) ;
+- la cible d'une Annonce est un Client **connecté** : l'enregistré s'il l'est encore, sinon le
+  premier connecté — jamais un `client_id` périmé après une déconnexion.
+
+La présence se lit par une **couture injectée** dans le `Coordinator`
+(`connected_clients`), sans import d'adaptateur : la racine de composition y branche un
+callable qui rend les Clients du transport (ordre de connexion) puis le Client Console
+éphémère tant que sa surface vit. Une fermeture, pas un instantané : l'activation à chaud et
+la mort du Client Console sont vues à jour.
 
 ### Page locale de couplage
 
@@ -219,6 +249,75 @@ démarrage raté.
   rien n'est rechargé à chaud. La réponse signale `restart_required`.
 - Aucune installation ni désinstallation : le store de Plugins reste hors périmètre, et
   la Console ne propose aucun bouton d'installation.
+
+### Planificateur
+
+Le **Planificateur** (ADR-0028) est un composant du noyau : il détient les **Planifications**
+(un contenu figé et une règle structurée : ponctuelle, intervalle, quotidienne ou
+hebdomadaire), les persiste dans une base **dédiée** et les fait entrer dans le Canal
+d'événements sous forme d'**Occurrences**. Son pump démarre et s'arrête avec le runtime Gemini
+(jamais pendant l'Installation). Les quatre Tools du noyau sont complets :
+`create_schedule(content, when)`, `list_schedules()`, `update_schedule(id, content?, when?)` et
+`delete_schedule(id)`. Aucune surface Console n'écrit de Planification.
+
+- `update_schedule` remplace le contenu et/ou la règle fournis, recalcule la prochaine
+  occurrence depuis `now` avec la nouvelle règle (aucun créneau de l'ancienne règle ne
+  survit) et rend `updated` ; `delete_schedule` rend `deleted`. Un identifiant inconnu rend
+  `not_found` pour les deux, jamais une confirmation mensongère : une seconde suppression est
+  un `not_found`. Une mise à jour invalide est refusée (`error`) sans écriture partielle.
+  Les Traces distinguent `ScheduleCreated`, `ScheduleUpdated` et `ScheduleDeleted`.
+- À l'échéance, le pump émet une **Occurrence** dans le Canal unique (Source
+  `planificateur`) et efface la ponctuelle. Au Repos, elle rejoint la même File d'attente,
+  attend un Client **réellement connecté** (`OccurrenceDeferred`, raison `no_client`), puis
+  ouvre l'Annonce **sans appeler le juge** : dans un lot mixte, le juge ne voit que les
+  Événements ordinaires et un seul tour porte l'ensemble. Le contenu part comme fait sous
+  `[ÉVÉNEMENTS]` ; il n'est jamais la phrase lue, et reste une donnée non fiable.
+- Un lot mixte ne produit qu'**une** Annonce : le juge ne reçoit que les Événements
+  ordinaires (`EventJudgmentFailed` les compte seuls), une Occurrence seule ne l'appelle
+  jamais, et un verdict `announce=false`, absent, en panne ou malformé ne la retire pas du
+  lot. Les faits annoncés suivent l'ordre d'arrivée, le dédoublonnage reste celui des
+  Événements ordinaires (une Occurrence n'est jamais dédupliquée, même identique à un
+  Événement) et le Journal reçoit **une fois** chaque fait annoncé, en rôle `event`.
+- Une Occurrence dont l'Annonce est interrompue **avant** de devenir visible (préemption,
+  panne du modèle, Client parti) retourne intacte en tête de File (`OccurrenceDeferred`,
+  raison `announcement_aborted`) et la prochaine Annonce la journalise une fois ; le silence
+  du modèle (`TIMEOUT`) et l'arrêt gardent la règle « sans relance » (`OccurrenceDropped`,
+  `judgment_aborted`). Une Annonce qui se termine avant d'être devenue visible est tracée
+  `AnnouncementSilent`, une seule fois, et n'entre pas au Journal (rôle `event` seulement
+  une fois annoncée, donc exclue de la Consolidation). Traces : `ScheduleCreated`,
+  `OccurrenceEmitted`, `OccurrenceSkipped` (récurrente manquée au démarrage, avancée sans
+  rafale), `OccurrenceDeferred`, `OccurrenceDropped` (`too_large`, `capacity`, `shutdown`,
+  `judgment_aborted`).
+- Occurrences manquées : le pump réconcilie **une fois** à son démarrage — démarrage du
+  processus avec une clé, ou activation à chaud de la première clé. Une **ponctuelle** due
+  est réclamée et annoncée **une seule fois**, même plusieurs heures en retard ; une
+  **récurrente** due est avancée au premier créneau strictement postérieur à maintenant,
+  **sans être rejouée** ni annoncée immédiatement ; une récurrente encore devant n'est pas
+  touchée. Le saut produit **une** Trace `OccurrenceSkipped` par Planification
+  (`schedule_id`, `kind`, `reason: "missed_slots"`, `due`, `now`), jamais une par créneau
+  manqué, et seulement après une réclamation réussie. Sans runtime (Installation), aucun
+  pump ne tourne : le rattrapage attend l'activation, aucune Annonce ne part.
+- Une récurrence par intervalle garde sa **phase** : après chaque émission, la suivante vaut
+  exactement `échéance précédente + every_seconds`, jamais `now + every_seconds`, donc une
+  boucle en retard de quelques secondes ne dérive pas. Si plusieurs périodes ont été ratées,
+  la suivante est le premier pas de la même phase strictement après maintenant ; aucun
+  créneau passé n'est jamais émis.
+
+
+- `ATHENA_SCHEDULE_DB` : `schedule.db` par défaut (chemin en lecture seule dans les
+  Réglages) ; base SQLite dédiée, `CREATE TABLE IF NOT EXISTS`, connexion paresseuse, aucun
+  répertoire parent créé. L'Image la place dans `/data`.
+- Le fuseau d'interprétation est le Réglage `timezone` (`ATHENA_TIMEZONE`, nom IANA, défaut :
+  fuseau du processus) ; les instants sont stockés en UTC à la seconde.
+- `when` accepte exactement : `{kind:"once", delay_seconds}` ou `{kind:"once", at:""}`
+  (heure locale `YYYY-MM-DDTHH:MM:SS`), `{kind:"interval", every_seconds}`,
+  `{kind:"daily", time:"HH:MM"}` et `{kind:"weekly", days:[1..7], time:"HH:MM"}`.
+- Bornes du noyau : 200 Planifications, intervalle ≥ 60 s, contenu ≤ 4096 caractères,
+  ponctuelle strictement future. Le contenu est une **donnée** : jamais exécuté, jamais lu
+  mot pour mot comme instruction.
+- Le Diagnostic publie la taille de la base `schedule` sous le libellé « Planifications ».
+- Changement d'heure : un créneau local inexistant est sauté, un créneau doublé n'est
+  calculé qu'une fois.
 
 ### Recherche web
 

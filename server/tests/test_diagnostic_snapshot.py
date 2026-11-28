@@ -69,7 +69,12 @@ def test_status_carries_installation_health_and_no_secret(tmp_path: Path) -> Non
                 "transcript_chars",
             }
             assert health["last_error"] is None
-            assert set(health["databases"]) == {"memory", "auth", "settings"}
+            assert set(health["databases"]) == {
+                "memory",
+                "auth",
+                "settings",
+                "schedule",
+            }
             assert all(size >= 0 for size in health["databases"].values())
             assert health["trace_buffer"]["capacity"] == 500
             assert health["trace_buffer"]["size"] >= 0

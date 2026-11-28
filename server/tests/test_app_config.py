@@ -16,6 +16,7 @@ from server.app.config import (
     DEFAULT_GEMINI_VOICE,
     DEFAULT_JUDGE_MODEL,
     DEFAULT_MEMORY_DB,
+    DEFAULT_SCHEDULE_DB,
     DEFAULT_WEBHOOK_HOST,
     DEFAULT_WEBHOOK_PORT,
     AppConfig,
@@ -24,10 +25,12 @@ from server.app.config import (
     LogLevel,
     MemoryConfig,
     PluginsConfig,
+    ScheduleConfig,
     ServerConfig,
     SettingsConfig,
     WebhookConfig,
     load_config,
+    system_timezone_name,
 )
 
 
@@ -382,6 +385,44 @@ def test_plugin_paths_are_configurable_from_the_environment() -> None:
 
     assert cfg.plugins.directory == "var/plugins"
     assert cfg.plugins.state_path == "var/plugins.json"
+
+
+def test_schedule_defaults_to_the_system_zone_and_its_own_database() -> None:
+    cfg = load_config(env={"GEMINI_API_KEY": "k"}, env_file=None)
+
+    assert cfg.schedule == ScheduleConfig()
+    assert cfg.schedule.timezone == system_timezone_name()
+    assert cfg.schedule.db_path == DEFAULT_SCHEDULE_DB
+    assert cfg.schedule.db_path != cfg.memory.db_path
+    assert cfg.schedule.db_path != cfg.auth.db_path
+    assert cfg.schedule.db_path != cfg.settings.db_path
+
+
+def test_schedule_reads_and_strips_its_environment() -> None:
+    cfg = load_config(
+        env={
+            "GEMINI_API_KEY": "k",
+            "ATHENA_TIMEZONE": " Europe/Paris ",
+            "ATHENA_SCHEDULE_DB": " var/schedule.db ",
+        },
+        env_file=None,
+    )
+
+    assert cfg.schedule.timezone == "Europe/Paris"
+    assert cfg.schedule.db_path == "var/schedule.db"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"ATHENA_SCHEDULE_DB": "   "},
+        {"ATHENA_TIMEZONE": "   "},
+        {"ATHENA_TIMEZONE": "Mars/Olympus"},
+    ],
+)
+def test_invalid_schedule_config_is_a_validation_error(overrides) -> None:
+    with pytest.raises(ValidationError):
+        load_config(env={"GEMINI_API_KEY": "k", **overrides}, env_file=None)
 
 
 def test_settings_paths_default_next_to_the_other_databases() -> None:

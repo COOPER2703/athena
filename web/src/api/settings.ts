@@ -14,7 +14,13 @@ import { normalizeSecretStatus, type SecretStatus } from "./secrets";
 export type SettingSource = "default" | "store" | "env";
 
 /** Forme d'un champ, qui borne le contrôle affiché et la validation locale. */
-export type SettingKind = "string" | "int" | "float" | "bool" | "hours";
+export type SettingKind =
+  | "string"
+  | "int"
+  | "float"
+  | "bool"
+  | "hours"
+  | "timezone";
 
 /** Un réglage tel que `GET /api/settings` le décrit. */
 export interface SettingField {
@@ -71,7 +77,14 @@ export interface SettingsPayload {
 }
 
 const SOURCES: readonly SettingSource[] = ["default", "store", "env"];
-const KINDS: readonly SettingKind[] = ["string", "int", "float", "bool", "hours"];
+const KINDS: readonly SettingKind[] = [
+  "string",
+  "int",
+  "float",
+  "bool",
+  "hours",
+  "timezone",
+];
 
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null

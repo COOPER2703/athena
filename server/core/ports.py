@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Mapping, NamedTuple, Protocol, Sequence, runtime_checkable
+from zoneinfo import ZoneInfo
 
 from plugin_api import ToolSpec
 from protocol import SessionEndReason
@@ -205,6 +206,21 @@ class Clock(Protocol):
     def cancel(self, connection_id: str) -> None: ...
 
 
+class Wakeup(Protocol):
+    """Réveil d'une boucle endormie, possédé par l'application (ADR-0028).
+
+    Le noyau ne connaît ni ``asyncio`` ni un ``Event`` : il attend par ce port.
+    ``notify`` est la couture synchrone appelée après une écriture (création,
+    modification, suppression d'une Planification) ; ``wait`` dort au plus
+    ``timeout`` secondes (``None`` = jusqu'à un réveil) et rend la main sans
+    erreur à l'échéance comme au réveil.
+    """
+
+    def notify(self) -> None: ...
+
+    async def wait(self, timeout: float | None = None) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryHit:
     """A candidate recalled from memory (pure; the kernel applies the policy)."""
@@ -358,6 +374,100 @@ class SessionControl(Protocol):
 
     def close_session(self, client_id: str) -> None:
         """Le navigateur a fermé : le Client Console meurt avec sa Session."""
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleRule:
+    """Règle temporelle d'une Planification (ADR-0028).
+
+    Une seule forme à la fois, jamais une expression cron :
+
+    - ``once`` : ``at`` porte l'instant UTC (epoch secondes) ;
+    - ``interval`` : ``every_seconds`` est la période, au moins 60 s ;
+    - ``daily`` : ``time_of_day`` est une heure locale ``HH:MM`` ;
+    - ``weekly`` : ``time_of_day`` et ``days`` (1 = lundi … 7 = dimanche).
+
+    Le noyau valide ces invariants avant de construire une règle ; la
+    dataclass reste un porteur de données sérialisable en JSON.
+    """
+
+    kind: str
+    at: int | None = None
+    every_seconds: int | None = None
+    time_of_day: str | None = None
+    days: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class Schedule:
+    """Une Planification persistée : contenu figé et règle structurée.
+
+    ``next_occurrence`` est un instant UTC en secondes (epoch). ``created_at``
+    et ``updated_at`` suivent la même unité. L'identifiant est stable sur
+    disque (``sch_<uuid4 hex>``) : les Tools de modification et de suppression
+    s'y adressent, et ``list_schedules`` le rend au modèle.
+    """
+
+    id: str
+    content: str
+    rule: ScheduleRule
+    next_occurrence: int
+    created_at: int
+    updated_at: int
+
+
+class ScheduleError(Exception):
+    """Échec d'une opération de Planification, porteur d'un code stable.
+
+    Le code appartient au vocabulaire du noyau :
+    ``invalid_when``, ``not_future``, ``empty_content``, ``content_too_long``,
+    ``interval_too_short``, ``empty_days``, ``too_many_schedules``. Le message
+    est lisible et destiné au modèle ; le code sert aux tests et aux surfaces
+    futures.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+class ScheduleStore(Protocol):
+    """Port du magasin de Planifications, derrière une base dédiée (ADR-0028).
+
+    Le noyau ne connaît ni SQL ni le disque. ``create`` applique le plafond de
+    200 Planifications dans la même section critique que l'insertion ;
+    ``list`` rend les plus proches d'abord ; ``update`` et ``delete`` rendent
+    ``False`` quand l'identifiant a disparu, sans jamais créer de ligne.
+    """
+
+    def create(self, schedule: Schedule) -> Schedule: ...
+
+    def list(self) -> Sequence[Schedule]: ...
+
+    def get(self, schedule_id: str) -> Schedule | None: ...
+
+    def count(self) -> int: ...
+
+    def claim_due(
+        self,
+        now_epoch: int,
+        *,
+        startup: bool = False,
+        timezone: str | ZoneInfo,
+    ) -> Sequence[Schedule]: ...
+
+    def update(self, schedule: Schedule) -> bool:
+        """Remplace contenu, règle et prochaine occurrence d'une ligne existante.
+
+        Rend ``False`` quand l'identifiant a disparu entre la lecture et
+        l'écriture (#197) ; aucune ligne n'est alors créée.
+        """
+        ...
+
+    def delete(self, schedule_id: str) -> bool:
+        """Efface la Planification, ``False`` si elle n'existait déjà plus."""
+        ...
 
 
 class MemoryStore(Protocol):

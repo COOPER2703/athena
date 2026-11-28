@@ -101,8 +101,9 @@ _Avoid_: Lecture, diffusion
 
 **Événement**:
 Un fait externe poussé vers Athena, porteur d'un nom de source et d'un contenu, sans
-jugement d'importance. Le LLM juge seul s'il mérite d'interpeller l'utilisateur.
-_Avoid_: message, notification, alerte, signal
+jugement d'importance. Le LLM juge seul s'il mérite d'interpeller l'utilisateur ; la seule
+exception est l'**Occurrence** du Planificateur, toujours annoncée.
+_Avoid_: message, notification, alerte, signal, rappel planifié
 
 **Source**:
 L'émetteur d'un Événement : un plugin du serveur ou une application externe, identifiée
@@ -121,9 +122,9 @@ noyau le traite un élément à la fois.
 _Avoid_: EventBus, bus, file d'événements
 
 **File d'attente d'Événements**:
-Les Événements reçus hors Repos, conservés dans l'ordre d'arrivée en attendant d'être jugés.
-Plafonnée et éphémère : les plus anciens sont abandonnés quand elle déborde, et elle ne
-survit pas à un redémarrage.
+Les Événements reçus hors Repos ou sans aucun Client connecté, conservés dans l'ordre
+d'arrivée en attendant d'être jugés ou annoncés. Plafonnée et éphémère : les plus anciens sont
+abandonnés quand elle déborde, et elle ne survit pas à un redémarrage.
 _Avoid_: file d'événements, buffer, queue
 
 **Webhook**:
@@ -131,6 +132,20 @@ Le transport HTTP par lequel une application externe pousse un Événement dans 
 d'événements. N'est pas un concept du noyau, seulement un moyen d'accès. Depuis l'ADR-0017,
 il exige un **Jeton d'accès** de nature `source`, dont la Source fait autorité.
 _Avoid_: endpoint, callback, hook
+
+### Planification
+
+**Planificateur**:
+Le composant du noyau qui fait entrer des **Occurrences** dans le Canal à des instants qu'il calcule lui-même, sans Source externe. Il détient les Planifications, les persiste hors du processus et les émet à leur heure locale. Se distingue de la Consolidation (processus planifié qui n'émet aucune Occurrence) et du Webhook (Source externe qui pousse).
+_Avoid_: Crontab, scheduler, job runner, minuterie, alarme
+
+**Planification**:
+Une entrée du Planificateur : un contenu et une règle temporelle, **ponctuelle** (un instant unique) ou **récurrente** (intervalle, quotidienne ou hebdomadaire, en heure locale de l'instance). Elle survit à un redémarrage et se crée, se modifie ou s'efface par les Tools du noyau. Son contenu est figé à la création.
+_Avoid_: Tâche, cron, job, rendez-vous, rappel (le **Rappel** est la recherche en mémoire)
+
+**Occurrence**:
+L'émission d'une Planification dans le Canal d'événements, à l'instant prévu. Elle emprunte la Source `planificateur`, attend le Repos comme tout fait, mais ne passe pas par le jugement : elle est toujours annoncée. Une occurrence manquée est rattrapée une fois si la Planification est ponctuelle, ignorée si elle est récurrente.
+_Avoid_: Déclenchement, tir, alerte, rappel planifié
 
 ### Console
 
@@ -444,6 +459,9 @@ _Avoid_: Raison, cause, status
   Événements neutres ; le noyau les met en attente hors Repos et les juge au Repos par un
   modèle texte, puis n'ouvre une Connexion Live que pour faire prononcer l'Annonce : une
   Session automatique n'apparaît qu'au moment de l'Annonce proactive.
+- **Planificateur → Canal d'événements**: Le Planificateur émet ses Occurrences à leur heure
+  locale ; elles attendent le Repos, puis sont annoncées sans jugement, et attendent qu'un
+  Client soit connecté comme toute Annonce.
 - **Événement → Session**: Un Événement n'est jamais injecté dans une Session active ; il
   attend la fin de la Session et est jugé au Repos.
 - **Connexion Live → Session**: Une Connexion Live ne devient une Session que si Athena

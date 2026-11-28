@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Mapping
 
-from server.app.config import SETTING_TARGETS
+from server.app.config import SETTING_TARGETS, system_timezone_name
 from server.core.settings import (
     SETTINGS,
     SURFACES,
@@ -145,6 +145,43 @@ def test_types_bounds_and_choices_are_reported_per_field() -> None:
         "consolidation_hours",
         "webhook_enabled",
     }
+
+
+def test_the_timezone_field_is_declared_with_its_own_kind() -> None:
+    states = {state.key: state for state in _states()}
+
+    assert states["timezone"].kind == "timezone"
+    assert states["schedule_db"].kind == "string"
+    assert states["schedule_db"].read_only is True
+
+
+def test_an_invalid_timezone_is_refused_per_field_without_any_write() -> None:
+    update, errors = validate_settings_update(
+        _complete(timezone="Mars/Olympus", voice="Puck"),
+        states=_states(),
+    )
+
+    assert update is None
+    assert set(errors) == {"timezone"}
+    assert "fuseau" in errors["timezone"].lower()
+
+
+def test_a_valid_timezone_is_written_in_its_iana_form() -> None:
+    # Une valeur égale au défaut système devient un retour au défaut, pas une
+    # écriture : le test choisit donc un fuseau distinct de celui de la machine.
+    target = (
+        "Europe/Paris"
+        if system_timezone_name() != "Europe/Paris"
+        else "Asia/Tokyo"
+    )
+    update, errors = validate_settings_update(
+        _complete(timezone=f" {target} "),
+        states=_states(loaded={"timezone": "UTC"}),
+    )
+
+    assert errors == {}
+    assert update is not None
+    assert update.writes == {"timezone": target}
 
 
 def test_values_are_written_in_their_canonical_form() -> None:

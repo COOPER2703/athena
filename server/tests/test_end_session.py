@@ -9,6 +9,7 @@ travers un vrai ``ToolRegistry``.
 from __future__ import annotations
 
 from harness import (
+    Presence,
     announcement,
     close_window,
     drive,
@@ -98,6 +99,7 @@ def _announcement_coordinator() -> Coordinator:
         user_id="alice",
         announce_prompt="JUGE",
         judge=FakeJudge(message="Porte ouverte"),
+        connected_clients=Presence("c1"),
     )
 
 

@@ -15,8 +15,10 @@ s'écrit donc `.venv/bin/python`).
 - Le protocole généré : `python protocol/proto/generate.py` (ou `make generate`).
 - Un micro et un haut-parleur accessibles au client (`pyaudio`).
 - Les dépendances à jour (ajoute `aiohttp`) : `uv sync`.
-- **Un Client connecté** : sans lui, le noyau juge quand même l'Événement, mais
-  `_registered_client_id` est vide et l'Annonce n'a **aucune cible** — personne ne l'entend.
+- **Un Client connecté** : sans lui, l'Événement **attend** dans la File d'attente, dans
+  l'ordre d'arrivée, et le report est tracé (`EventDeferred`, raison `no_client`). Dès que le
+  premier Client s'enregistre, la fenêtre s'ouvre et l'Événement est jugé : l'Annonce a
+  toujours une cible réellement connectée (ADR-0028).
 - Un **Compte** et deux **Jetons d'accès** (ADR-0017) : un `client` pour le Client audio, un
   `source` pour le Webhook. L'installation et la création des Jetons se font depuis la
   Console (`http://127.0.0.1:8767`, panneau Jetons), comme au smoke test T1.
@@ -230,11 +232,14 @@ serveur réel `WS_PORT=8791 ATHENA_WEBHOOK_PORT=8792`, base mémoire temporaire,
    INFO     [core] EventJudged {"announce": false, "events": 1, "from_state": "Idle", "to_state": "Idle"}
    ```
 
-5. **Aucun Client enregistré** — l'Annonce proactive est bien émise, mais sans cible : la
-   surface WebSocket ne trouve aucun client. C'est exactement le prérequis de l'étape 2 :
+5. **Aucun Client enregistré** — le fait reçu au Repos **attend** : la fenêtre ne s'ouvre
+   pas, aucune Connexion Live n'est tentée et le report est tracé. Dès qu'un Client
+   s'enregistre, la fenêtre s'ouvre et l'Événement est jugé — aucun `client_not_found` n'est
+   possible, l'Annonce ayant toujours une cible connectée (ADR-0028) :
 
    ```
-   WARNING [transport] client_not_found {"client_id": "", "type": "AnnounceSessionStarted"}
+   INFO [core] EventQueued   {"source": "matrix", "queued": 1, ...}
+   INFO [core] EventDeferred {"reason": "no_client", "events": 1, ...}
    ```
 
 6. **Arrêt propre** (`SIGTERM`) — la Session en vol se referme par le chemin déterministe :
