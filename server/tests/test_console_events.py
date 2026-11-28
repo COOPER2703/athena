@@ -5,7 +5,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import aiohttp
-from testkit import FakeJudge, RecordingTraceSink, wait_until
+import websockets
+from testkit import FakeJudge, RecordingTraceSink, register, url, wait_until
 
 from server.adapters.console import EVENTS_PATH, ConsoleAdapter
 from server.adapters.gemini import GeminiLiveAdapter
@@ -256,18 +257,22 @@ def test_an_injected_console_event_enters_the_channel_and_is_judged() -> None:
         try:
             await wait_until(lambda: bool(sink.of_kind("started")))
 
-            async with aiohttp.ClientSession() as http:
-                async with http.post(
-                    f"http://127.0.0.1:{console.port}{EVENTS_PATH}",
-                    json={"content": "porte ouverte"},
-                ) as response:
-                    assert response.status == 202
-                    assert await response.json() == {"status": "accepted"}
+            # La fenêtre ne s'ouvre qu'avec un Client connecté (ADR-0028) :
+            # on en enregistre un avant de pousser l'Événement.
+            async with websockets.connect(url(transport)) as ws:
+                await register(ws, transport, client_name="desktop", drain=False)
+                async with aiohttp.ClientSession() as http:
+                    async with http.post(
+                        f"http://127.0.0.1:{console.port}{EVENTS_PATH}",
+                        json={"content": "porte ouverte"},
+                    ) as response:
+                        assert response.status == 202
+                        assert await response.json() == {"status": "accepted"}
 
-            # L'Événement entre dans le Canal unique, ouvre la fenêtre, puis est
-            # jugé par le noyau avec sa Source par défaut.
-            await wait_until(lambda: bool(judge.calls))
-            await wait_until(lambda: bool(sink.of_kind("EventJudged")))
+                # L'Événement entre dans le Canal unique, ouvre la fenêtre, puis
+                # est jugé par le noyau avec sa Source par défaut.
+                await wait_until(lambda: bool(judge.calls))
+                await wait_until(lambda: bool(sink.of_kind("EventJudged")))
         finally:
             app.request_shutdown()
             await asyncio.wait_for(runner, 1.0)
