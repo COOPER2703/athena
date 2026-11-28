@@ -24,6 +24,7 @@ from server.adapters.console.contract import (
     SECRETS_PATH,
     SETTINGS_PATH,
 )
+from server.app.config import system_timezone_name
 from server_harness import running_server
 
 GEMINI_KEY = "cle-gemini-reglages-6f21"
@@ -103,6 +104,13 @@ def test_get_settings_reports_the_effective_value_default_and_source(
             assert log_level["value"] == "INFO"
             assert log_level["source"] == "default"
             assert log_level["read_only"] is False
+
+            # Le défaut contextuel du fuseau est le fuseau système, injecté par
+            # la racine : la valeur effective et sa source le prouvent.
+            timezone = settings["fields"]["timezone"]
+            assert timezone["source"] == "default"
+            assert timezone["value"] == system_timezone_name()
+            assert timezone["default"] == system_timezone_name()
             assert set(log_level["choices"]) == {
                 "DEBUG",
                 "INFO",

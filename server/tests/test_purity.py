@@ -7,6 +7,8 @@ CORE_DIR = Path(__file__).resolve().parent.parent / "core"
 
 FORBIDDEN = {
     "asyncio",
+    "os",
+    "pathlib",
     "socket",
     "ssl",
     "http",

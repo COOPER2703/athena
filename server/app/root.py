@@ -41,6 +41,7 @@ from server.app.config import (
     default_env_file,
     loaded_settings,
     parse_dotenv,
+    system_timezone_name,
 )
 from server.app.health import database_sizes
 from server.app.schedule_wakeup import AsyncioWakeup
@@ -86,6 +87,7 @@ from server.core.events import (
     EventReceived,
     LlmOpened,
     LlmTranscription,
+    OCCURRENCE_SOURCE,
     OccurrenceReceived,
     SessionRequested,
     ShutdownRequested,
@@ -484,7 +486,7 @@ class RuntimeFactory:
             sleep=asyncio.sleep,
             emit=self._emit_occurrence,
             trace=lambda kind, payload: emit(
-                trace_sink, "planificateur", kind, payload=payload
+                trace_sink, OCCURRENCE_SOURCE, kind, payload=payload
             ),
             wake=self._wakeup,
         )
@@ -1642,6 +1644,9 @@ def build_app(
             applied_store=applied_settings,
             process_env=dict(process_env),
             dotenv=dict(dotenv),
+            # Défaut contextuel : le fuseau système, connu de la racine seule.
+            # Le noyau déclare ``UTC`` et ne lit jamais l'environnement.
+            defaults={"timezone": system_timezone_name()},
         ),
         store=_settings_store(settings_store),
         secrets=settings_store,
