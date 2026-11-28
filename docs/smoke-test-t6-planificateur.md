@@ -60,7 +60,8 @@ sqlite3 schedule.db 'SELECT id, content, next_occurrence FROM schedules;'
 
 ## 3. Attendre l'heure, puis vérifier l'émission
 
-À l'échéance, le pump réclame la ligne, l'efface et émet l'Occurrence :
+À l'échéance, le pump réclame la ligne, émet l'Occurrence, puis efface la ponctuelle
+(l'effacement suit l'émission : un arrêt entre les deux réémet au pire une fois) :
 
 ```text
 INFO [planificateur] OccurrenceEmitted {"schedule_id": "sch_…", "kind": "once", "due": …}
