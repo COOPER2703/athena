@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Mapping, NamedTuple, Protocol, Sequence, runtime_checkable
+from zoneinfo import ZoneInfo
 
 from plugin_api import ToolSpec
 from protocol import SessionEndReason
@@ -203,6 +204,21 @@ class Clock(Protocol):
     def schedule(self, connection_id: str, timeout: float) -> None: ...
 
     def cancel(self, connection_id: str) -> None: ...
+
+
+class Wakeup(Protocol):
+    """Réveil d'une boucle endormie, possédé par l'application (ADR-0028).
+
+    Le noyau ne connaît ni ``asyncio`` ni un ``Event`` : il attend par ce port.
+    ``notify`` est la couture synchrone appelée après une écriture (création,
+    modification, suppression d'une Planification) ; ``wait`` dort au plus
+    ``timeout`` secondes (``None`` = jusqu'à un réveil) et rend la main sans
+    erreur à l'échéance comme au réveil.
+    """
+
+    def notify(self) -> None: ...
+
+    async def wait(self, timeout: float | None = None) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,6 +449,14 @@ class ScheduleStore(Protocol):
     def get(self, schedule_id: str) -> Schedule | None: ...
 
     def count(self) -> int: ...
+
+    def claim_due(
+        self,
+        now_epoch: int,
+        *,
+        startup: bool = False,
+        timezone: str | ZoneInfo | None = None,
+    ) -> Sequence[Schedule]: ...
 
 
 class MemoryStore(Protocol):

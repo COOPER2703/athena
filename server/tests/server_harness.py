@@ -149,7 +149,12 @@ from server.app.config import (
 )
 from server.app.root import App, build_app
 from server.core.events import TimerFired
-from server.core.ports import SecretResolver, SecretStore, SecretValidator
+from server.core.ports import (
+    SecretResolver,
+    SecretStore,
+    SecretValidator,
+    Wakeup,
+)
 
 # Logs du harnais : même niveau que la configuration par défaut.
 _LOG_LEVEL = "INFO"
@@ -1295,6 +1300,7 @@ async def running_server(
     restart_command: str = "docker restart athena",
     restart: Callable[[], None] | None = None,
     wall_clock: Callable[[], datetime] | None = None,
+    wakeup: Wakeup | None = None,
 ) -> AsyncIterator[AthenaServer]:
     """Démarre le serveur complet sur des ports éphémères et l'arrête à la sortie.
 
@@ -1364,6 +1370,7 @@ async def running_server(
         monotonic=clock,
         restart=restart,
         wall_clock=wall_clock,
+        wakeup=wakeup,
     )
     runner = asyncio.create_task(app.run())
     server = AthenaServer(
